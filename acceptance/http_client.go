@@ -71,6 +71,12 @@ func (b *RequestBuilder) WithInternalAuth(key, secret string) *RequestBuilder {
 	return b.withHeader("Authorization", "Basic "+encoded)
 }
 
+// WithTenant sets the interim X-Tenant-ID header that RequireTenant reads to
+// bind the request to a tenant for RLS (ADR-0004).
+func (b *RequestBuilder) WithTenant(tenantID string) *RequestBuilder {
+	return b.withHeader("X-Tenant-ID", tenantID)
+}
+
 func (b *RequestBuilder) do(t *testing.T, method, path string, body any) *TestResponse {
 	t.Helper()
 	var bodyReader io.Reader

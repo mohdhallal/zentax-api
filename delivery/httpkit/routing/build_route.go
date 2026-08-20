@@ -67,8 +67,16 @@ func buildRoute(route types.Route, router *Router) http.HandlerFunc {
 		writeResponse(w, r, response)
 	})
 
-	if config.Tx {
+	// A tenant-scoped route needs a transaction to carry the SET LOCAL
+	// app.tenant_id GUC that drives RLS (ADR-0004), so Tenant implies Tx.
+	if config.Tx || config.Tenant {
 		handler = middlewares.Transaction(router.Db)(handler)
+	}
+
+	// RequireTenant must wrap OUTSIDE Transaction so the tenant is bound to the
+	// context before WithinTransaction opens the tx and sets the GUC.
+	if config.Tenant {
+		handler = middlewares.RequireTenant()(handler)
 	}
 
 	if mp, ok := route.(types.RouteMiddlewareDefinition); ok {

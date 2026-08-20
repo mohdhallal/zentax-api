@@ -13,6 +13,7 @@ import (
 	"github.com/mohamadhallal/zentax-api/delivery/httpkit/types"
 	authpg "github.com/mohamadhallal/zentax-api/modules/auth/repositories/pg"
 	authuc "github.com/mohamadhallal/zentax-api/modules/auth/usecases"
+	"github.com/mohamadhallal/zentax-api/modules/entities"
 	"github.com/mohamadhallal/zentax-api/modules/health"
 	"github.com/mohamadhallal/zentax-api/platform/database"
 	"github.com/mohamadhallal/zentax-api/platform/metrics"
@@ -73,6 +74,7 @@ func New(cfg *config.Config, mode types.ServerMode) (*App, error) {
 	router := routing.NewRouter(chiRouter, mode, authValidator, db)
 
 	health.RegisterRoutes(router, mode)
+	entities.RegisterRoutes(router, ctr.EntityUseCases)
 
 	chiRouter.NotFound(httperr.NotFoundHandler())
 

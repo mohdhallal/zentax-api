@@ -33,6 +33,19 @@ func (s *Suite) TruncateTables() {
 	s.Require().NoError(err)
 }
 
+// InsertTenant inserts a tenant into the (RLS-free) registry and returns its id,
+// for use with WithTenant. Tenants are provisioned out of band (control-plane),
+// so tests seed them directly rather than through the tenant-scoped API.
+func (s *Suite) InsertTenant(slug, name string) uuid.UUID {
+	var id uuid.UUID
+	err := s.DB.QueryRowx(
+		`INSERT INTO tenants (slug, name) VALUES ($1, $2) RETURNING id`,
+		slug, name,
+	).Scan(&id)
+	s.Require().NoError(err)
+	return id
+}
+
 // InsertInternalAPIKey inserts a hashed key and returns cleartext key+secret
 // suitable for use with WithInternalAuth.
 func (s *Suite) InsertInternalAPIKey(appName string) (key, secret string) {

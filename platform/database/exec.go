@@ -6,6 +6,8 @@ import (
 	"fmt"
 
 	"github.com/jmoiron/sqlx"
+
+	"github.com/mohamadhallal/zentax-api/app"
 )
 
 type ctxKey string
@@ -69,6 +71,19 @@ func (e *Exec) WithinTransaction(ctx context.Context, fn func(ctx context.Contex
 			panic(p)
 		}
 	}()
+
+	// ADR-0004: bind the caller's tenant to this transaction so Postgres RLS
+	// isolates every query to that tenant. set_config(..., is_local=true) is
+	// exactly SET LOCAL — transaction-scoped, hence safe under connection
+	// pooling. A tenant-less transaction (e.g. health, or the tenants
+	// registry) simply leaves the GUC unset; RLS on tenant-scoped tables then
+	// fails closed (current_setting returns NULL → no rows match).
+	if tenantID := app.GetTenantID(ctx); tenantID != "" {
+		if _, err := tx.ExecContext(ctx, `SELECT set_config('app.tenant_id', $1, true)`, tenantID); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("bind tenant to transaction: %w", err)
+		}
+	}
 
 	if err := fn(txCtx); err != nil {
 		_ = tx.Rollback()

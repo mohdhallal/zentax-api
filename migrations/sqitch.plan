@@ -4,3 +4,5 @@
 20240101000000_appschema 2024-01-01T00:00:00Z laith.omar <laith.omar@dev> # Create pgcrypto extension and base schema setup
 20240101000005_internal_api_keys [20240101000000_appschema] 2024-01-01T00:00:05Z laith.omar <laith.omar@dev> # Create internal API keys table for internal auth
 20240101000006_nexus_accounts_api_keys [20240101000000_appschema] 2024-01-01T00:00:06Z laith.omar <laith.omar@dev> # Create nexus_accounts_api_keys table to store nexus external API credentials
+20260821000000_tenants [20240101000000_appschema] 2026-08-21T00:00:00Z Mohamad Hallal <mohdhallal@gmail.com> # Create tenants registry table (control-plane, no RLS)
+20260821000001_entities [20260821000000_tenants] 2026-08-21T00:00:01Z Mohamad Hallal <mohdhallal@gmail.com> # Create entities table (tenant-scoped, RLS by app.tenant_id)

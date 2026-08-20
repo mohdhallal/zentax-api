@@ -14,6 +14,7 @@ type RouteDefinition struct {
 	Path      string
 	Exposure  Exposure
 	Auth      bool
+	Tenant    bool // tenant-scoped: resolve the tenant and bind it for RLS (ADR-0004); implies Tx
 	Tx        bool
 	Paginated bool
 }
