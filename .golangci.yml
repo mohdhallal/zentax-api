@@ -1,0 +1,104 @@
+version: "2"
+
+run:
+  timeout: 5m
+  concurrency: 8
+
+output:
+  show-stats: true
+
+formatters:
+  enable:
+    - goimports
+    - gofmt
+    - gci
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - prefix(git.dtone.com/internal/go-api-boilerplate)
+
+linters:
+  default: none
+  enable:
+    - asasalint
+    - asciicheck
+    - bidichk
+    - bodyclose
+    - errcheck
+    - errname
+    - errorlint
+    - copyloopvar
+    - gocheckcompilerdirectives
+    # gochecknoglobals disabled: this architecture uses package-level vars for SQL configs, singletons, etc.
+    - goconst
+    - gocritic
+    - godot
+    - gosec
+    - govet
+    - ineffassign
+    - lll
+    - makezero
+    - mirror
+    # mnd disabled: too noisy for HTTP status codes, env defaults, string splits
+    - musttag
+    - nestif
+    - nilerr
+    - nilnil
+    - noctx
+    - nolintlint
+    - perfsprint
+    - reassign
+    - revive
+    - rowserrcheck
+    - staticcheck
+    - unconvert
+    - unparam
+    - unused
+  exclusions:
+    rules:
+      - path: "_test\\.go"
+        linters:
+          - bodyclose
+          - goconst
+          - gosec
+  settings:
+    errcheck:
+      check-type-assertions: true
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+        - experimental
+        - opinionated
+      settings:
+        captLocal:
+          paramsOnly: false
+        underef:
+          skipRecvDeref: false
+        hugeParam:
+          sizeThreshold: 256
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment
+    makezero:
+      always: true
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+    revive:
+      severity: error
+      rules:
+        - name: dot-imports
+        - name: import-alias-naming
+          arguments:
+            - "^[a-z][a-z0-9]{0,}$"
+        - name: import-shadowing
+    lll:
+      line-length: 170
+    rowserrcheck:
+      packages:
+        - github.com/jmoiron/sqlx

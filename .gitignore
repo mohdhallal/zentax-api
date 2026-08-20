@@ -1,0 +1,38 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/bin/
+/server
+
+# Test binary
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Go workspace
+go.work
+go.work.sum
+
+# Environment
+.env
+.env.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Vendor (local Docker builds only)
+/vendor/
+
+# OS
+.DS_Store
+Thumbs.db
+
+tmp/
+acceptance/test-output/

@@ -1,0 +1,6 @@
+%syntax-version=1.0.0
+%project=zentax-api
+
+20240101000000_appschema 2024-01-01T00:00:00Z laith.omar <laith.omar@dev> # Create pgcrypto extension and base schema setup
+20240101000005_internal_api_keys [20240101000000_appschema] 2024-01-01T00:00:05Z laith.omar <laith.omar@dev> # Create internal API keys table for internal auth
+20240101000006_nexus_accounts_api_keys [20240101000000_appschema] 2024-01-01T00:00:06Z laith.omar <laith.omar@dev> # Create nexus_accounts_api_keys table to store nexus external API credentials

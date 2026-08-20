@@ -1,0 +1,72 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: secretgol
+      POSTGRES_DB: golang-api
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d golang-api"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  migrate:
+    image: sqitch/sqitch:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ../migrations:/repo
+    command: deploy db:pg://admin:secretgol@postgres:5432/golang-api
+
+  app-external:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.dev
+      ssh:
+        - default
+      secrets:
+        - CI_JOB_TOKEN
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - ..:/app/srv/api
+    environment:
+      APP_ENV: development
+      DATABASE_URL: postgres://admin:secretgol@postgres:5432/golang-api?sslmode=disable
+    ports:
+      - "3000:3000"
+
+  app-internal:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.dev
+      ssh:
+        - default
+      secrets:
+        - CI_JOB_TOKEN
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - ..:/app/srv/api
+    command: air -c .air.internal.toml
+    environment:
+      APP_ENV: development
+      DATABASE_URL: postgres://admin:secretgol@postgres:5432/golang-api?sslmode=disable
+      SERVER_MODE: internal
+    ports:
+      - "3001:3001"
+
+volumes:
+  pgdata:
+
+secrets:
+  CI_JOB_TOKEN:
+    environment: CI_JOB_TOKEN

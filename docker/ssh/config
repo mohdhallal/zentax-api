@@ -1,0 +1,3 @@
+Host git.dtone.com
+  StrictHostKeyChecking no
+  Port 10022

@@ -1,0 +1,30 @@
+all: false
+dir: '{{.InterfaceDir}}'
+pkgname: '{{.SrcPackageName}}'
+filename: '{{.SrcPackageName}}_mock.go'
+force-file-write: true
+formatter: goimports
+require-template-schema-exists: true
+template: testify
+template-schema: '{{.Template}}.schema.json'
+packages:
+  git.dtone.com/internal/go-api-boilerplate/modules/auth/domain:
+    config:
+      all: true
+      filename: 'domain_mock.go'
+      structname: '{{.InterfaceName}}Mock'
+  git.dtone.com/internal/go-api-boilerplate/modules/orders/domain:
+    config:
+      all: true
+      filename: 'domain_mock.go'
+      structname: '{{.InterfaceName}}Mock'
+  git.dtone.com/internal/go-api-boilerplate/modules/payments/domain:
+    config:
+      all: true
+      filename: 'domain_mock.go'
+      structname: '{{.InterfaceName}}Mock'
+  git.dtone.com/internal/go-api-boilerplate/modules/users/domain:
+    config:
+      all: true
+      filename: 'domain_mock.go'
+      structname: '{{.InterfaceName}}Mock'

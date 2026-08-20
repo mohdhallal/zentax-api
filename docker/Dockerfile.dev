@@ -1,0 +1,30 @@
+FROM golang:1.26.2-alpine
+
+RUN apk --no-cache add --upgrade git openssh-client ca-certificates
+
+ENV APP_DIR=/app/srv/api
+
+RUN mkdir -p /root/.ssh
+
+COPY docker/ssh/config /root/.ssh/
+COPY docker/git/.gitconfig /root/
+
+WORKDIR ${APP_DIR}
+COPY go.mod go.sum ./
+
+RUN --mount=type=ssh --mount=type=secret,id=CI_JOB_TOKEN \
+  chmod 600 /root/.ssh/config && \
+  if [ -f /run/secrets/CI_JOB_TOKEN ]; then \
+    TOKEN=$(cat /run/secrets/CI_JOB_TOKEN) && \
+    printf "machine git.dtone.com\n  login gitlab-ci-token\n  password %s\n" \
+      "$TOKEN" > /root/.netrc && \
+    chmod 600 /root/.netrc && \
+    rm -f /root/.gitconfig; \
+  fi && \
+  go mod download
+
+RUN go install github.com/air-verse/air@latest
+
+EXPOSE 3000 3001
+
+CMD ["air", "-c", ".air.external.toml"]

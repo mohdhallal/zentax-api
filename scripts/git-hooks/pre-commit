@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+GOPATH=$(go env GOPATH)
+GOBIN="${GOPATH}/bin"
+GCI_EXE="${GOBIN}/gci"
+GOLANGCI_EXE="${GOBIN}/golangci-lint"
+MODULE_NAME="git.dtone.com/internal/go-api-boilerplate"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+staged_go_files=$(git diff --cached --name-only --diff-filter=ACM -- '*.go' || true)
+
+if [ -z "$staged_go_files" ]; then
+    exit 0
+fi
+
+echo -e "${YELLOW}pre-commit: checking staged Go files...${NC}"
+
+# ── Check tools installed ────────────────────────────────────
+
+if [ ! -x "$GOLANGCI_EXE" ] || [ ! -x "$GCI_EXE" ]; then
+    echo -e "${RED}Lint tools not installed. Run: make lint-install${NC}"
+    exit 1
+fi
+
+# ── Format ───────────────────────────────────────────────────
+
+echo -e "  gofmt..."
+gofmt -l -w $staged_go_files
+
+echo -e "  gci..."
+$GCI_EXE write --skip-generated -s standard -s default -s "prefix(${MODULE_NAME})" $staged_go_files 2>/dev/null
+
+# Re-stage formatted files
+echo "$staged_go_files" | xargs git add
+
+# ── Lint ─────────────────────────────────────────────────────
+
+echo -e "  golangci-lint..."
+if ! $GOLANGCI_EXE run --new-from-rev=HEAD ./...; then
+    echo -e "${RED}Lint failed. Fix issues or run: make lint-fix${NC}"
+    exit 1
+fi
+
+# ── Vet ──────────────────────────────────────────────────────
+
+echo -e "  go vet..."
+if ! go vet ./...; then
+    echo -e "${RED}go vet failed.${NC}"
+    exit 1
+fi
+
+# ── Sergio Code Reviewer (AI) ───────────────────────────────
+# Toggle: AI_REVIEW=0 git commit -m "urgent fix"
+# Uses the review-code skill from the enabled go-skills Claude plugin
+
+AI_REVIEW="${AI_REVIEW:-1}"
+REVIEW_PLUGIN="go-skills@ezra-plugins"
+REVIEW_SKILL_PATH="skills/review-code/SKILL.md"
+REVIEW_SKILL_CMD="/go-skills:review-code"
+SCRIPT_DIR="$(git rev-parse --show-toplevel)/scripts"
+source "$SCRIPT_DIR/claude-run.sh"
+
+find_enabled_plugin_path() {
+    "$CLAUDE_EXE" plugin list --json 2>/dev/null | awk -v plugin_id="$REVIEW_PLUGIN" '
+        /^[[:space:]]*\{/ {
+            id = ""
+            enabled = 0
+            install_path = ""
+        }
+        /"id":[[:space:]]*/ {
+            value = $0
+            sub(/^[^:]*:[[:space:]]*"/, "", value)
+            sub(/",?[[:space:]]*$/, "", value)
+            id = value
+        }
+        /"enabled":[[:space:]]*true/ {
+            enabled = 1
+        }
+        /"installPath":[[:space:]]*/ {
+            value = $0
+            sub(/^[^:]*:[[:space:]]*"/, "", value)
+            sub(/",?[[:space:]]*$/, "", value)
+            install_path = value
+        }
+        /^[[:space:]]*\}/ && id == plugin_id && enabled && install_path != "" {
+            print install_path
+            exit
+        }
+    '
+}
+
+if [ "$AI_REVIEW" = "0" ]; then
+    echo -e "${YELLOW}  sergio (AI review) skipped — AI_REVIEW=0${NC}"
+else
+    CLAUDE_EXE=$(command -v claude 2>/dev/null || true)
+
+    if [ -z "$CLAUDE_EXE" ]; then
+        echo -e "${YELLOW}  sergio: claude CLI not found — skipping AI review${NC}"
+    else
+        REVIEW_PLUGIN_PATH=$(find_enabled_plugin_path || true)
+
+        if [ -z "$REVIEW_PLUGIN_PATH" ]; then
+            echo -e "${YELLOW}  sergio: $REVIEW_PLUGIN is not installed and enabled — skipping AI review${NC}"
+        elif [ ! -f "$REVIEW_PLUGIN_PATH/$REVIEW_SKILL_PATH" ]; then
+            echo -e "${YELLOW}  sergio: $REVIEW_SKILL_CMD skill not found in $REVIEW_PLUGIN — skipping AI review${NC}"
+        else
+            echo -e "${CYAN}${BOLD}  🤓 Sergio AI is reviewing your code...${NC}"
+
+            DIFF=$(git diff --cached -- $staged_go_files)
+
+            if [ -z "$DIFF" ]; then
+                echo -e "${GREEN}  sergio: no staged Go changes — skipping${NC}"
+            else
+                REVIEW=$(claude_run "$CLAUDE_EXE" "$REVIEW_SKILL_CMD") || true
+
+                if echo "$REVIEW" | grep -qE "^\*{0,2}FAIL\*{0,2}"; then
+                    echo -e "${RED}${BOLD}  🚫 Sergio says nitpick:${NC}"
+                    echo -e "${MAGENTA}$REVIEW${NC}"
+                    exit 1
+                elif echo "$REVIEW" | grep -qE "^\*{0,2}PASS\*{0,2}"; then
+                    echo -e "${GREEN}${BOLD}  🧑‍💻✅ Sergio approved. Ship it!${NC}"
+                else
+                    echo -e "${YELLOW}  🤔 Sergio mumbled something unexpected:${NC}"
+                    echo "$REVIEW"
+                    echo -e "${YELLOW}  Proceeding anyway.${NC}"
+                fi
+            fi
+        fi
+    fi
+fi
+
+echo -e "${GREEN}pre-commit: all checks passed.${NC}"

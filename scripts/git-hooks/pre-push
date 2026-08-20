@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+NC='\033[0m'
+
+echo -e "${YELLOW}pre-push: running tests...${NC}"
+
+if ! go test ./... -count=1 -timeout=120s; then
+    echo -e "${RED}Tests failed. Push aborted.${NC}"
+    exit 1
+fi
+
+echo -e "${GREEN}pre-push: all tests passed.${NC}"
