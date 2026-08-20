@@ -7,3 +7,4 @@
 20260821000000_tenants [20240101000000_appschema] 2026-08-21T00:00:00Z Mohamad Hallal <mohdhallal@gmail.com> # Create tenants registry table (control-plane, no RLS)
 20260821000001_entities [20260821000000_tenants] 2026-08-21T00:00:01Z Mohamad Hallal <mohdhallal@gmail.com> # Create entities table (tenant-scoped, RLS by app.tenant_id)
 20260821000002_obligation_types [20260821000000_tenants] 2026-08-21T00:00:02Z Mohamad Hallal <mohdhallal@gmail.com> # Create obligation_types table (tenant-scoped, RLS)
+20260821000003_entity_obligations [20260821000001_entities 20260821000002_obligation_types] 2026-08-21T00:00:03Z Mohamad Hallal <mohdhallal@gmail.com> # Create entity_obligations link table (tenant-scoped, RLS, JSONB deadline rule)
