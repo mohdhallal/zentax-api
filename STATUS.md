@@ -44,21 +44,34 @@ Migrations (sqitch): `tenants`, `entities`, `obligation_types`, `entity_obligati
 `workflows`, `workflow_tasks`, `task_instances` (+ boilerplate `appschema`,
 `internal_api_keys`, `nexus_accounts_api_keys`).
 
+**Auth / identity (Increment A):** first-party email/password + server-side sessions + TOTP MFA
+(`modules/identity`, `platform/crypto`); `RequireSession` supplies the tenant from the session (the
+`X-Tenant-ID` header is gone); `cmd/seed-admin` bootstraps the first tenant + admin. See the Auth
+section under "remaining" for what is left (scoped-RBAC enforcement, WorkOS).
+
 Commits: `4cdcd4e` scaffold · `2851179` tenancy+entities · `d074780` obligation-types ·
 `94070d9` entity-obligations · `d91158c` workflows · `f85970a` workflow-tasks ·
-`c52c25a` task-instances+generation.
+`c52c25a` task-instances+generation · `b63852d` identity module · `e1c186b` wire auth (Increment A).
 
 ---
 
 ## What is missing / remaining
 
-### 🔴 Auth & authorization — the biggest gap (blocks any real deployment)
-- **No real authentication.** The API trusts an **interim `X-Tenant-ID` header**
-  (`RequireTenant`, marked `TODO(ADR-0011)`). There is no user identity, login, or session.
-  → Need server-side session cookies + **WorkOS** SSO/SCIM (ADR-0011); resolve the tenant
-  (and verify membership) from the authenticated session, not a header.
-- **No in-tenant authorization** (ADR-0012 scoped RBAC: grants + entity closure table). Not started.
-- Consequence: **do not expose the API as-is.**
+### 🟠 Auth & authorization
+- **Authentication + sessions — DONE (Increment A, ADR-0011).** First-party email/password
+  (argon2id) + server-side sessions (httpOnly + SameSite=Strict cookie, token stored hashed,
+  rotation on login/MFA, idle + absolute TTLs, failed-attempt lockout) + **TOTP MFA**
+  (enroll/enable/verify). The tenant now comes from the authenticated **session** (`RequireSession`);
+  the interim `X-Tenant-ID` header is **gone**. First user via **`cmd/seed-admin`**. `modules/identity`
+  + `platform/crypto`; auth endpoints under `/auth/*`.
+- **Remaining:**
+  - **Scoped-RBAC enforcement (Increment B).** The `user_grants` + `entity_closure` schema exist, but
+    per-endpoint capability checks over entity subtrees **do not run yet** — so **any logged-in user of
+    a tenant currently has full access within that tenant** (preparer≠approver SoD, scoped advisors: not
+    enforced). (ADR-0012)
+  - **WorkOS SSO/SCIM (Phase 2).** `IdentityBroker` seam is stubbed only.
+  - Breach-checked passwords (HIBP), password-reset / invite flows, Redis session store (Postgres for now).
+- Consequence: the API is authenticated + tenant-isolated, but **not yet intra-tenant authorized**.
 
 ### 🟠 Domain features still to build
 - **Data Templates** module — `workflow_tasks.data_template_id` / `task_instances.data_template_id`
