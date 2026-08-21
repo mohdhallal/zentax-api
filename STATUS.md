@@ -126,7 +126,11 @@ Commits: `4cdcd4e` scaffold · `2851179` tenancy+entities · `d074780` obligatio
 - Feature flags / entitlements (ADR-0010); region/residency cells + control-plane (ADR-0005).
 
 ### 🟡 Frontend integration
-- **OpenAPI spec (httpkit) → generated TS client** — not generated. The React frontend
+- **OpenAPI spec: GENERATED (correction 2026-08-21)** — the boilerplate's `delivery/httpkit/swagger`
+  reflects the route registry + DTO validator tags (required/enums/min-max) into an **OpenAPI 3.0.3 spec
+  served at `/swagger/spec.json`** (+ `/swagger` UI). Gaps in the spec: security schemes still describe the
+  boilerplate's gateway/basic auth (not the session cookie), `RouteDefinition.Capability` isn't surfaced,
+  and response bodies aren't schematized. **The TS client is NOT generated yet** — the React frontend
   (`../TaxFlowReports`) is still on MSW mocks.
 - **Strip `server/` from `TaxFlowReports`** — deferred until the Go API + client replace the Express dev server.
 
