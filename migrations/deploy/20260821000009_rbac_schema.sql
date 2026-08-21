@@ -13,8 +13,10 @@ CREATE TABLE user_grants (
         REFERENCES tenants(id) ON DELETE CASCADE,
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     role VARCHAR(30) NOT NULL, -- tenant_admin | manager | reviewer | preparer | viewer
-    scope_entity_id UUID REFERENCES entities(id) ON DELETE CASCADE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    scope_entity_id UUID,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    -- composite FK so a grant can't scope to another tenant's entity (FK bypasses RLS)
+    FOREIGN KEY (tenant_id, scope_entity_id) REFERENCES entities(tenant_id, id) ON DELETE CASCADE
 );
 
 CREATE INDEX idx_user_grants_tenant_id ON user_grants(tenant_id);
@@ -31,10 +33,13 @@ CREATE POLICY tenant_isolation ON user_grants
 CREATE TABLE entity_closure (
     tenant_id UUID NOT NULL DEFAULT NULLIF(current_setting('app.tenant_id', true), '')::uuid
         REFERENCES tenants(id) ON DELETE CASCADE,
-    ancestor_id UUID NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
-    descendant_id UUID NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    ancestor_id UUID NOT NULL,
+    descendant_id UUID NOT NULL,
     depth SMALLINT NOT NULL,
-    PRIMARY KEY (ancestor_id, descendant_id)
+    PRIMARY KEY (ancestor_id, descendant_id),
+    -- composite FKs: closure rows can't span tenants (FK bypasses RLS)
+    FOREIGN KEY (tenant_id, ancestor_id) REFERENCES entities(tenant_id, id) ON DELETE CASCADE,
+    FOREIGN KEY (tenant_id, descendant_id) REFERENCES entities(tenant_id, id) ON DELETE CASCADE
 );
 
 CREATE INDEX idx_entity_closure_tenant_id ON entity_closure(tenant_id);

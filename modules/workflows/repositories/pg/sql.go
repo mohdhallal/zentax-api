@@ -19,8 +19,9 @@ var sqlConfig = baserepo.SQLConfig{
 		"obligation_type_id": true,
 		"financial_year":     true,
 	},
-	DefaultOrderBy: "created_at",
-	GetById:        `SELECT ` + workflowColumns + ` FROM workflows WHERE id = $1 LIMIT 1`,
+	DefaultOrderBy:   "created_at",
+	DefaultOrderDesc: true, // newest first
+	GetById:          `SELECT ` + workflowColumns + ` FROM workflows WHERE id = $1 LIMIT 1`,
 	// tenant_id defaults from the GUC; selected_periods/due_date_rule/status default in DDL.
 	Create: `
 		INSERT INTO workflows (

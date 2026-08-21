@@ -28,8 +28,11 @@ func (s *Suite) TruncateTables() {
 		quoted = append(quoted, `"`+strings.ReplaceAll(table, `"`, `""`)+`"`)
 	}
 
+	// No RESTART IDENTITY: our tables use UUID keys (no identity sequences to
+	// reset), and RESTART IDENTITY would require sequence ownership the non-owner
+	// app role doesn't have.
 	_, err = s.DB.Exec(fmt.Sprintf(
-		"TRUNCATE TABLE %s RESTART IDENTITY CASCADE",
+		"TRUNCATE TABLE %s CASCADE",
 		strings.Join(quoted, ", "),
 	))
 	s.Require().NoError(err)

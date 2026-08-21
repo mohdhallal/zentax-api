@@ -19,9 +19,11 @@ green on both the main module and `acceptance/`.
 - **Multi-tenancy (ADR-0004):** `tenant_id` on every domain table + Postgres **RLS**
   (`ENABLE` + `FORCE` + isolation policy). The tenant GUC (`app.tenant_id`) is set
   with `SET LOCAL` inside `database.Exec.WithinTransaction` (the Tx seam) — pooling-safe.
-  A declarative `RouteDefinition.Tenant` flag wires the `RequireTenant` middleware +
-  the transaction. Cross-table FKs are RLS-scoped, so a cross-tenant reference fails
-  the FK check (→ 400) instead of leaking.
+  A declarative `RouteDefinition.Tenant` flag wires the `RequireSession` middleware +
+  the transaction. Cross-table FKs are **composite `(tenant_id, id)`** so a cross-tenant
+  reference fails the FK check (→ 400): Postgres FK validation *bypasses* RLS, so an
+  id-only FK would silently admit the cross-tenant link (found + fixed on the first
+  live-Postgres run — see below).
 - **Legal dates (ADR-0002):** `shared/dateonly.Date` — a timezone-agnostic `YYYY-MM-DD`
   type (sql Scanner/Valuer for pg `date`, JSON). Used for all legal-date columns.
 - **Deadline engine:** `shared/deadline` — a Go port of the frontend's tested
@@ -106,16 +108,32 @@ Commits: `4cdcd4e` scaffold · `2851179` tenancy+entities · `d074780` obligatio
 
 ---
 
-## ⚠️ Operational caveats — read before running
-- **Never actually run against Postgres yet.** Everything is green under `go build/vet/test`,
-  and the acceptance tests encode the SQL + RLS + generation behavior — but **no live boot +
-  `sqitch deploy` has been executed**. First real run needs verifying.
-- **Running requires** a Postgres with the sqitch migrations applied. The app must connect as a
-  **non-owner, non-`BYPASSRLS` role** — `FORCE ROW LEVEL SECURITY` applies to the table owner, but a
-  `BYPASSRLS`/superuser connection would silently defeat tenant isolation. (Migrations run as a
-  privileged role; the app must not.)
-- **Acceptance tests** (`acceptance/`, separate Go module) need `TEST_DATABASE_URL` + migrations.
-  They compile in CI/sandbox but only *run* against a live DB.
+## ✅ Verified against live Postgres (2026-08-21)
+First real end-to-end run on **Postgres 14** (local Homebrew cluster, connecting as a
+**non-superuser `zentax_app` role** so RLS is genuinely enforced):
+- All **13 migrations apply cleanly**; **all 8 acceptance suites pass** against the live DB
+  (`TEST_DATABASE_URL` → the non-`BYPASSRLS` role).
+- **Live server boot** (`cmd/server` on :3000) + **`cmd/seed-admin`** (tenant + admin + grant) +
+  real HTTP: `POST /auth/login` sets the session cookie, `GET /auth/me` is **200 with it / 401
+  without**, authed CRUD works, and a **second tenant sees zero of the first tenant's rows**
+  (RLS tenant isolation, demonstrated live).
+- **Two bugs found + fixed on this run:**
+  1. **Cross-tenant FK bypass** — Postgres FK checks bypass RLS, so id-only FKs admitted
+     cross-tenant references. Fixed with **composite `(tenant_id, id)` FKs** (parents carry a
+     `UNIQUE (tenant_id, id)` target; children reference `(tenant_id, fk_id)`).
+  2. **List ordering** was blanket-`DESC`. Added a per-repo `DefaultOrderDesc` flag:
+     `created_at` stays newest-first; **task-instances (`due_date`) + workflow-tasks
+     (`order_index`) now sort ASC** — earliest deadline / natural step order.
+
+### Runbook — local Postgres (no Docker needed)
+- Migrations run as a privileged role (pgcrypto needs superuser); the **app + tests must connect
+  as a non-owner, non-`BYPASSRLS` role** — `FORCE ROW LEVEL SECURITY` binds the owner too, but a
+  `BYPASSRLS`/superuser connection silently defeats isolation.
+- `initdb` a throwaway cluster (or reuse one), apply `migrations/deploy/*.sql` in **lexical order**
+  via `psql` (= dependency order; sqitch not required for a scratch DB), then
+  `GRANT SELECT,INSERT,UPDATE,DELETE,TRUNCATE ON ALL TABLES IN SCHEMA public TO zentax_app`.
+- Point the app/tests at the app role via `DATABASE_URL` / `TEST_DATABASE_URL =
+  postgres://zentax_app:...@host/zentax?sslmode=disable` (`DATABASE_URL` overrides config).
 - Build with gvm Go 1.27: `export GOROOT="$HOME/.gvm/gos/go1.27"; export PATH="$GOROOT/bin:$PATH"`.
 
 ## Minor tech debt

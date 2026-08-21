@@ -20,7 +20,11 @@ CREATE TABLE entities (
     financial_year_end VARCHAR(5), -- MM-DD, a legal date-only value (ADR-0002)
     status VARCHAR(20) NOT NULL DEFAULT 'active',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    -- Composite target so child tables can FK on (tenant_id, id). Postgres FK
+    -- checks BYPASS RLS, so an id-only FK would admit a cross-tenant reference;
+    -- pinning tenant_id into the key makes a cross-tenant id fail the FK.
+    UNIQUE (tenant_id, id)
 );
 
 CREATE INDEX idx_entities_tenant_id ON entities(tenant_id);

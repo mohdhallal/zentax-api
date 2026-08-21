@@ -4,13 +4,14 @@ BEGIN;
 -- Task instances are the actual per-period tasks generated from workflow task
 -- templates when a workflow is started. due_date / period_end_date /
 -- filing_deadline are DATE (legal date-only, ADR-0002 — never a timestamp).
--- Tenant-scoped; workflow_id / workflow_task_id FKs are RLS-scoped.
+-- Tenant-scoped; the workflow_id / workflow_task_id FKs are COMPOSITE on
+-- (tenant_id, id) so a cross-tenant reference fails the FK check (bypasses RLS).
 CREATE TABLE task_instances (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id UUID NOT NULL DEFAULT NULLIF(current_setting('app.tenant_id', true), '')::uuid
         REFERENCES tenants(id) ON DELETE CASCADE,
-    workflow_id UUID NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
-    workflow_task_id UUID NOT NULL REFERENCES workflow_tasks(id) ON DELETE CASCADE,
+    workflow_id UUID NOT NULL,
+    workflow_task_id UUID NOT NULL,
     period_code VARCHAR(10) NOT NULL,
     name TEXT NOT NULL,
     description TEXT,
@@ -30,7 +31,9 @@ CREATE TABLE task_instances (
     tax_data JSONB,
     tax_data_status VARCHAR(20) NOT NULL DEFAULT 'draft',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    FOREIGN KEY (tenant_id, workflow_id) REFERENCES workflows(tenant_id, id) ON DELETE CASCADE,
+    FOREIGN KEY (tenant_id, workflow_task_id) REFERENCES workflow_tasks(tenant_id, id) ON DELETE CASCADE
 );
 
 CREATE INDEX idx_task_instances_tenant_id ON task_instances(tenant_id);

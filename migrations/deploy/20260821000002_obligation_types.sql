@@ -17,7 +17,8 @@ CREATE TABLE obligation_types (
     description TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (tenant_id, code)
+    UNIQUE (tenant_id, code),
+    UNIQUE (tenant_id, id) -- composite FK target (Postgres FK checks bypass RLS)
 );
 
 CREATE INDEX idx_obligation_types_tenant_id ON obligation_types(tenant_id);

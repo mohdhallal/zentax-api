@@ -17,8 +17,9 @@ var sqlConfig = baserepo.SQLConfig{
 		"status":             true,
 		"jurisdiction":       true,
 	},
-	DefaultOrderBy: "created_at",
-	GetById:        `SELECT ` + entityObligationColumns + ` FROM entity_obligations WHERE id = $1 LIMIT 1`,
+	DefaultOrderBy:   "created_at",
+	DefaultOrderDesc: true, // newest first
+	GetById:          `SELECT ` + entityObligationColumns + ` FROM entity_obligations WHERE id = $1 LIMIT 1`,
 	// tenant_id defaults from the GUC; status/deadline_rule default in DDL.
 	Create: `
 		INSERT INTO entity_obligations (entity_id, obligation_type_id, jurisdiction, periodicity, deadline_rule)

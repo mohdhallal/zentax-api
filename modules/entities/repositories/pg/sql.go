@@ -16,8 +16,9 @@ var sqlConfig = baserepo.SQLConfig{
 		"status":           true,
 		"parent_entity_id": true,
 	},
-	DefaultOrderBy: "created_at",
-	GetById:        `SELECT ` + entityColumns + ` FROM entities WHERE id = $1 LIMIT 1`,
+	DefaultOrderBy:   "created_at",
+	DefaultOrderDesc: true, // newest first
+	GetById:          `SELECT ` + entityColumns + ` FROM entities WHERE id = $1 LIMIT 1`,
 	// tenant_id is omitted on purpose: it defaults from the app.tenant_id GUC.
 	Create: `
 		INSERT INTO entities (parent_entity_id, name, legal_name, country, tax_residency, fiscal_calendar_pattern, financial_year_end)

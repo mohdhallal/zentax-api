@@ -20,6 +20,10 @@ type SQLConfig struct {
 	ListBase       string
 	AllowedColumns map[string]bool
 	DefaultOrderBy string
+	// DefaultOrderDesc sorts the default column descending (e.g. created_at →
+	// newest first). Leave false for columns whose natural order is ascending:
+	// due_date (earliest deadline first) and order_index (step order).
+	DefaultOrderDesc bool
 }
 
 type BaseRepo[T any, ID comparable] struct {
@@ -73,7 +77,11 @@ func (r *BaseRepo[T, ID]) List(ctx context.Context, args sharedtypes.ListArgs) (
 		orderClauses = append(orderClauses, sf.Column+" "+dir)
 	}
 	if len(orderClauses) == 0 {
-		orderClauses = []string{r.SQL.DefaultOrderBy + " DESC"}
+		dir := "ASC"
+		if r.SQL.DefaultOrderDesc {
+			dir = "DESC"
+		}
+		orderClauses = []string{r.SQL.DefaultOrderBy + " " + dir}
 	}
 	sb.WriteString(" ORDER BY ")
 	sb.WriteString(strings.Join(orderClauses, ", "))
