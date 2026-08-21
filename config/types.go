@@ -1,6 +1,11 @@
 package config
 
-import "github.com/mohamadhallal/zentax-api/logger"
+import (
+	"encoding/base64"
+	"fmt"
+
+	"github.com/mohamadhallal/zentax-api/logger"
+)
 
 type Config struct {
 	EnvName          string                 `json:"-"`
@@ -12,6 +17,7 @@ type Config struct {
 	Metrics          MetricsConfig          `json:"metrics"`
 	Log              *logger.Config         `json:"log"`
 	NexusInternalAPI NexusInternalAPIConfig `json:"nexusInternalApi"`
+	Auth             AuthConfig             `json:"auth"`
 }
 
 func (c *Config) IsDevelopment() bool {
@@ -63,4 +69,30 @@ type NexusInternalAPIConfig struct {
 	TimeoutMs      int    `json:"timeoutMs"`
 	DefaultRPS     int    `json:"defaultRps"`
 	DefaultKeyType string `json:"defaultKeyType"`
+}
+
+// AuthConfig configures first-party auth (ADR-0011).
+type AuthConfig struct {
+	// EncryptionKey is a base64 (std) encoding of a 32-byte AES-256 key used for
+	// field-level secret encryption (TOTP seeds). Interim until ADR-0006 per-tenant
+	// KMS keys; required (and validated) outside development.
+	EncryptionKey string `json:"encryptionKey"`
+
+	SessionCookieName       string `json:"sessionCookieName"`
+	SessionCookieSecure     bool   `json:"sessionCookieSecure"`
+	SessionIdleTTLMinutes   int    `json:"sessionIdleTtlMinutes"`
+	SessionAbsoluteTTLHours int    `json:"sessionAbsoluteTtlHours"`
+}
+
+// DecodeEncryptionKey returns the raw 32-byte AES key, or an error if it is
+// missing or the wrong length.
+func (a AuthConfig) DecodeEncryptionKey() ([]byte, error) {
+	key, err := base64.StdEncoding.DecodeString(a.EncryptionKey)
+	if err != nil {
+		return nil, fmt.Errorf("auth.encryptionKey is not valid base64: %w", err)
+	}
+	if len(key) != 32 {
+		return nil, fmt.Errorf("auth.encryptionKey must decode to 32 bytes, got %d", len(key))
+	}
+	return key, nil
 }

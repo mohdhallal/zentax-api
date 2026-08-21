@@ -11,3 +11,6 @@
 20260821000004_workflows [20260821000001_entities 20260821000002_obligation_types] 2026-08-21T00:00:04Z Mohamad Hallal <mohdhallal@gmail.com> # Create workflows table (recurring/project, tenant-scoped, RLS, JSONB periods + due-date rule)
 20260821000005_workflow_tasks [20260821000004_workflows] 2026-08-21T00:00:05Z Mohamad Hallal <mohdhallal@gmail.com> # Create workflow_tasks table (task templates, tenant-scoped, RLS, JSONB required documents)
 20260821000006_task_instances [20260821000005_workflow_tasks] 2026-08-21T00:00:06Z Mohamad Hallal <mohdhallal@gmail.com> # Create task_instances table (generated per-period tasks, tenant-scoped, RLS, DATE legal dates)
+20260821000007_users [20260821000000_tenants] 2026-08-21T00:00:07Z Mohamad Hallal <mohdhallal@gmail.com> # Create users table (app-owned identity, not RLS — login queries pre-context)
+20260821000008_sessions [20260821000007_users] 2026-08-21T00:00:08Z Mohamad Hallal <mohdhallal@gmail.com> # Create sessions table (server-side sessions, hashed token, not RLS)
+20260821000009_rbac_schema [20260821000007_users 20260821000001_entities] 2026-08-21T00:00:09Z Mohamad Hallal <mohdhallal@gmail.com> # Create user_grants + entity_closure (scoped-RBAC schema, RLS; enforced in a later increment)

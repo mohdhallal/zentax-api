@@ -52,6 +52,13 @@ func (c *Config) validate() error {
 	if c.App.Port == 0 {
 		return fmt.Errorf("app.port is required")
 	}
+	// Fail closed on missing/invalid auth secrets in deployed environments
+	// (ADR-0014). Development and testing may omit them.
+	if c.App.Env == "production" || c.App.Env == "staging" {
+		if _, err := c.Auth.DecodeEncryptionKey(); err != nil {
+			return fmt.Errorf("invalid auth config: %w", err)
+		}
+	}
 	return nil
 }
 

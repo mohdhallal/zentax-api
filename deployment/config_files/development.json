@@ -57,5 +57,12 @@
     "timeoutMs": 5000,
     "defaultRps": 1,
     "defaultKeyType": "DVS"
+  },
+  "auth": {
+    "encryptionKey": "emVudGF4LWRldi1lbmNyeXB0aW9uLWtleS0zMmJ5dGU=",
+    "sessionCookieName": "zentax_session",
+    "sessionCookieSecure": false,
+    "sessionIdleTtlMinutes": 480,
+    "sessionAbsoluteTtlHours": 720
   }
 }
