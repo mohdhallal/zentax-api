@@ -5,9 +5,13 @@ import (
 
 	apperrors "github.com/mohamadhallal/zentax-api/errors"
 	"github.com/mohamadhallal/zentax-api/modules/workflows/domain"
+	"github.com/mohamadhallal/zentax-api/platform/authz"
 )
 
 func (uc *UseCases) Update(ctx context.Context, id domain.WorkflowID, input domain.UpdateWorkflowInput) (*domain.Workflow, error) {
+	if err := uc.authorizer.EnsureWorkflow(ctx, id, authz.WorkflowWrite); err != nil {
+		return nil, err
+	}
 	if input.WorkflowCategory == "" {
 		input.WorkflowCategory = "recurring"
 	}

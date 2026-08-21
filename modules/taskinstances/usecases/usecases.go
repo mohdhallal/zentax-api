@@ -1,11 +1,21 @@
 package usecases
 
-import "github.com/mohamadhallal/zentax-api/modules/taskinstances/domain"
+import (
+	"github.com/mohamadhallal/zentax-api/modules/taskinstances/domain"
+	"github.com/mohamadhallal/zentax-api/platform/authz"
+)
 
 type UseCases struct {
-	repo domain.TaskInstanceRepository
+	repo       domain.TaskInstanceRepository
+	authorizer *authz.Authorizer
 }
 
-func NewUseCases(repo domain.TaskInstanceRepository) *UseCases {
-	return &UseCases{repo: repo}
+// NewUseCases builds the task-instance use cases; the authorizer is optional
+// (variadic) so unit tests skip scope checks while the app always wires one.
+func NewUseCases(repo domain.TaskInstanceRepository, authorizer ...*authz.Authorizer) *UseCases {
+	uc := &UseCases{repo: repo}
+	if len(authorizer) > 0 {
+		uc.authorizer = authorizer[0]
+	}
+	return uc
 }

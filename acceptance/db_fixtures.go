@@ -165,3 +165,48 @@ func (s *Suite) InsertUserWithPassword(tenantID uuid.UUID, email, password strin
 	s.seedGrant(tenantID.String(), id.String(), "tenant_admin")
 	return id
 }
+
+// seedScopedGrant inserts a grant scoped to an entity subtree
+// (user_grants.scope_entity_id), inside a tenant-GUC transaction (RLS'd table).
+func (s *Suite) seedScopedGrant(tenantID, userID, role, scopeEntityID string) {
+	tx := s.DB.MustBegin()
+	if _, err := tx.Exec(`SELECT set_config('app.tenant_id', $1, true)`, tenantID); err != nil {
+		_ = tx.Rollback()
+		s.Require().NoError(err)
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO user_grants (user_id, role, scope_entity_id) VALUES ($1, $2, $3)`,
+		userID, role, scopeEntityID); err != nil {
+		_ = tx.Rollback()
+		s.Require().NoError(err)
+	}
+	s.Require().NoError(tx.Commit())
+}
+
+// AsScopedRole authenticates as a seeded user whose grant is scoped to the given
+// entity subtree, for exercising entity-subtree authorization (ADR-0012, B-2).
+func (s *Suite) AsScopedRole(tenantID, role, scopeEntityID string) *RequestBuilder {
+	if s.sessions == nil {
+		s.sessions = map[string]string{}
+	}
+	key := tenantID + "|" + role + "|" + scopeEntityID
+	token, ok := s.sessions[key]
+	if !ok {
+		var userID string
+		email := "scoped-" + uuid.NewString() + "@test.local"
+		err := s.DB.QueryRowx(
+			`INSERT INTO users (tenant_id, email, name, status) VALUES ($1, $2, 'Scoped User', 'active') RETURNING id`,
+			tenantID, email).Scan(&userID)
+		s.Require().NoError(err)
+		s.seedScopedGrant(tenantID, userID, role, scopeEntityID)
+
+		token = uuid.NewString() + uuid.NewString()
+		_, err = s.DB.Exec(
+			`INSERT INTO sessions (token_hash, user_id, tenant_id, idle_expires_at, absolute_expires_at)
+			 VALUES ($1, $2, $3, NOW() + INTERVAL '1 hour', NOW() + INTERVAL '30 days')`,
+			crypto.HashToken(token), userID, tenantID)
+		s.Require().NoError(err)
+		s.sessions[key] = token
+	}
+	return s.Client.External().WithSession(token)
+}

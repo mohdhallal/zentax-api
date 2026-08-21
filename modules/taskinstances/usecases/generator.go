@@ -9,6 +9,7 @@ import (
 	tidomain "github.com/mohamadhallal/zentax-api/modules/taskinstances/domain"
 	workflowsdomain "github.com/mohamadhallal/zentax-api/modules/workflows/domain"
 	workflowtasksdomain "github.com/mohamadhallal/zentax-api/modules/workflowtasks/domain"
+	"github.com/mohamadhallal/zentax-api/platform/authz"
 	"github.com/mohamadhallal/zentax-api/shared/deadline"
 )
 
@@ -21,6 +22,7 @@ type Generator struct {
 	workflows     workflowsdomain.WorkflowRepository
 	workflowTasks workflowtasksdomain.WorkflowTaskRepository
 	entities      entitiesdomain.EntityRepository
+	authorizer    *authz.Authorizer
 }
 
 func NewGenerator(
@@ -28,13 +30,18 @@ func NewGenerator(
 	workflows workflowsdomain.WorkflowRepository,
 	workflowTasks workflowtasksdomain.WorkflowTaskRepository,
 	entities entitiesdomain.EntityRepository,
+	authorizer ...*authz.Authorizer,
 ) *Generator {
-	return &Generator{
+	g := &Generator{
 		instances:     instances,
 		workflows:     workflows,
 		workflowTasks: workflowTasks,
 		entities:      entities,
 	}
+	if len(authorizer) > 0 {
+		g.authorizer = authorizer[0]
+	}
+	return g
 }
 
 // StartWorkflow generates task instances for a recurring workflow and returns
@@ -42,6 +49,10 @@ func NewGenerator(
 // exist) and fails closed on unsupported fiscal calendars rather than emit an
 // approximate — and therefore wrong — deadline.
 func (g *Generator) StartWorkflow(ctx context.Context, workflowID string) (int, error) {
+	// Starting a workflow is a workflow:write on the workflow's entity subtree.
+	if err := g.authorizer.EnsureWorkflow(ctx, workflowID, authz.WorkflowWrite); err != nil {
+		return 0, err
+	}
 	wf, err := g.workflows.GetById(ctx, workflowID)
 	if err != nil {
 		return 0, err

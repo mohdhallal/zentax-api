@@ -5,9 +5,13 @@ import (
 
 	apperrors "github.com/mohamadhallal/zentax-api/errors"
 	"github.com/mohamadhallal/zentax-api/modules/taskinstances/domain"
+	"github.com/mohamadhallal/zentax-api/platform/authz"
 )
 
 func (uc *UseCases) Update(ctx context.Context, id domain.TaskInstanceID, input domain.UpdateTaskInstanceInput) (*domain.TaskInstance, error) {
+	if err := uc.authorizer.EnsureTaskInstance(ctx, id, authz.TaskWrite); err != nil {
+		return nil, err
+	}
 	if input.TaxDataStatus == "" {
 		input.TaxDataStatus = "draft"
 	}

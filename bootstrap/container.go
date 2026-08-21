@@ -22,6 +22,8 @@ import (
 	workflowtasksdomain "github.com/mohamadhallal/zentax-api/modules/workflowtasks/domain"
 	workflowtaskspg "github.com/mohamadhallal/zentax-api/modules/workflowtasks/repositories/pg"
 	workflowtasksusecases "github.com/mohamadhallal/zentax-api/modules/workflowtasks/usecases"
+	"github.com/mohamadhallal/zentax-api/platform/authz"
+	authzpg "github.com/mohamadhallal/zentax-api/platform/authz/pg"
 	"github.com/mohamadhallal/zentax-api/platform/database"
 )
 
@@ -51,16 +53,21 @@ func NewContainer(db database.ExecerPg) *Container {
 	workflowTaskRepo := workflowtaskspg.NewWorkflowTaskRepo(db)
 	taskInstanceRepo := taskinstancespg.NewTaskInstanceRepo(db)
 
-	generator := taskinstancesusecases.NewGenerator(taskInstanceRepo, workflowRepo, workflowTaskRepo, entityRepo)
+	// Scoped-RBAC authorizer (ADR-0012, Increment B-2): resolves entity subtrees
+	// so a scoped grant only authorizes its own branch. Injected into every write
+	// use case; a tenant-wide grant short-circuits it without a DB lookup.
+	authorizer := authz.NewAuthorizer(authzpg.NewResolver(db))
+
+	generator := taskinstancesusecases.NewGenerator(taskInstanceRepo, workflowRepo, workflowTaskRepo, entityRepo, authorizer)
 
 	return &Container{
 		NexusAccountAPIKeyUseCases: nexusAccountAPIKeyUC,
-		EntityUseCases:             entitiesusecases.NewUseCases(entityRepo),
-		ObligationTypeUseCases:     obligationtypesusecases.NewUseCases(obligationTypeRepo),
-		EntityObligationUseCases:   entityobligationsusecases.NewUseCases(entityObligationRepo),
-		WorkflowUseCases:           workflowsusecases.NewUseCases(workflowRepo),
-		WorkflowTaskUseCases:       workflowtasksusecases.NewUseCases(workflowTaskRepo),
-		TaskInstanceUseCases:       taskinstancesusecases.NewUseCases(taskInstanceRepo),
+		EntityUseCases:             entitiesusecases.NewUseCases(entityRepo, authorizer),
+		ObligationTypeUseCases:     obligationtypesusecases.NewUseCases(obligationTypeRepo, authorizer),
+		EntityObligationUseCases:   entityobligationsusecases.NewUseCases(entityObligationRepo, authorizer),
+		WorkflowUseCases:           workflowsusecases.NewUseCases(workflowRepo, authorizer),
+		WorkflowTaskUseCases:       workflowtasksusecases.NewUseCases(workflowTaskRepo, authorizer),
+		TaskInstanceUseCases:       taskinstancesusecases.NewUseCases(taskInstanceRepo, authorizer),
 		WorkflowStarter:            generator,
 	}
 }

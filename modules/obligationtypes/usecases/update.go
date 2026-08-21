@@ -5,9 +5,13 @@ import (
 
 	apperrors "github.com/mohamadhallal/zentax-api/errors"
 	"github.com/mohamadhallal/zentax-api/modules/obligationtypes/domain"
+	"github.com/mohamadhallal/zentax-api/platform/authz"
 )
 
 func (uc *UseCases) Update(ctx context.Context, id domain.ObligationTypeID, input domain.UpdateObligationTypeInput) (*domain.ObligationType, error) {
+	if err := uc.authorizer.EnsureEntity(ctx, "", authz.ObligationTypeWrite); err != nil {
+		return nil, err
+	}
 	if input.Category == "" {
 		input.Category = "custom"
 	}
