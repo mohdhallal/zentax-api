@@ -13,17 +13,21 @@ import (
 	obligationtypesdomain "github.com/mohamadhallal/zentax-api/modules/obligationtypes/domain"
 	obligationtypespg "github.com/mohamadhallal/zentax-api/modules/obligationtypes/repositories/pg"
 	obligationtypesusecases "github.com/mohamadhallal/zentax-api/modules/obligationtypes/usecases"
+	workflowsdomain "github.com/mohamadhallal/zentax-api/modules/workflows/domain"
+	workflowspg "github.com/mohamadhallal/zentax-api/modules/workflows/repositories/pg"
+	workflowsusecases "github.com/mohamadhallal/zentax-api/modules/workflows/usecases"
 	"github.com/mohamadhallal/zentax-api/platform/database"
 )
 
 // Container is the dependency-injection seam: it constructs and holds the
 // per-module use cases wired from the database. New ZenTax domain modules
-// (workflows, task instances) plug in here.
+// (workflow tasks, task instances) plug in here.
 type Container struct {
 	NexusAccountAPIKeyUseCases authdomain.NexusAccountAPIKeyUseCases
 	EntityUseCases             entitiesdomain.EntityUseCases
 	ObligationTypeUseCases     obligationtypesdomain.ObligationTypeUseCases
 	EntityObligationUseCases   entityobligationsdomain.EntityObligationUseCases
+	WorkflowUseCases           workflowsdomain.WorkflowUseCases
 }
 
 func NewContainer(db database.ExecerPg) *Container {
@@ -33,11 +37,13 @@ func NewContainer(db database.ExecerPg) *Container {
 	entityRepo := entitiespg.NewEntityRepo(db)
 	obligationTypeRepo := obligationtypespg.NewObligationTypeRepo(db)
 	entityObligationRepo := entityobligationspg.NewEntityObligationRepo(db)
+	workflowRepo := workflowspg.NewWorkflowRepo(db)
 
 	return &Container{
 		NexusAccountAPIKeyUseCases: nexusAccountAPIKeyUC,
 		EntityUseCases:             entitiesusecases.NewUseCases(entityRepo),
 		ObligationTypeUseCases:     obligationtypesusecases.NewUseCases(obligationTypeRepo),
 		EntityObligationUseCases:   entityobligationsusecases.NewUseCases(entityObligationRepo),
+		WorkflowUseCases:           workflowsusecases.NewUseCases(workflowRepo),
 	}
 }
