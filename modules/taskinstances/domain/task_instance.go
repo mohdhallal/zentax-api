@@ -28,6 +28,9 @@ type TaskInstance struct {
 	ApprovedBy       *string        `json:"approvedBy"       db:"approved_by"`
 	ApprovedAt       *time.Time     `json:"approvedAt"       db:"approved_at"`
 	CompletedAt      *time.Time     `json:"completedAt"      db:"completed_at"`
+	SubmittedBy      *string        `json:"submittedBy"      db:"submitted_by"`
+	SubmittedAt      *time.Time     `json:"submittedAt"      db:"submitted_at"`
+	RejectionReason  *string        `json:"rejectionReason"  db:"rejection_reason"`
 	OrderIndex       int            `json:"orderIndex"       db:"order_index"`
 	Notes            *string        `json:"notes"            db:"notes"`
 	DataTemplateID   *string        `json:"dataTemplateId"   db:"data_template_id"`
@@ -54,7 +57,7 @@ type CreateTaskInstanceInput struct {
 }
 
 // UpdateTaskInstanceInput is the API-editable subset. Approval/completion
-// timestamps are set by dedicated actions (a later approvals stage).
+// timestamps are set by the dedicated submit/approve/reject actions, not here.
 type UpdateTaskInstanceInput struct {
 	Status        string
 	AssigneeID    *string
@@ -62,3 +65,17 @@ type UpdateTaskInstanceInput struct {
 	TaxData       TaxData
 	TaxDataStatus string
 }
+
+// Task-instance lifecycle statuses relevant to the approval flow (ADR-0018).
+const (
+	StatusInProgress      = "in_progress"
+	StatusPendingApproval = "pending_approval"
+	StatusCompleted       = "completed"
+)
+
+// IsApproved reports whether the instance has been approved and is therefore
+// immutable (ADR-0018): a change must be a new amendment, not an in-place edit.
+func (t *TaskInstance) IsApproved() bool { return t.ApprovedBy != nil }
+
+// IsPendingApproval reports whether the instance is submitted and awaiting review.
+func (t *TaskInstance) IsPendingApproval() bool { return t.Status == StatusPendingApproval }

@@ -12,6 +12,23 @@ func (uc *UseCases) Update(ctx context.Context, id domain.TaskInstanceID, input 
 	if err := uc.authorizer.EnsureTaskInstance(ctx, id, authz.TaskWrite); err != nil {
 		return nil, err
 	}
+
+	// ADR-0018: a submitted (pending) or approved instance is locked against
+	// in-place edits — a change must go through reject/amend, not overwrite.
+	current, err := uc.repo.GetById(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if current == nil {
+		return nil, apperrors.NewNotFound(domain.ErrTaskInstanceNotFound(id))
+	}
+	if current.IsApproved() {
+		return nil, apperrors.NewConflict(domain.MsgApprovedImmutable)
+	}
+	if current.IsPendingApproval() {
+		return nil, apperrors.NewConflict(domain.MsgAlreadyPending)
+	}
+
 	if input.TaxDataStatus == "" {
 		input.TaxDataStatus = "draft"
 	}

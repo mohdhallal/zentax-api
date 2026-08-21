@@ -45,3 +45,15 @@ func (r *TaskInstanceRepo) CountByWorkflow(ctx context.Context, workflowID strin
 	}
 	return count, nil
 }
+
+func (r *TaskInstanceRepo) SubmitForApproval(ctx context.Context, id domain.TaskInstanceID, submittedBy string) (*domain.TaskInstance, error) {
+	return r.QueryRow(ctx, submitForApprovalSQL, id, submittedBy)
+}
+
+func (r *TaskInstanceRepo) Approve(ctx context.Context, id domain.TaskInstanceID, approvedBy string) (*domain.TaskInstance, error) {
+	return r.QueryRow(ctx, approveSQL, id, approvedBy)
+}
+
+func (r *TaskInstanceRepo) Reject(ctx context.Context, id domain.TaskInstanceID, reason *string) (*domain.TaskInstance, error) {
+	return r.QueryRow(ctx, rejectSQL, id, reason)
+}

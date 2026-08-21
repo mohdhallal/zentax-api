@@ -14,6 +14,11 @@ type TaskInstanceIdParams struct {
 	ID string `json:"id" validate:"required,uuid" example:"6ba7b810-9dad-11d1-80b4-00c04fd430c8"`
 }
 
+// RejectTaskInstanceBody carries an optional reviewer reason for a rejection.
+type RejectTaskInstanceBody struct {
+	Reason *string `json:"reason" validate:"omitempty,max=2000"`
+}
+
 type ListTaskInstancesQuery struct {
 	Limit      int      `json:"limit"      default:"20" validate:"min=1,max=100" example:"20"`
 	Offset     int      `json:"offset"     default:"0"  validate:"min=0" example:"0"`

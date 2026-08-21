@@ -43,7 +43,7 @@ green on both the main module and `acceptance/`.
    fail-closed on unsupported fiscal calendars.
 
 Migrations (sqitch): `tenants`, `entities`, `obligation_types`, `entity_obligations`,
-`workflows`, `workflow_tasks`, `task_instances` (+ boilerplate `appschema`,
+`workflows`, `workflow_tasks`, `task_instances`, `task_instance_approvals` (+ boilerplate `appschema`,
 `internal_api_keys`, `nexus_accounts_api_keys`).
 
 **Auth / identity (Increments A + B):** first-party email/password + server-side sessions + TOTP MFA
@@ -86,19 +86,25 @@ Commits: `4cdcd4e` scaffold · `2851179` tenancy+entities · `d074780` obligatio
 - **Remaining:**
   - **Read-side scope** — list/get endpoints stay tenant-wide; narrowing what a *scoped* user can *see*
     (filtering lists to their subtree) is a later increment. Write scope (above) is the SoD-critical half.
-  - **Task-lifecycle SoD** (preparer *submits* → reviewer *approves*): the `task:submit` / `task:approve`
-    capabilities exist, but the submit/approve **actions** don't yet — enforcement lands with them.
+  - **Approval amendment path (rest of ADR-0018)** — an approved record is now *frozen* (in-place edits
+    rejected), but the versioned re-approved *amendment* chain (lawfully correcting a filed record) + the
+    document-version / rule-version snapshots need documents + audit first. The freeze + preparer≠approver
+    SoD + the submit/approve/reject actions are **done** (see Domain features).
   - **WorkOS SSO/SCIM (Phase 2).** `IdentityBroker` seam is stubbed only.
   - Breach-checked passwords (HIBP), password-reset / invite flows, Redis session store (Postgres for now).
-- Consequence: the API is authenticated + tenant-isolated + **role- and scope-authorized on writes**. Reads
-  remain tenant-wide (list-scope narrowing is a later increment); the submit/approve actions remain.
+- Consequence: the API is authenticated + tenant-isolated + **role- and scope-authorized on writes**, with
+  the **preparer→reviewer approval flow + SoD + immutable-approval lock** in place. Reads remain tenant-wide
+  (list-scope narrowing is a later increment).
 
 ### 🟠 Domain features still to build
 - **Data Templates** module — `workflow_tasks.data_template_id` / `task_instances.data_template_id`
   are plain nullable UUIDs with **no FK** until this module exists.
-- **Approvals** — submit-for-approval / approve / reject on task instances, with the
-  immutable approval snapshot (ADR-0018). Today only a basic status update exists;
-  `approved_by` / `approved_at` / `completed_at` are columns but not driven by actions.
+- **Approvals — DONE (core, ADR-0018/0012).** `POST /task-instances/{id}/{submit-for-approval,approve,reject}`
+  drive the lifecycle: a preparer (`task:submit`) submits → `pending_approval` (records `submitted_by`); a
+  different reviewer (`task:approve`) approves → `completed` (`approved_by`/`approved_at`/`completed_at`), or
+  rejects → back to `in_progress` with a reason. **Server-enforced SoD** (approver ≠ submitter) + an
+  **immutable lock** (an approved instance rejects in-place edits). Verified live. **Remaining:** the
+  versioned *amendment* chain + snapshotting linked document/rule versions (waits on documents + audit).
 - **Documents / workflow-documents** — versioned, backed by object storage.
 - **Audit log** (ADR-0008) — two streams, append-only, per-tenant hash-chained, PII-free
   (actor-by-ID). Not built; domain records also omit `created_by_id`/`updated_by_id` for now

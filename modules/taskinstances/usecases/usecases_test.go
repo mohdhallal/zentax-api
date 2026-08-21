@@ -55,38 +55,56 @@ func TestTIGetById_Success(t *testing.T) {
 	repo.AssertExpectations(t)
 }
 
-func TestTIUpdate_DefaultsTaxDataStatusAndNotFound(t *testing.T) {
+func TestTIUpdate_NotFound(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	repo := new(domain.TaskInstanceRepositoryMock)
 	uc := NewUseCases(repo)
 
+	repo.On("GetById", ctx, "missing").Return(nil, nil).Once()
+
+	result, err := uc.Update(ctx, "missing", domain.UpdateTaskInstanceInput{Status: "in_progress"})
+	assert.Nil(t, result)
+	assert.IsType(t, &apperrors.NotFoundError{}, err)
+	repo.AssertExpectations(t) // Update never reached
+}
+
+func TestTIUpdate_DefaultsTaxDataStatusAndSucceeds(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	repo := new(domain.TaskInstanceRepositoryMock)
+	uc := NewUseCases(repo)
+
+	ti := sampleTaskInstance()                                  // status not_started → not locked
 	in := domain.UpdateTaskInstanceInput{Status: "in_progress"} // no taxDataStatus
 	want := in
 	want.TaxDataStatus = "draft"
 
-	repo.On("Update", ctx, "missing", want).Return(nil, nil).Once()
+	repo.On("GetById", ctx, ti.ID).Return(ti, nil).Once()
+	repo.On("Update", ctx, ti.ID, want).Return(ti, nil).Once()
 
-	result, err := uc.Update(ctx, "missing", in)
-	assert.Nil(t, result)
-	assert.IsType(t, &apperrors.NotFoundError{}, err)
+	result, err := uc.Update(ctx, ti.ID, in)
+	require.NoError(t, err)
+	assert.Equal(t, ti, result)
 	repo.AssertExpectations(t)
 }
 
-func TestTIUpdate_Success(t *testing.T) {
+func TestTIUpdate_ApprovedIsImmutable(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	repo := new(domain.TaskInstanceRepositoryMock)
 	uc := NewUseCases(repo)
 
 	ti := sampleTaskInstance()
-	in := domain.UpdateTaskInstanceInput{Status: "completed", TaxDataStatus: "final"}
-	repo.On("Update", ctx, ti.ID, in).Return(ti, nil).Once()
+	approver := "user-9"
+	ti.ApprovedBy = &approver // approved → locked (ADR-0018)
 
-	result, err := uc.Update(ctx, ti.ID, in)
-	require.NoError(t, err)
-	assert.Equal(t, ti, result)
-	repo.AssertExpectations(t)
+	repo.On("GetById", ctx, ti.ID).Return(ti, nil).Once()
+
+	result, err := uc.Update(ctx, ti.ID, domain.UpdateTaskInstanceInput{Status: "in_progress"})
+	assert.Nil(t, result)
+	assert.IsType(t, &apperrors.ConflictError{}, err)
+	repo.AssertExpectations(t) // Update never reached — the record is frozen
 }
 
 func TestTIList_Aggregates(t *testing.T) {

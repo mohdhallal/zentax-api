@@ -48,6 +48,21 @@ func (m *TaskInstanceRepositoryMock) CountByWorkflow(ctx context.Context, workfl
 	return args.Int(0), args.Error(1)
 }
 
+func (m *TaskInstanceRepositoryMock) SubmitForApproval(ctx context.Context, id TaskInstanceID, submittedBy string) (*TaskInstance, error) {
+	args := m.Called(ctx, id, submittedBy)
+	return taskInstanceOrNil(args.Get(0)), args.Error(1)
+}
+
+func (m *TaskInstanceRepositoryMock) Approve(ctx context.Context, id TaskInstanceID, approvedBy string) (*TaskInstance, error) {
+	args := m.Called(ctx, id, approvedBy)
+	return taskInstanceOrNil(args.Get(0)), args.Error(1)
+}
+
+func (m *TaskInstanceRepositoryMock) Reject(ctx context.Context, id TaskInstanceID, reason *string) (*TaskInstance, error) {
+	args := m.Called(ctx, id, reason)
+	return taskInstanceOrNil(args.Get(0)), args.Error(1)
+}
+
 // TaskInstanceUseCasesMock is a testify mock of TaskInstanceUseCases.
 type TaskInstanceUseCasesMock struct {
 	mock.Mock
@@ -71,6 +86,21 @@ func (m *TaskInstanceUseCasesMock) List(ctx context.Context, listArgs sharedtype
 		return nil, args.Error(1)
 	}
 	return args.Get(0).(*sharedtypes.ListResult[TaskInstance]), args.Error(1)
+}
+
+func (m *TaskInstanceUseCasesMock) SubmitForApproval(ctx context.Context, id TaskInstanceID, actorID string) (*TaskInstance, error) {
+	args := m.Called(ctx, id, actorID)
+	return taskInstanceOrNil(args.Get(0)), args.Error(1)
+}
+
+func (m *TaskInstanceUseCasesMock) Approve(ctx context.Context, id TaskInstanceID, actorID string) (*TaskInstance, error) {
+	args := m.Called(ctx, id, actorID)
+	return taskInstanceOrNil(args.Get(0)), args.Error(1)
+}
+
+func (m *TaskInstanceUseCasesMock) Reject(ctx context.Context, id TaskInstanceID, reason *string) (*TaskInstance, error) {
+	args := m.Called(ctx, id, reason)
+	return taskInstanceOrNil(args.Get(0)), args.Error(1)
 }
 
 func taskInstanceOrNil(v any) *TaskInstance {

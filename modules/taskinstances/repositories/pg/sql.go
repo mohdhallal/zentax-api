@@ -7,8 +7,8 @@ import baserepo "github.com/mohamadhallal/zentax-api/shared/repositories"
 // tax_data (JSONB) into domain.TaxData.
 const taskInstanceColumns = `id, workflow_id, workflow_task_id, period_code, name, description, task_type, ` +
 	`status, assignee_id, due_date, period_end_date, filing_deadline, approval_required, approved_by, ` +
-	`approved_at, completed_at, order_index, notes, data_template_id, tax_data, tax_data_status, ` +
-	`created_at, updated_at`
+	`approved_at, completed_at, submitted_by, submitted_at, rejection_reason, order_index, notes, ` +
+	`data_template_id, tax_data, tax_data_status, created_at, updated_at`
 
 var sqlConfig = baserepo.SQLConfig{
 	AllowedColumns: map[string]bool{
@@ -45,3 +45,26 @@ var sqlConfig = baserepo.SQLConfig{
 	Count:    `SELECT COUNT(*)::int AS total FROM task_instances`,
 	ListBase: `SELECT ` + taskInstanceColumns + ` FROM task_instances`,
 }
+
+// Approval-flow transitions (ADR-0018). Preconditions + SoD are enforced in the
+// use cases; these just write the state change and return the updated row.
+const submitForApprovalSQL = `
+	UPDATE task_instances
+	SET status = 'pending_approval', submitted_by = $2, submitted_at = NOW(),
+	    rejection_reason = NULL, updated_at = NOW()
+	WHERE id = $1
+	RETURNING ` + taskInstanceColumns
+
+const approveSQL = `
+	UPDATE task_instances
+	SET status = 'completed', approved_by = $2, approved_at = NOW(), completed_at = NOW(),
+	    updated_at = NOW()
+	WHERE id = $1
+	RETURNING ` + taskInstanceColumns
+
+const rejectSQL = `
+	UPDATE task_instances
+	SET status = 'in_progress', submitted_by = NULL, submitted_at = NULL,
+	    rejection_reason = $2, updated_at = NOW()
+	WHERE id = $1
+	RETURNING ` + taskInstanceColumns
