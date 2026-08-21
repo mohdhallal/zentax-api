@@ -15,5 +15,12 @@ func (uc *UseCases) Create(ctx context.Context, input domain.CreateObligationTyp
 	if input.Category == "" {
 		input.Category = "custom"
 	}
-	return uc.repo.Create(ctx, input)
+	ot, err := uc.repo.Create(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	if err := uc.audit.Record(ctx, "obligation_type.created", "obligation_type", ot.ID, nil); err != nil {
+		return nil, err
+	}
+	return ot, nil
 }

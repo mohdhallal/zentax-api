@@ -9,6 +9,7 @@ import (
 	tidomain "github.com/mohamadhallal/zentax-api/modules/taskinstances/domain"
 	workflowsdomain "github.com/mohamadhallal/zentax-api/modules/workflows/domain"
 	workflowtasksdomain "github.com/mohamadhallal/zentax-api/modules/workflowtasks/domain"
+	"github.com/mohamadhallal/zentax-api/platform/audit"
 	"github.com/mohamadhallal/zentax-api/platform/authz"
 	"github.com/mohamadhallal/zentax-api/shared/deadline"
 )
@@ -23,6 +24,7 @@ type Generator struct {
 	workflowTasks workflowtasksdomain.WorkflowTaskRepository
 	entities      entitiesdomain.EntityRepository
 	authorizer    *authz.Authorizer
+	audit         *audit.Recorder
 }
 
 func NewGenerator(
@@ -153,6 +155,11 @@ func (g *Generator) StartWorkflow(ctx context.Context, workflowID string) (int, 
 		}
 	}
 
+	if err := g.audit.Record(ctx, "workflow.started", "workflow", workflowID,
+		map[string]any{"instancesCreated": count, "periods": len(wf.SelectedPeriods)}); err != nil {
+		return 0, err
+	}
+
 	return count, nil
 }
 
@@ -161,4 +168,10 @@ func strDeref(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+// WithAudit injects the audit recorder (ADR-0008); nil-safe, chainable.
+func (g *Generator) WithAudit(r *audit.Recorder) *Generator {
+	g.audit = r
+	return g
 }

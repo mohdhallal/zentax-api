@@ -26,5 +26,8 @@ func (uc *UseCases) Update(ctx context.Context, id domain.WorkflowID, input doma
 	if wf == nil {
 		return nil, apperrors.NewNotFound(domain.ErrWorkflowNotFound(id))
 	}
+	if err := uc.audit.Record(ctx, "workflow.updated", "workflow", id, nil); err != nil {
+		return nil, err
+	}
 	return wf, nil
 }

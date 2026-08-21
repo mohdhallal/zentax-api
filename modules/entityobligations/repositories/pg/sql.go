@@ -6,7 +6,7 @@ import baserepo "github.com/mohamadhallal/zentax-api/shared/repositories"
 // infra, absent from the model). deadline_rule (JSONB) scans into the
 // domain.DeadlineRule Scanner/Valuer type.
 const entityObligationColumns = `id, entity_id, obligation_type_id, jurisdiction, periodicity, ` +
-	`deadline_rule, status, created_at, updated_at`
+	`deadline_rule, status, created_at, updated_at, created_by, updated_by`
 
 var sqlConfig = baserepo.SQLConfig{
 	AllowedColumns: map[string]bool{
@@ -31,6 +31,7 @@ var sqlConfig = baserepo.SQLConfig{
 		    periodicity = $3,
 		    deadline_rule = $4,
 		    status = $5,
+		    updated_by = NULLIF(current_setting('app.user_id', true), '')::uuid,
 		    updated_at = NOW()
 		WHERE id = $1
 		RETURNING ` + entityObligationColumns,

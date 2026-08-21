@@ -23,5 +23,8 @@ func (uc *UseCases) Update(ctx context.Context, id domain.EntityObligationID, in
 	if eo == nil {
 		return nil, apperrors.NewNotFound(domain.ErrEntityObligationNotFound(id))
 	}
+	if err := uc.audit.Record(ctx, "entity_obligation.updated", "entity_obligation", id, nil); err != nil {
+		return nil, err
+	}
 	return eo, nil
 }

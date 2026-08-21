@@ -31,5 +31,13 @@ func (uc *UseCases) Approve(ctx context.Context, id domain.TaskInstanceID, actor
 		return nil, apperrors.NewForbidden(domain.MsgCannotApproveOwn)
 	}
 
-	return uc.repo.Approve(ctx, id, actorID)
+	approved, err := uc.repo.Approve(ctx, id, actorID)
+	if err != nil {
+		return nil, err
+	}
+	if err := uc.audit.Record(ctx, "task_instance.approved", "task_instance", id,
+		map[string]any{"from": domain.StatusPendingApproval, "to": domain.StatusCompleted}); err != nil {
+		return nil, err
+	}
+	return approved, nil
 }

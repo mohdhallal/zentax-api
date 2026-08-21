@@ -36,6 +36,8 @@ func TaskInstanceToJSON(ti *domain.TaskInstance) map[string]any {
 		"dataTemplateId":   ti.DataTemplateID,
 		"taxData":          ti.TaxData,
 		"taxDataStatus":    ti.TaxDataStatus,
+		"createdBy":        ti.CreatedBy,
+		"updatedBy":        ti.UpdatedBy,
 		"createdAt":        ti.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
 		"updatedAt":        ti.UpdatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
 	}

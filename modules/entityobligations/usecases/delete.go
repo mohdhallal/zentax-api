@@ -19,5 +19,5 @@ func (uc *UseCases) Delete(ctx context.Context, id domain.EntityObligationID) er
 	if !deleted {
 		return apperrors.NewNotFound(domain.ErrEntityObligationNotFound(id))
 	}
-	return nil
+	return uc.audit.Record(ctx, "entity_obligation.deleted", "entity_obligation", id, nil)
 }

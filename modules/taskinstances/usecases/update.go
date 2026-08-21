@@ -40,5 +40,9 @@ func (uc *UseCases) Update(ctx context.Context, id domain.TaskInstanceID, input 
 	if ti == nil {
 		return nil, apperrors.NewNotFound(domain.ErrTaskInstanceNotFound(id))
 	}
+	if err := uc.audit.Record(ctx, "task_instance.updated", "task_instance", id,
+		map[string]any{"status": ti.Status}); err != nil {
+		return nil, err
+	}
 	return ti, nil
 }

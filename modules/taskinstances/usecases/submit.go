@@ -34,5 +34,13 @@ func (uc *UseCases) SubmitForApproval(ctx context.Context, id domain.TaskInstanc
 		return nil, apperrors.NewConflict(domain.MsgAlreadyPending)
 	}
 
-	return uc.repo.SubmitForApproval(ctx, id, actorID)
+	submitted, err := uc.repo.SubmitForApproval(ctx, id, actorID)
+	if err != nil {
+		return nil, err
+	}
+	if err := uc.audit.Record(ctx, "task_instance.submitted", "task_instance", id,
+		map[string]any{"from": ti.Status, "to": domain.StatusPendingApproval}); err != nil {
+		return nil, err
+	}
+	return submitted, nil
 }

@@ -13,5 +13,12 @@ func (uc *UseCases) Create(ctx context.Context, input domain.CreateWorkflowTaskI
 		return nil, err
 	}
 	applyDueDateDefaults(&input.DueDateReference, &input.DueDateOffsetUnit, &input.DueDateOffsetDirection)
-	return uc.repo.Create(ctx, input)
+	wt, err := uc.repo.Create(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	if err := uc.audit.Record(ctx, "workflow_task.created", "workflow_task", wt.ID, nil); err != nil {
+		return nil, err
+	}
+	return wt, nil
 }

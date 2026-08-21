@@ -43,7 +43,8 @@ green on both the main module and `acceptance/`.
    fail-closed on unsupported fiscal calendars.
 
 Migrations (sqitch): `tenants`, `entities`, `obligation_types`, `entity_obligations`,
-`workflows`, `workflow_tasks`, `task_instances`, `task_instance_approvals` (+ boilerplate `appschema`,
+`workflows`, `workflow_tasks`, `task_instances`, `task_instance_approvals`, `actor_columns`,
+`audit_log` (+ boilerplate `appschema`,
 `internal_api_keys`, `nexus_accounts_api_keys`).
 
 **Auth / identity (Increments A + B):** first-party email/password + server-side sessions + TOTP MFA
@@ -104,11 +105,20 @@ Commits: `4cdcd4e` scaffold · `2851179` tenancy+entities · `d074780` obligatio
   different reviewer (`task:approve`) approves → `completed` (`approved_by`/`approved_at`/`completed_at`), or
   rejects → back to `in_progress` with a reason. **Server-enforced SoD** (approver ≠ submitter) + an
   **immutable lock** (an approved instance rejects in-place edits). Verified live. **Remaining:** the
-  versioned *amendment* chain + snapshotting linked document/rule versions (waits on documents + audit).
+  versioned *amendment* chain + snapshotting linked document/rule versions (audit is now built —
+  waits on documents + rule versioning).
 - **Documents / workflow-documents** — versioned, backed by object storage.
-- **Audit log** (ADR-0008) — two streams, append-only, per-tenant hash-chained, PII-free
-  (actor-by-ID). Not built; domain records also omit `created_by_id`/`updated_by_id` for now
-  (add with auth).
+- **Audit log — DONE (stream 1 core, ADR-0008).** `platform/audit` + the `audit_log` table: every
+  domain mutation (20 use-case sites) appends a **PII-free, actor-by-ID envelope** (action,
+  resource, UTC instant, request_id, whitelisted `details` only — status transitions/counts, never
+  free text) **on the same transaction** — the write and its evidence commit or roll back together.
+  **Append-only at the database** (RLS policies exist only for INSERT/SELECT → UPDATE/DELETE affect
+  zero rows even for the app role) + a **per-tenant hash chain** (sha256 over the canonical envelope;
+  per-tenant advisory-lock-serialized `seq`; `VerifyChain` recomputes it). **Actor attribution:**
+  `created_by`/`updated_by` on all domain tables, defaulted/stamped from the `app.user_id` GUC bound
+  at the Tx seam. Verified live incl. tamper attempts + cross-tenant isolation. **Remaining:** WORM
+  export to S3 Object Lock (Phase 2), the centralized **security stream** (auth events — Phase 2;
+  interim: structured slog), and a read API for the user-facing Audit Trail page.
 - **Team members / roles**, **notifications / email / digests**, **reports**
   (compliance-heatmap / status / tax-financial / export-raw).
 

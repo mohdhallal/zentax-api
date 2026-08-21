@@ -36,6 +36,8 @@ type TaskInstance struct {
 	DataTemplateID   *string        `json:"dataTemplateId"   db:"data_template_id"`
 	TaxData          TaxData        `json:"taxData"          db:"tax_data"`
 	TaxDataStatus    string         `json:"taxDataStatus"    db:"tax_data_status"`
+	CreatedBy        *string        `json:"createdBy" db:"created_by"`
+	UpdatedBy        *string        `json:"updatedBy" db:"updated_by"`
 	CreatedAt        time.Time      `json:"createdAt"        db:"created_at"`
 	UpdatedAt        time.Time      `json:"updatedAt"        db:"updated_at"`
 }

@@ -7,7 +7,7 @@ import baserepo "github.com/mohamadhallal/zentax-api/shared/repositories"
 // Periods / DueDateRule Scanner/Valuer types.
 const workflowColumns = `id, name, description, workflow_category, project_type, financial_year, ` +
 	`periodicity, selected_periods, entity_id, obligation_type_id, due_date_rule, start_date, end_date, ` +
-	`tasks_sequential, status, created_at, updated_at`
+	`tasks_sequential, status, created_at, updated_at, created_by, updated_by`
 
 var sqlConfig = baserepo.SQLConfig{
 	AllowedColumns: map[string]bool{
@@ -46,6 +46,7 @@ var sqlConfig = baserepo.SQLConfig{
 		    end_date = $13,
 		    tasks_sequential = $14,
 		    status = $15,
+		    updated_by = NULLIF(current_setting('app.user_id', true), '')::uuid,
 		    updated_at = NOW()
 		WHERE id = $1
 		RETURNING ` + workflowColumns,

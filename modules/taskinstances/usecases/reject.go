@@ -28,5 +28,16 @@ func (uc *UseCases) Reject(ctx context.Context, id domain.TaskInstanceID, reason
 		return nil, apperrors.NewConflict(domain.MsgNotPendingApproval)
 	}
 
-	return uc.repo.Reject(ctx, id, reason)
+	rejected, err := uc.repo.Reject(ctx, id, reason)
+	if err != nil {
+		return nil, err
+	}
+	// reasonProvided only — the reason text is free text and stays out of the
+	// PII-free audit envelope (it lives on the row itself).
+	if err := uc.audit.Record(ctx, "task_instance.rejected", "task_instance", id,
+		map[string]any{"from": domain.StatusPendingApproval, "to": domain.StatusInProgress,
+			"reasonProvided": reason != nil}); err != nil {
+		return nil, err
+	}
+	return rejected, nil
 }

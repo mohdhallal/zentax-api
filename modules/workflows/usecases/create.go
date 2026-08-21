@@ -16,5 +16,12 @@ func (uc *UseCases) Create(ctx context.Context, input domain.CreateWorkflowInput
 	if input.WorkflowCategory == "" {
 		input.WorkflowCategory = "recurring"
 	}
-	return uc.repo.Create(ctx, input)
+	wf, err := uc.repo.Create(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	if err := uc.audit.Record(ctx, "workflow.created", "workflow", wf.ID, nil); err != nil {
+		return nil, err
+	}
+	return wf, nil
 }

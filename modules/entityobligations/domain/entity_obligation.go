@@ -15,6 +15,8 @@ type EntityObligation struct {
 	Periodicity      string             `json:"periodicity"      db:"periodicity"`
 	DeadlineRule     DeadlineRule       `json:"deadlineRule"     db:"deadline_rule"`
 	Status           string             `json:"status"           db:"status"`
+	CreatedBy        *string            `json:"createdBy" db:"created_by"`
+	UpdatedBy        *string            `json:"updatedBy" db:"updated_by"`
 	CreatedAt        time.Time          `json:"createdAt"        db:"created_at"`
 	UpdatedAt        time.Time          `json:"updatedAt"        db:"updated_at"`
 }

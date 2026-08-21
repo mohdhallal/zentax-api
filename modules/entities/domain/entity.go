@@ -18,6 +18,8 @@ type Entity struct {
 	FiscalCalendarPattern string    `json:"fiscalCalendarPattern" db:"fiscal_calendar_pattern"`
 	FinancialYearEnd      *string   `json:"financialYearEnd"      db:"financial_year_end"`
 	Status                string    `json:"status"                db:"status"`
+	CreatedBy             *string   `json:"createdBy" db:"created_by"`
+	UpdatedBy             *string   `json:"updatedBy" db:"updated_by"`
 	CreatedAt             time.Time `json:"createdAt"             db:"created_at"`
 	UpdatedAt             time.Time `json:"updatedAt"             db:"updated_at"`
 }

@@ -15,6 +15,8 @@ type ObligationType struct {
 	Template    string           `json:"template"    db:"template"`
 	Status      string           `json:"status"      db:"status"`
 	Description *string          `json:"description" db:"description"`
+	CreatedBy   *string          `json:"createdBy" db:"created_by"`
+	UpdatedBy   *string          `json:"updatedBy" db:"updated_by"`
 	CreatedAt   time.Time        `json:"createdAt"   db:"created_at"`
 	UpdatedAt   time.Time        `json:"updatedAt"   db:"updated_at"`
 }

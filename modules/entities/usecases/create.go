@@ -16,5 +16,12 @@ func (uc *UseCases) Create(ctx context.Context, input domain.CreateEntityInput) 
 	if input.FiscalCalendarPattern == "" {
 		input.FiscalCalendarPattern = "standard"
 	}
-	return uc.repo.Create(ctx, input)
+	e, err := uc.repo.Create(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	if err := uc.audit.Record(ctx, "entity.created", "entity", e.ID, nil); err != nil {
+		return nil, err
+	}
+	return e, nil
 }

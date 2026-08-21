@@ -19,5 +19,5 @@ func (uc *UseCases) Delete(ctx context.Context, id domain.EntityID) error {
 	if !deleted {
 		return apperrors.NewNotFound(domain.ErrEntityNotFound(id))
 	}
-	return nil
+	return uc.audit.Record(ctx, "entity.deleted", "entity", id, nil)
 }

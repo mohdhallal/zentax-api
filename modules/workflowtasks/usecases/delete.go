@@ -19,5 +19,5 @@ func (uc *UseCases) Delete(ctx context.Context, id domain.WorkflowTaskID) error 
 	if !deleted {
 		return apperrors.NewNotFound(domain.ErrWorkflowTaskNotFound(id))
 	}
-	return nil
+	return uc.audit.Record(ctx, "workflow_task.deleted", "workflow_task", id, nil)
 }

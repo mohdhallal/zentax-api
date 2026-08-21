@@ -78,8 +78,18 @@ func (e *Exec) WithinTransaction(ctx context.Context, fn func(ctx context.Contex
 	// pooling. A tenant-less transaction (e.g. health, or the tenants
 	// registry) simply leaves the GUC unset; RLS on tenant-scoped tables then
 	// fails closed (current_setting returns NULL → no rows match).
+	//
+	// ADR-0008: app.user_id is bound alongside it so created_by/updated_by
+	// default from the acting user (actor-by-ID attribution). Empty when the
+	// requester is not a user (NULLIF in the DDL turns it into NULL).
 	if tenantID := app.GetTenantID(ctx); tenantID != "" {
-		if _, err := tx.ExecContext(ctx, `SELECT set_config('app.tenant_id', $1, true)`, tenantID); err != nil {
+		userID := ""
+		if req := app.GetRequester(ctx); req != nil && req.IsUser() {
+			userID = req.ID
+		}
+		if _, err := tx.ExecContext(ctx,
+			`SELECT set_config('app.tenant_id', $1, true), set_config('app.user_id', $2, true)`,
+			tenantID, userID); err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("bind tenant to transaction: %w", err)
 		}

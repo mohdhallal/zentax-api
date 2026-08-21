@@ -8,7 +8,7 @@ import baserepo "github.com/mohamadhallal/zentax-api/shared/repositories"
 const taskInstanceColumns = `id, workflow_id, workflow_task_id, period_code, name, description, task_type, ` +
 	`status, assignee_id, due_date, period_end_date, filing_deadline, approval_required, approved_by, ` +
 	`approved_at, completed_at, submitted_by, submitted_at, rejection_reason, order_index, notes, ` +
-	`data_template_id, tax_data, tax_data_status, created_at, updated_at`
+	`data_template_id, tax_data, tax_data_status, created_at, updated_at, created_by, updated_by`
 
 var sqlConfig = baserepo.SQLConfig{
 	AllowedColumns: map[string]bool{
@@ -38,6 +38,7 @@ var sqlConfig = baserepo.SQLConfig{
 		    notes = $4,
 		    tax_data = $5,
 		    tax_data_status = $6,
+		    updated_by = NULLIF(current_setting('app.user_id', true), '')::uuid,
 		    updated_at = NOW()
 		WHERE id = $1
 		RETURNING ` + taskInstanceColumns,
@@ -51,13 +52,14 @@ var sqlConfig = baserepo.SQLConfig{
 const submitForApprovalSQL = `
 	UPDATE task_instances
 	SET status = 'pending_approval', submitted_by = $2, submitted_at = NOW(),
-	    rejection_reason = NULL, updated_at = NOW()
+	    rejection_reason = NULL, updated_by = NULLIF(current_setting('app.user_id', true), '')::uuid, updated_at = NOW()
 	WHERE id = $1
 	RETURNING ` + taskInstanceColumns
 
 const approveSQL = `
 	UPDATE task_instances
 	SET status = 'completed', approved_by = $2, approved_at = NOW(), completed_at = NOW(),
+	    updated_by = NULLIF(current_setting('app.user_id', true), '')::uuid,
 	    updated_at = NOW()
 	WHERE id = $1
 	RETURNING ` + taskInstanceColumns
@@ -65,6 +67,6 @@ const approveSQL = `
 const rejectSQL = `
 	UPDATE task_instances
 	SET status = 'in_progress', submitted_by = NULL, submitted_at = NULL,
-	    rejection_reason = $2, updated_at = NOW()
+	    rejection_reason = $2, updated_by = NULLIF(current_setting('app.user_id', true), '')::uuid, updated_at = NOW()
 	WHERE id = $1
 	RETURNING ` + taskInstanceColumns

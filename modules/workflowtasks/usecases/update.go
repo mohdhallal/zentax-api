@@ -21,5 +21,8 @@ func (uc *UseCases) Update(ctx context.Context, id domain.WorkflowTaskID, input 
 	if wt == nil {
 		return nil, apperrors.NewNotFound(domain.ErrWorkflowTaskNotFound(id))
 	}
+	if err := uc.audit.Record(ctx, "workflow_task.updated", "workflow_task", id, nil); err != nil {
+		return nil, err
+	}
 	return wt, nil
 }

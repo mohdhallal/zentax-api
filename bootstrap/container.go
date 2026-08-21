@@ -22,6 +22,7 @@ import (
 	workflowtasksdomain "github.com/mohamadhallal/zentax-api/modules/workflowtasks/domain"
 	workflowtaskspg "github.com/mohamadhallal/zentax-api/modules/workflowtasks/repositories/pg"
 	workflowtasksusecases "github.com/mohamadhallal/zentax-api/modules/workflowtasks/usecases"
+	"github.com/mohamadhallal/zentax-api/platform/audit"
 	"github.com/mohamadhallal/zentax-api/platform/authz"
 	authzpg "github.com/mohamadhallal/zentax-api/platform/authz/pg"
 	"github.com/mohamadhallal/zentax-api/platform/database"
@@ -58,16 +59,21 @@ func NewContainer(db database.ExecerPg) *Container {
 	// use case; a tenant-wide grant short-circuits it without a DB lookup.
 	authorizer := authz.NewAuthorizer(authzpg.NewResolver(db))
 
-	generator := taskinstancesusecases.NewGenerator(taskInstanceRepo, workflowRepo, workflowTaskRepo, entityRepo, authorizer)
+	// Application audit trail (ADR-0008): every domain mutation appends an
+	// entry on the same transaction — the write and its evidence commit or
+	// roll back together.
+	auditRec := audit.NewRecorder(db)
+
+	generator := taskinstancesusecases.NewGenerator(taskInstanceRepo, workflowRepo, workflowTaskRepo, entityRepo, authorizer).WithAudit(auditRec)
 
 	return &Container{
 		NexusAccountAPIKeyUseCases: nexusAccountAPIKeyUC,
-		EntityUseCases:             entitiesusecases.NewUseCases(entityRepo, authorizer),
-		ObligationTypeUseCases:     obligationtypesusecases.NewUseCases(obligationTypeRepo, authorizer),
-		EntityObligationUseCases:   entityobligationsusecases.NewUseCases(entityObligationRepo, authorizer),
-		WorkflowUseCases:           workflowsusecases.NewUseCases(workflowRepo, authorizer),
-		WorkflowTaskUseCases:       workflowtasksusecases.NewUseCases(workflowTaskRepo, authorizer),
-		TaskInstanceUseCases:       taskinstancesusecases.NewUseCases(taskInstanceRepo, authorizer),
+		EntityUseCases:             entitiesusecases.NewUseCases(entityRepo, authorizer).WithAudit(auditRec),
+		ObligationTypeUseCases:     obligationtypesusecases.NewUseCases(obligationTypeRepo, authorizer).WithAudit(auditRec),
+		EntityObligationUseCases:   entityobligationsusecases.NewUseCases(entityObligationRepo, authorizer).WithAudit(auditRec),
+		WorkflowUseCases:           workflowsusecases.NewUseCases(workflowRepo, authorizer).WithAudit(auditRec),
+		WorkflowTaskUseCases:       workflowtasksusecases.NewUseCases(workflowTaskRepo, authorizer).WithAudit(auditRec),
+		TaskInstanceUseCases:       taskinstancesusecases.NewUseCases(taskInstanceRepo, authorizer).WithAudit(auditRec),
 		WorkflowStarter:            generator,
 	}
 }

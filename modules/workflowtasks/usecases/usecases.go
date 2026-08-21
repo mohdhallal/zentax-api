@@ -2,12 +2,14 @@ package usecases
 
 import (
 	"github.com/mohamadhallal/zentax-api/modules/workflowtasks/domain"
+	"github.com/mohamadhallal/zentax-api/platform/audit"
 	"github.com/mohamadhallal/zentax-api/platform/authz"
 )
 
 type UseCases struct {
 	repo       domain.WorkflowTaskRepository
 	authorizer *authz.Authorizer
+	audit      *audit.Recorder
 }
 
 // NewUseCases builds the workflow-task use cases; the authorizer is optional
@@ -32,4 +34,11 @@ func applyDueDateDefaults(reference, unit, direction *string) {
 	if *direction == "" {
 		*direction = "before"
 	}
+}
+
+// WithAudit injects the audit recorder (ADR-0008). Optional and nil-safe —
+// unit tests construct without it; the container always chains it on.
+func (uc *UseCases) WithAudit(r *audit.Recorder) *UseCases {
+	uc.audit = r
+	return uc
 }

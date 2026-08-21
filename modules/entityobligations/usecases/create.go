@@ -11,5 +11,12 @@ func (uc *UseCases) Create(ctx context.Context, input domain.CreateEntityObligat
 	if err := uc.authorizer.EnsureEntity(ctx, input.EntityID, authz.EntityObligationWrite); err != nil {
 		return nil, err
 	}
-	return uc.repo.Create(ctx, input)
+	eo, err := uc.repo.Create(ctx, input)
+	if err != nil {
+		return nil, err
+	}
+	if err := uc.audit.Record(ctx, "entity_obligation.created", "entity_obligation", eo.ID, nil); err != nil {
+		return nil, err
+	}
+	return eo, nil
 }

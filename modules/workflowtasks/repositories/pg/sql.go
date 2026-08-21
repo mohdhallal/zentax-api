@@ -6,7 +6,7 @@ import baserepo "github.com/mohamadhallal/zentax-api/shared/repositories"
 // required_documents (JSONB) scans into the domain.DocumentRequirements type.
 const workflowTaskColumns = `id, workflow_id, name, description, task_type, role_label, approval_required, ` +
 	`due_date_reference, due_date_offset_value, due_date_offset_unit, due_date_offset_direction, ` +
-	`order_index, data_template_id, required_documents, created_at, updated_at`
+	`order_index, data_template_id, required_documents, created_at, updated_at, created_by, updated_by`
 
 var sqlConfig = baserepo.SQLConfig{
 	AllowedColumns: map[string]bool{
@@ -40,6 +40,7 @@ var sqlConfig = baserepo.SQLConfig{
 		    order_index = $11,
 		    data_template_id = $12,
 		    required_documents = $13,
+		    updated_by = NULLIF(current_setting('app.user_id', true), '')::uuid,
 		    updated_at = NOW()
 		WHERE id = $1
 		RETURNING ` + workflowTaskColumns,

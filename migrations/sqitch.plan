@@ -15,3 +15,5 @@
 20260821000008_sessions [20260821000007_users] 2026-08-21T00:00:08Z Mohamad Hallal <mohdhallal@gmail.com> # Create sessions table (server-side sessions, hashed token, not RLS)
 20260821000009_rbac_schema [20260821000007_users 20260821000001_entities] 2026-08-21T00:00:09Z Mohamad Hallal <mohdhallal@gmail.com> # Create user_grants + entity_closure (scoped-RBAC schema, RLS; enforced in a later increment)
 20260821000010_task_instance_approvals [20260821000006_task_instances] 2026-08-21T00:00:10Z Mohamad Hallal <mohdhallal@gmail.com> # Add task-instance approval-flow columns (submitted_by/at, rejection_reason)
+20260821000011_actor_columns [20260821000006_task_instances 20260821000007_users] 2026-08-21T00:00:11Z Mohamad Hallal <mohdhallal@gmail.com> # Add created_by/updated_by (GUC-defaulted) to all domain tables (ADR-0008 actor-by-ID)
+20260821000012_audit_log [20260821000000_tenants] 2026-08-21T00:00:12Z Mohamad Hallal <mohdhallal@gmail.com> # Create audit_log (append-only via RLS, per-tenant hash chain, PII-free envelope)

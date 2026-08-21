@@ -26,5 +26,8 @@ func (uc *UseCases) Update(ctx context.Context, id domain.EntityID, input domain
 	if entity == nil {
 		return nil, apperrors.NewNotFound(domain.ErrEntityNotFound(id))
 	}
+	if err := uc.audit.Record(ctx, "entity.updated", "entity", id, nil); err != nil {
+		return nil, err
+	}
 	return entity, nil
 }

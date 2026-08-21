@@ -26,5 +26,8 @@ func (uc *UseCases) Update(ctx context.Context, id domain.ObligationTypeID, inpu
 	if ot == nil {
 		return nil, apperrors.NewNotFound(domain.ErrObligationTypeNotFound(id))
 	}
+	if err := uc.audit.Record(ctx, "obligation_type.updated", "obligation_type", id, nil); err != nil {
+		return nil, err
+	}
 	return ot, nil
 }

@@ -23,6 +23,8 @@ type Workflow struct {
 	EndDate          *string     `json:"endDate"          db:"end_date"`
 	TasksSequential  bool        `json:"tasksSequential"  db:"tasks_sequential"`
 	Status           string      `json:"status"           db:"status"`
+	CreatedBy        *string     `json:"createdBy" db:"created_by"`
+	UpdatedBy        *string     `json:"updatedBy" db:"updated_by"`
 	CreatedAt        time.Time   `json:"createdAt"        db:"created_at"`
 	UpdatedAt        time.Time   `json:"updatedAt"        db:"updated_at"`
 }
