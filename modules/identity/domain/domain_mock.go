@@ -85,3 +85,57 @@ func sessionOrNil(v any) *Session {
 	}
 	return v.(*Session)
 }
+
+func (m *UserRepositoryMock) ListByKind(ctx context.Context, tenantID, kind string) ([]User, error) {
+	args := m.Called(ctx, tenantID, kind)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]User), args.Error(1)
+}
+
+// TokenRepositoryMock is a testify mock of TokenRepository.
+type TokenRepositoryMock struct {
+	mock.Mock
+}
+
+var _ TokenRepository = (*TokenRepositoryMock)(nil)
+
+func (m *TokenRepositoryMock) Create(ctx context.Context, input CreateAPITokenInput) (*APIToken, error) {
+	args := m.Called(ctx, input)
+	return tokenOrNil(args.Get(0)), args.Error(1)
+}
+
+func (m *TokenRepositoryMock) GetByTokenHash(ctx context.Context, tokenHash string) (*APIToken, error) {
+	args := m.Called(ctx, tokenHash)
+	return tokenOrNil(args.Get(0)), args.Error(1)
+}
+
+func (m *TokenRepositoryMock) TouchLastUsed(ctx context.Context, id string, at time.Time) error {
+	args := m.Called(ctx, id, at)
+	return args.Error(0)
+}
+
+func (m *TokenRepositoryMock) Revoke(ctx context.Context, id, tenantID string) (bool, error) {
+	args := m.Called(ctx, id, tenantID)
+	return args.Bool(0), args.Error(1)
+}
+
+func tokenOrNil(v any) *APIToken {
+	if v == nil {
+		return nil
+	}
+	return v.(*APIToken)
+}
+
+// GrantWriterMock is a testify mock of GrantWriter.
+type GrantWriterMock struct {
+	mock.Mock
+}
+
+var _ GrantWriter = (*GrantWriterMock)(nil)
+
+func (m *GrantWriterMock) Insert(ctx context.Context, userID, role string, scopeEntityID *string) error {
+	args := m.Called(ctx, userID, role, scopeEntityID)
+	return args.Error(0)
+}

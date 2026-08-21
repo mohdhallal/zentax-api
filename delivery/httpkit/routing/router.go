@@ -22,7 +22,7 @@ type Router struct {
 	Chi               gochi.Router
 	Mode              types.ServerMode
 	AuthValidator     authdomain.Validator
-	SessionAuth       identity.SessionAuthenticator
+	SessionAuth       identity.RequestAuthenticator
 	SessionCookieName string
 	Grants            authz.GrantLoader
 	Db                database.ExecerPgTx
@@ -34,7 +34,7 @@ func NewRouter(
 	chi gochi.Router,
 	mode types.ServerMode,
 	validator authdomain.Validator,
-	sessionAuth identity.SessionAuthenticator,
+	sessionAuth identity.RequestAuthenticator,
 	sessionCookieName string,
 	grants authz.GrantLoader,
 	db database.ExecerPgTx,

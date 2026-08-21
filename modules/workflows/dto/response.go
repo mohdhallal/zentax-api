@@ -22,6 +22,8 @@ func WorkflowToJSON(wf *domain.Workflow) map[string]any {
 		"endDate":          wf.EndDate,
 		"tasksSequential":  wf.TasksSequential,
 		"status":           wf.Status,
+		"createdBy":        wf.CreatedBy,
+		"updatedBy":        wf.UpdatedBy,
 		"createdAt":        wf.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
 		"updatedAt":        wf.UpdatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
 	}

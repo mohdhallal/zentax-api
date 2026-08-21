@@ -25,7 +25,7 @@ func testSettings() Settings {
 func newUC() (*UseCases, *domain.UserRepositoryMock, *domain.SessionRepositoryMock) {
 	users := new(domain.UserRepositoryMock)
 	sessions := new(domain.SessionRepositoryMock)
-	return NewUseCases(users, sessions, testSettings()), users, sessions
+	return NewUseCases(users, sessions, new(domain.TokenRepositoryMock), new(domain.GrantWriterMock), testSettings()), users, sessions
 }
 
 func activeUser(t *testing.T, password string) *domain.User {

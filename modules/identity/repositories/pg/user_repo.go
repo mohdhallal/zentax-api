@@ -12,7 +12,7 @@ import (
 
 var _ domain.UserRepository = (*UserRepo)(nil)
 
-const userColumns = `id, tenant_id, email, name, password_hash, status, totp_secret_enc, ` +
+const userColumns = `id, tenant_id, email, name, kind, password_hash, status, totp_secret_enc, ` +
 	`totp_enabled, failed_login_attempts, locked_until, created_at, updated_at`
 
 // UserRepo persists users. Users are NOT RLS-scoped (login queries by email
@@ -49,16 +49,28 @@ func (r *UserRepo) Create(ctx context.Context, input domain.CreateUserInput) (*d
 	if status == "" {
 		status = "active"
 	}
+	kind := input.Kind
+	if kind == "" {
+		kind = domain.KindHuman
+	}
 	var u domain.User
 	err := r.db.GetContext(ctx, &u,
-		`INSERT INTO users (tenant_id, email, name, password_hash, status)
-		 VALUES ($1, $2, $3, $4, $5)
+		`INSERT INTO users (tenant_id, email, name, kind, password_hash, status)
+		 VALUES ($1, $2, $3, $4, $5, $6)
 		 RETURNING `+userColumns,
-		input.TenantID, input.Email, input.Name, input.PasswordHash, status)
+		input.TenantID, input.Email, input.Name, kind, input.PasswordHash, status)
 	if err != nil {
 		return nil, err
 	}
 	return &u, nil
+}
+
+func (r *UserRepo) ListByKind(ctx context.Context, tenantID, kind string) ([]domain.User, error) {
+	var users []domain.User
+	err := r.db.SelectContext(ctx, &users,
+		`SELECT `+userColumns+` FROM users WHERE tenant_id = $1 AND kind = $2 ORDER BY created_at DESC`,
+		tenantID, kind)
+	return users, err
 }
 
 func (r *UserRepo) RecordFailedLogin(ctx context.Context, id string, attempts int, lockedUntil *time.Time) error {

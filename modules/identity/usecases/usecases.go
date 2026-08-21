@@ -28,15 +28,26 @@ var dummyHash, _ = crypto.HashPassword("timing-equalizer-not-a-real-password")
 type UseCases struct {
 	users    domain.UserRepository
 	sessions domain.SessionRepository
+	tokens   domain.TokenRepository
+	grants   domain.GrantWriter
 	settings Settings
 	now      func() time.Time
 }
 
-func NewUseCases(users domain.UserRepository, sessions domain.SessionRepository, settings Settings) *UseCases {
+func NewUseCases(
+	users domain.UserRepository,
+	sessions domain.SessionRepository,
+	tokens domain.TokenRepository,
+	grants domain.GrantWriter,
+	settings Settings,
+) *UseCases {
 	if settings.TOTPIssuer == "" {
 		settings.TOTPIssuer = "ZenTax"
 	}
-	return &UseCases{users: users, sessions: sessions, settings: settings, now: time.Now}
+	return &UseCases{
+		users: users, sessions: sessions, tokens: tokens, grants: grants,
+		settings: settings, now: time.Now,
+	}
 }
 
 // createSession mints a session for a user and returns the raw cookie token.

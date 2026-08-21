@@ -71,10 +71,15 @@ func (b *RequestBuilder) WithInternalAuth(key, secret string) *RequestBuilder {
 	return b.withHeader("Authorization", "Basic "+encoded)
 }
 
-// WithSession sets the session cookie that RequireSession reads to authenticate
-// the request (ADR-0011). Suite.as() wires this to a seeded user/session.
+// WithSession sets the session cookie that RequireAuth reads to authenticate
+// the request (ADR-0011). Suite.As() wires this to a seeded user/session.
 func (b *RequestBuilder) WithSession(token string) *RequestBuilder {
 	return b.withHeader("Cookie", "zentax_session="+token)
+}
+
+// WithBearer authenticates as a service account via an API token ("ztx_...").
+func (b *RequestBuilder) WithBearer(token string) *RequestBuilder {
+	return b.withHeader("Authorization", "Bearer "+token)
 }
 
 func (b *RequestBuilder) do(t *testing.T, method, path string, body any) *TestResponse {

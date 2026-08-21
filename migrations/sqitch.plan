@@ -17,3 +17,4 @@
 20260821000010_task_instance_approvals [20260821000006_task_instances] 2026-08-21T00:00:10Z Mohamad Hallal <mohdhallal@gmail.com> # Add task-instance approval-flow columns (submitted_by/at, rejection_reason)
 20260821000011_actor_columns [20260821000006_task_instances 20260821000007_users] 2026-08-21T00:00:11Z Mohamad Hallal <mohdhallal@gmail.com> # Add created_by/updated_by (GUC-defaulted) to all domain tables (ADR-0008 actor-by-ID)
 20260821000012_audit_log [20260821000000_tenants] 2026-08-21T00:00:12Z Mohamad Hallal <mohdhallal@gmail.com> # Create audit_log (append-only via RLS, per-tenant hash chain, PII-free envelope)
+20260821000013_service_accounts [20260821000007_users] 2026-08-21T00:00:13Z Mohamad Hallal <mohdhallal@gmail.com> # Service accounts (users.kind) + api_tokens bearer credentials (machine identity)

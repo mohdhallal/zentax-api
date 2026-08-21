@@ -18,6 +18,8 @@ func WorkflowTaskToJSON(wt *domain.WorkflowTask) map[string]any {
 		"orderIndex":             wt.OrderIndex,
 		"dataTemplateId":         wt.DataTemplateID,
 		"requiredDocuments":      wt.RequiredDocuments,
+		"createdBy":              wt.CreatedBy,
+		"updatedBy":              wt.UpdatedBy,
 		"createdAt":              wt.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
 		"updatedAt":              wt.UpdatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
 	}

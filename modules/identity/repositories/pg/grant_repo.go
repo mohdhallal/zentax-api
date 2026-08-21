@@ -44,3 +44,13 @@ func (r *GrantRepo) ListForUser(ctx context.Context, userID string) ([]authz.Gra
 	}
 	return grants, rows.Err()
 }
+
+// Insert writes one grant. user_grants is RLS-scoped: tenant_id defaults from
+// the GUC bound on the request transaction, and the isolation policy's WITH
+// CHECK refuses a mismatched tenant.
+func (r *GrantRepo) Insert(ctx context.Context, userID, role string, scopeEntityID *string) error {
+	_, err := r.db.ExecContext(ctx,
+		`INSERT INTO user_grants (user_id, role, scope_entity_id) VALUES ($1, $2, $3)`,
+		userID, role, scopeEntityID)
+	return err
+}

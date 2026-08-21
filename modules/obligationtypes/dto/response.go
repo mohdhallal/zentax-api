@@ -11,6 +11,8 @@ func ObligationTypeToJSON(ot *domain.ObligationType) map[string]any {
 		"template":    ot.Template,
 		"status":      ot.Status,
 		"description": ot.Description,
+		"createdBy":   ot.CreatedBy,
+		"updatedBy":   ot.UpdatedBy,
 		"createdAt":   ot.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
 		"updatedAt":   ot.UpdatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
 	}

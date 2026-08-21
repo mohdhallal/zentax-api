@@ -115,6 +115,21 @@ func RoleHasCapability(role Role, cap Capability) bool {
 	return roleCapabilities[role][cap]
 }
 
+// KnownRole reports whether role exists in the matrix (grantable).
+func KnownRole(role Role) bool {
+	_, ok := roleCapabilities[role]
+	return ok
+}
+
+// HumanOnly reports whether cap may never be exercised by a service principal,
+// regardless of granted roles. Approval is the attestation at the heart of
+// segregation of duties (ADR-0012/0018) — a machine can prepare and submit,
+// but only a human approves (or rejects). Enforced by the capability
+// middleware and again by the Authorizer (defense in depth).
+func HumanOnly(cap Capability) bool {
+	return cap == TaskApprove
+}
+
 // Grant is one user_grants row, reduced to what authorization needs: the role
 // and its scope (nil scope = tenant-wide).
 type Grant struct {

@@ -3,6 +3,7 @@ package authz
 import (
 	"context"
 
+	"github.com/mohamadhallal/zentax-api/app"
 	apperrors "github.com/mohamadhallal/zentax-api/errors"
 )
 
@@ -94,6 +95,12 @@ func (a *Authorizer) authorizeVia(
 // authorizes only a target entity within its subtree (its scope_entity_id equals
 // the target or one of its ancestors). Anything else is 403.
 func (a *Authorizer) authorize(ctx context.Context, entityID string, cap Capability) error {
+	// Defense in depth for the human-only rule (the capability middleware is
+	// the primary gate): a service principal never approves.
+	if req := app.GetRequester(ctx); req != nil && req.ServiceAccount && HumanOnly(cap) {
+		return apperrors.NewForbidden("this action requires a human user")
+	}
+
 	grants := GrantsFrom(ctx)
 
 	var scopes []string // scope ids of scoped grants that carry cap

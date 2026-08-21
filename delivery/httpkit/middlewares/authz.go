@@ -27,6 +27,14 @@ func RequireCapability(loader authz.GrantLoader, cap authz.Capability) types.Mid
 				return
 			}
 
+			// Human-only capabilities (ADR-0012/0018): approval is an
+			// attestation — a service principal may never exercise it,
+			// regardless of its granted roles.
+			if requester.ServiceAccount && authz.HumanOnly(cap) {
+				httperr.HandleError(w, r, httperr.New(httperr.ErrForbidden, "this action requires a human user"))
+				return
+			}
+
 			grants, err := loader.ListForUser(r.Context(), requester.ID)
 			if err != nil {
 				httperr.HandleError(w, r, err)

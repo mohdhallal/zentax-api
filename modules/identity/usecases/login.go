@@ -22,7 +22,8 @@ func (uc *UseCases) Login(ctx context.Context, input domain.LoginInput) (*domain
 	}
 
 	// Generic failure + a dummy verify to keep timing independent of existence.
-	if user == nil || user.PasswordHash == nil || !user.IsActive() {
+	// Service accounts never log in interactively — API tokens only.
+	if user == nil || user.IsService() || user.PasswordHash == nil || !user.IsActive() {
 		_, _ = crypto.VerifyPassword(input.Password, dummyHash)
 		return nil, apperrors.NewUnauthorized(domain.MsgInvalidCredentials)
 	}

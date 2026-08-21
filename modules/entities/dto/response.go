@@ -17,6 +17,8 @@ func EntityToJSON(e *domain.Entity) map[string]any {
 		"fiscalCalendarPattern": e.FiscalCalendarPattern,
 		"financialYearEnd":      e.FinancialYearEnd,
 		"status":                e.Status,
+		"createdBy":             e.CreatedBy,
+		"updatedBy":             e.UpdatedBy,
 		"createdAt":             e.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
 		"updatedAt":             e.UpdatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
 	}

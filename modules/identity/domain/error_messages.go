@@ -10,4 +10,9 @@ const (
 	MsgInvalidMFACode     = "invalid authentication code"
 	MsgMFANotEnrolled     = "MFA is not enrolled"
 	MsgMFAAlreadyEnabled  = "MFA is already enabled"
+
+	// Machine identity (service accounts + API tokens).
+	MsgTokenInvalid           = "API token is invalid, expired, or revoked"
+	MsgTokenNotFound          = "API token not found"
+	MsgServiceAccountNotFound = "service account not found"
 )

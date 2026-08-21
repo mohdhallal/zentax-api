@@ -44,7 +44,7 @@ green on both the main module and `acceptance/`.
 
 Migrations (sqitch): `tenants`, `entities`, `obligation_types`, `entity_obligations`,
 `workflows`, `workflow_tasks`, `task_instances`, `task_instance_approvals`, `actor_columns`,
-`audit_log` (+ boilerplate `appschema`,
+`audit_log`, `service_accounts` (+ boilerplate `appschema`,
 `internal_api_keys`, `nexus_accounts_api_keys`).
 
 **Auth / identity (Increments A + B):** first-party email/password + server-side sessions + TOTP MFA
@@ -93,9 +93,20 @@ Commits: `4cdcd4e` scaffold · `2851179` tenancy+entities · `d074780` obligatio
     SoD + the submit/approve/reject actions are **done** (see Domain features).
   - **WorkOS SSO/SCIM (Phase 2).** `IdentityBroker` seam is stubbed only.
   - Breach-checked passwords (HIBP), password-reset / invite flows, Redis session store (Postgres for now).
-- Consequence: the API is authenticated + tenant-isolated + **role- and scope-authorized on writes**, with
-  the **preparer→reviewer approval flow + SoD + immutable-approval lock** in place. Reads remain tenant-wide
-  (list-scope narrowing is a later increment).
+- **Machine identity — DONE (agentic-AI B1).** Service accounts are `users.kind='service'` rows (grants,
+  audit actor_id, and created_by attribution reuse the same rails; synthetic internal email; login rejects
+  them). Bearer **API tokens** (`ztx_...`, sha256-hashed at rest, mandatory expiry, revocation tombstones)
+  authenticate via `Authorization: Bearer` in the same `RequireAuth` middleware, then flow through the
+  identical grants → capability → subtree-scope → RLS chain. **Approval is human-only**: a service
+  principal is denied `task:approve` regardless of role (enforced at the capability gate + the Authorizer),
+  and machines cannot hold `member:manage` implicitly (no self-replication). Admin surface (gated by
+  member:manage): `POST/GET /service-accounts`, `POST /service-accounts/{id}/tokens` (cleartext shown
+  once), `POST /tokens/{id}/revoke`. Verified live incl. attribution, revocation, expiry, cross-tenant 404s.
+  **Remaining:** OAuth 2.1 client credentials (MCP-aligned, Phase 2 with WorkOS); per-principal rate limits.
+- Consequence: the API is authenticated (humans **and machines**) + tenant-isolated + **role- and
+  scope-authorized on writes**, with the **preparer→reviewer approval flow + SoD + immutable-approval
+  lock** in place and approval human-only. Reads remain tenant-wide (list-scope narrowing is a later
+  increment).
 
 ### 🟠 Domain features still to build
 - **Data Templates** module — `workflow_tasks.data_template_id` / `task_instances.data_template_id`

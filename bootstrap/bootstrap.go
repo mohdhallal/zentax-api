@@ -74,12 +74,16 @@ func New(cfg *config.Config, mode types.ServerMode) (*App, error) {
 
 	authValidator := authuc.NewInternalAuth(authpg.NewInternalAPIKeyRepo(db))
 
-	// First-party identity/auth (ADR-0011). The encryption key is validated at
-	// startup for deployed envs; a missing dev key just disables MFA (nil key).
+	// First-party identity/auth (ADR-0011) + machine identity (service
+	// accounts / API tokens). The encryption key is validated at startup for
+	// deployed envs; a missing dev key just disables MFA (nil key).
 	encKey, _ := cfg.Auth.DecodeEncryptionKey()
+	grantRepo := identitypg.NewGrantRepo(db)
 	identityUC := identityusecases.NewUseCases(
 		identitypg.NewUserRepo(db),
 		identitypg.NewSessionRepo(db),
+		identitypg.NewTokenRepo(db),
+		grantRepo,
 		identityusecases.Settings{
 			EncryptionKey:      encKey,
 			SessionIdleTTL:     time.Duration(cfg.Auth.SessionIdleTTLMinutes) * time.Minute,
@@ -100,11 +104,10 @@ func New(cfg *config.Config, mode types.ServerMode) (*App, error) {
 	chiRouter.Use(middlewares.MetricsMiddleware(metricsRecorder.HTTP()))
 	chiRouter.Use(middlewares.RequestLoggerMiddleware)
 
-	grantRepo := identitypg.NewGrantRepo(db)
 	router := routing.NewRouter(chiRouter, mode, authValidator, identityUC, cfg.Auth.SessionCookieName, grantRepo, db)
 
 	health.RegisterRoutes(router, mode)
-	identity.RegisterRoutes(router, identityUC, cookieCfg)
+	identity.RegisterRoutes(router, identityUC, identityUC, cookieCfg)
 	entities.RegisterRoutes(router, ctr.EntityUseCases)
 	obligationtypes.RegisterRoutes(router, ctr.ObligationTypeUseCases)
 	entityobligations.RegisterRoutes(router, ctr.EntityObligationUseCases)
