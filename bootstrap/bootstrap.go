@@ -100,7 +100,8 @@ func New(cfg *config.Config, mode types.ServerMode) (*App, error) {
 	chiRouter.Use(middlewares.MetricsMiddleware(metricsRecorder.HTTP()))
 	chiRouter.Use(middlewares.RequestLoggerMiddleware)
 
-	router := routing.NewRouter(chiRouter, mode, authValidator, identityUC, cfg.Auth.SessionCookieName, db)
+	grantRepo := identitypg.NewGrantRepo(db)
+	router := routing.NewRouter(chiRouter, mode, authValidator, identityUC, cfg.Auth.SessionCookieName, grantRepo, db)
 
 	health.RegisterRoutes(router, mode)
 	identity.RegisterRoutes(router, identityUC, cookieCfg)

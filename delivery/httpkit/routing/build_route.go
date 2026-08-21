@@ -67,6 +67,13 @@ func buildRoute(route types.Route, router *Router) http.HandlerFunc {
 		writeResponse(w, r, response)
 	})
 
+	// The capability check (scoped RBAC, ADR-0012) must run INSIDE the transaction
+	// so its RLS-scoped user_grants read sees the session tenant, but BEFORE the
+	// handler — so it wraps the handler here and Transaction wraps it just below.
+	if config.Capability != "" {
+		handler = middlewares.RequireCapability(router.Grants, config.Capability)(handler)
+	}
+
 	// A tenant-scoped route needs a transaction to carry the SET LOCAL
 	// app.tenant_id GUC that drives RLS (ADR-0004), so Tenant implies Tx.
 	if config.Tx || config.Tenant {

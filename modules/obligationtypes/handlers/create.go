@@ -8,6 +8,7 @@ import (
 	"github.com/mohamadhallal/zentax-api/delivery/httpkit/types"
 	"github.com/mohamadhallal/zentax-api/modules/obligationtypes/domain"
 	"github.com/mohamadhallal/zentax-api/modules/obligationtypes/dto"
+	"github.com/mohamadhallal/zentax-api/platform/authz"
 )
 
 type CreateObligationTypeHandler struct {
@@ -20,10 +21,11 @@ func NewCreateObligationTypeHandler(uc domain.ObligationTypeUseCases) *CreateObl
 
 func (h *CreateObligationTypeHandler) DefineRoute() types.RouteDefinition {
 	return types.RouteDefinition{
-		Method:   http.MethodPost,
-		Path:     "/",
-		Exposure: types.Exposures.External,
-		Tenant:   true,
+		Method:     http.MethodPost,
+		Path:       "/",
+		Exposure:   types.Exposures.External,
+		Tenant:     true,
+		Capability: authz.ObligationTypeWrite,
 	}
 }
 

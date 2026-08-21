@@ -8,6 +8,7 @@ import (
 	"github.com/mohamadhallal/zentax-api/delivery/httpkit/types"
 	"github.com/mohamadhallal/zentax-api/modules/workflows/domain"
 	"github.com/mohamadhallal/zentax-api/modules/workflows/dto"
+	"github.com/mohamadhallal/zentax-api/platform/authz"
 )
 
 type DeleteWorkflowHandler struct {
@@ -20,10 +21,11 @@ func NewDeleteWorkflowHandler(uc domain.WorkflowUseCases) *DeleteWorkflowHandler
 
 func (h *DeleteWorkflowHandler) DefineRoute() types.RouteDefinition {
 	return types.RouteDefinition{
-		Method:   http.MethodDelete,
-		Path:     "/{id}",
-		Exposure: types.Exposures.External,
-		Tenant:   true,
+		Method:     http.MethodDelete,
+		Path:       "/{id}",
+		Exposure:   types.Exposures.External,
+		Tenant:     true,
+		Capability: authz.WorkflowWrite,
 	}
 }
 

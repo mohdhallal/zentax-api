@@ -8,6 +8,7 @@ import (
 	"github.com/mohamadhallal/zentax-api/delivery/httpkit/types"
 	"github.com/mohamadhallal/zentax-api/modules/workflowtasks/domain"
 	"github.com/mohamadhallal/zentax-api/modules/workflowtasks/dto"
+	"github.com/mohamadhallal/zentax-api/platform/authz"
 )
 
 type ListWorkflowTasksHandler struct {
@@ -20,11 +21,12 @@ func NewListWorkflowTasksHandler(uc domain.WorkflowTaskUseCases) *ListWorkflowTa
 
 func (h *ListWorkflowTasksHandler) DefineRoute() types.RouteDefinition {
 	return types.RouteDefinition{
-		Method:    http.MethodGet,
-		Path:      "/",
-		Exposure:  types.Exposures.External,
-		Tenant:    true,
-		Paginated: true,
+		Method:     http.MethodGet,
+		Path:       "/",
+		Exposure:   types.Exposures.External,
+		Tenant:     true,
+		Capability: authz.WorkflowTaskRead,
+		Paginated:  true,
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"github.com/mohamadhallal/zentax-api/delivery/httpkit/types"
 	"github.com/mohamadhallal/zentax-api/modules/entities/domain"
 	"github.com/mohamadhallal/zentax-api/modules/entities/dto"
+	"github.com/mohamadhallal/zentax-api/platform/authz"
 )
 
 type DeleteEntityHandler struct {
@@ -20,10 +21,11 @@ func NewDeleteEntityHandler(uc domain.EntityUseCases) *DeleteEntityHandler {
 
 func (h *DeleteEntityHandler) DefineRoute() types.RouteDefinition {
 	return types.RouteDefinition{
-		Method:   http.MethodDelete,
-		Path:     "/{id}",
-		Exposure: types.Exposures.External,
-		Tenant:   true,
+		Method:     http.MethodDelete,
+		Path:       "/{id}",
+		Exposure:   types.Exposures.External,
+		Tenant:     true,
+		Capability: authz.EntityWrite,
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"github.com/mohamadhallal/zentax-api/delivery/httpkit/types"
 	"github.com/mohamadhallal/zentax-api/modules/entityobligations/domain"
 	"github.com/mohamadhallal/zentax-api/modules/entityobligations/dto"
+	"github.com/mohamadhallal/zentax-api/platform/authz"
 )
 
 type GetEntityObligationByIdHandler struct {
@@ -20,10 +21,11 @@ func NewGetEntityObligationByIdHandler(uc domain.EntityObligationUseCases) *GetE
 
 func (h *GetEntityObligationByIdHandler) DefineRoute() types.RouteDefinition {
 	return types.RouteDefinition{
-		Method:   http.MethodGet,
-		Path:     "/{id}",
-		Exposure: types.Exposures.External,
-		Tenant:   true,
+		Method:     http.MethodGet,
+		Path:       "/{id}",
+		Exposure:   types.Exposures.External,
+		Tenant:     true,
+		Capability: authz.EntityObligationRead,
 	}
 }
 

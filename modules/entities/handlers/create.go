@@ -8,6 +8,7 @@ import (
 	"github.com/mohamadhallal/zentax-api/delivery/httpkit/types"
 	"github.com/mohamadhallal/zentax-api/modules/entities/domain"
 	"github.com/mohamadhallal/zentax-api/modules/entities/dto"
+	"github.com/mohamadhallal/zentax-api/platform/authz"
 )
 
 type CreateEntityHandler struct {
@@ -20,10 +21,11 @@ func NewCreateEntityHandler(uc domain.EntityUseCases) *CreateEntityHandler {
 
 func (h *CreateEntityHandler) DefineRoute() types.RouteDefinition {
 	return types.RouteDefinition{
-		Method:   http.MethodPost,
-		Path:     "/",
-		Exposure: types.Exposures.External,
-		Tenant:   true,
+		Method:     http.MethodPost,
+		Path:       "/",
+		Exposure:   types.Exposures.External,
+		Tenant:     true,
+		Capability: authz.EntityWrite,
 	}
 }
 

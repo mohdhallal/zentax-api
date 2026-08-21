@@ -8,6 +8,7 @@ import (
 	"github.com/mohamadhallal/zentax-api/delivery/httpkit/types"
 	"github.com/mohamadhallal/zentax-api/modules/workflows/domain"
 	"github.com/mohamadhallal/zentax-api/modules/workflows/dto"
+	"github.com/mohamadhallal/zentax-api/platform/authz"
 )
 
 type GetWorkflowByIdHandler struct {
@@ -20,10 +21,11 @@ func NewGetWorkflowByIdHandler(uc domain.WorkflowUseCases) *GetWorkflowByIdHandl
 
 func (h *GetWorkflowByIdHandler) DefineRoute() types.RouteDefinition {
 	return types.RouteDefinition{
-		Method:   http.MethodGet,
-		Path:     "/{id}",
-		Exposure: types.Exposures.External,
-		Tenant:   true,
+		Method:     http.MethodGet,
+		Path:       "/{id}",
+		Exposure:   types.Exposures.External,
+		Tenant:     true,
+		Capability: authz.WorkflowRead,
 	}
 }
 

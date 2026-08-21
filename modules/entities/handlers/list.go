@@ -8,6 +8,7 @@ import (
 	"github.com/mohamadhallal/zentax-api/delivery/httpkit/types"
 	"github.com/mohamadhallal/zentax-api/modules/entities/domain"
 	"github.com/mohamadhallal/zentax-api/modules/entities/dto"
+	"github.com/mohamadhallal/zentax-api/platform/authz"
 )
 
 type ListEntitiesHandler struct {
@@ -20,11 +21,12 @@ func NewListEntitiesHandler(uc domain.EntityUseCases) *ListEntitiesHandler {
 
 func (h *ListEntitiesHandler) DefineRoute() types.RouteDefinition {
 	return types.RouteDefinition{
-		Method:    http.MethodGet,
-		Path:      "/",
-		Exposure:  types.Exposures.External,
-		Tenant:    true,
-		Paginated: true,
+		Method:     http.MethodGet,
+		Path:       "/",
+		Exposure:   types.Exposures.External,
+		Tenant:     true,
+		Capability: authz.EntityRead,
+		Paginated:  true,
 	}
 }
 

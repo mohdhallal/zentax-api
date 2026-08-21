@@ -8,6 +8,7 @@ import (
 	"github.com/mohamadhallal/zentax-api/delivery/httpkit/types"
 	"github.com/mohamadhallal/zentax-api/modules/entityobligations/domain"
 	"github.com/mohamadhallal/zentax-api/modules/entityobligations/dto"
+	"github.com/mohamadhallal/zentax-api/platform/authz"
 )
 
 type CreateEntityObligationHandler struct {
@@ -20,10 +21,11 @@ func NewCreateEntityObligationHandler(uc domain.EntityObligationUseCases) *Creat
 
 func (h *CreateEntityObligationHandler) DefineRoute() types.RouteDefinition {
 	return types.RouteDefinition{
-		Method:   http.MethodPost,
-		Path:     "/",
-		Exposure: types.Exposures.External,
-		Tenant:   true,
+		Method:     http.MethodPost,
+		Path:       "/",
+		Exposure:   types.Exposures.External,
+		Tenant:     true,
+		Capability: authz.EntityObligationWrite,
 	}
 }
 

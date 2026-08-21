@@ -8,6 +8,7 @@ import (
 	"github.com/mohamadhallal/zentax-api/delivery/httpkit/types"
 	"github.com/mohamadhallal/zentax-api/modules/workflows/domain"
 	"github.com/mohamadhallal/zentax-api/modules/workflows/dto"
+	"github.com/mohamadhallal/zentax-api/platform/authz"
 )
 
 // StartWorkflowHandler handles POST /workflows/{id}/start — it materializes
@@ -22,10 +23,11 @@ func NewStartWorkflowHandler(starter domain.Starter) *StartWorkflowHandler {
 
 func (h *StartWorkflowHandler) DefineRoute() types.RouteDefinition {
 	return types.RouteDefinition{
-		Method:   http.MethodPost,
-		Path:     "/{id}/start",
-		Exposure: types.Exposures.External,
-		Tenant:   true,
+		Method:     http.MethodPost,
+		Path:       "/{id}/start",
+		Exposure:   types.Exposures.External,
+		Tenant:     true,
+		Capability: authz.WorkflowWrite,
 	}
 }
 

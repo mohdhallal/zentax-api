@@ -8,6 +8,7 @@ import (
 	"github.com/mohamadhallal/zentax-api/delivery/httpkit/types"
 	"github.com/mohamadhallal/zentax-api/modules/taskinstances/domain"
 	"github.com/mohamadhallal/zentax-api/modules/taskinstances/dto"
+	"github.com/mohamadhallal/zentax-api/platform/authz"
 )
 
 type UpdateTaskInstanceHandler struct {
@@ -20,10 +21,11 @@ func NewUpdateTaskInstanceHandler(uc domain.TaskInstanceUseCases) *UpdateTaskIns
 
 func (h *UpdateTaskInstanceHandler) DefineRoute() types.RouteDefinition {
 	return types.RouteDefinition{
-		Method:   http.MethodPut,
-		Path:     "/{id}",
-		Exposure: types.Exposures.External,
-		Tenant:   true,
+		Method:     http.MethodPut,
+		Path:       "/{id}",
+		Exposure:   types.Exposures.External,
+		Tenant:     true,
+		Capability: authz.TaskWrite,
 	}
 }
 

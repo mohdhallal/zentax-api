@@ -8,6 +8,7 @@ import (
 	"github.com/mohamadhallal/zentax-api/delivery/httpkit/types"
 	"github.com/mohamadhallal/zentax-api/modules/obligationtypes/domain"
 	"github.com/mohamadhallal/zentax-api/modules/obligationtypes/dto"
+	"github.com/mohamadhallal/zentax-api/platform/authz"
 )
 
 type GetObligationTypeByIdHandler struct {
@@ -20,10 +21,11 @@ func NewGetObligationTypeByIdHandler(uc domain.ObligationTypeUseCases) *GetOblig
 
 func (h *GetObligationTypeByIdHandler) DefineRoute() types.RouteDefinition {
 	return types.RouteDefinition{
-		Method:   http.MethodGet,
-		Path:     "/{id}",
-		Exposure: types.Exposures.External,
-		Tenant:   true,
+		Method:     http.MethodGet,
+		Path:       "/{id}",
+		Exposure:   types.Exposures.External,
+		Tenant:     true,
+		Capability: authz.ObligationTypeRead,
 	}
 }
 

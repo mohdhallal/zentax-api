@@ -8,6 +8,7 @@ import (
 	"github.com/mohamadhallal/zentax-api/delivery/httpkit/types"
 	"github.com/mohamadhallal/zentax-api/modules/obligationtypes/domain"
 	"github.com/mohamadhallal/zentax-api/modules/obligationtypes/dto"
+	"github.com/mohamadhallal/zentax-api/platform/authz"
 )
 
 type ListObligationTypesHandler struct {
@@ -20,11 +21,12 @@ func NewListObligationTypesHandler(uc domain.ObligationTypeUseCases) *ListObliga
 
 func (h *ListObligationTypesHandler) DefineRoute() types.RouteDefinition {
 	return types.RouteDefinition{
-		Method:    http.MethodGet,
-		Path:      "/",
-		Exposure:  types.Exposures.External,
-		Tenant:    true,
-		Paginated: true,
+		Method:     http.MethodGet,
+		Path:       "/",
+		Exposure:   types.Exposures.External,
+		Tenant:     true,
+		Capability: authz.ObligationTypeRead,
+		Paginated:  true,
 	}
 }
 

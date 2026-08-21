@@ -8,6 +8,7 @@ import (
 	"github.com/mohamadhallal/zentax-api/delivery/httpkit/types"
 	authdomain "github.com/mohamadhallal/zentax-api/modules/auth/domain"
 	identity "github.com/mohamadhallal/zentax-api/modules/identity/domain"
+	"github.com/mohamadhallal/zentax-api/platform/authz"
 	"github.com/mohamadhallal/zentax-api/platform/database"
 )
 
@@ -23,6 +24,7 @@ type Router struct {
 	AuthValidator     authdomain.Validator
 	SessionAuth       identity.SessionAuthenticator
 	SessionCookieName string
+	Grants            authz.GrantLoader
 	Db                database.ExecerPgTx
 	prefix            string
 	registry          *[]RouteMeta
@@ -34,6 +36,7 @@ func NewRouter(
 	validator authdomain.Validator,
 	sessionAuth identity.SessionAuthenticator,
 	sessionCookieName string,
+	grants authz.GrantLoader,
 	db database.ExecerPgTx,
 ) *Router {
 	registry := make([]RouteMeta, 0)
@@ -43,6 +46,7 @@ func NewRouter(
 		AuthValidator:     validator,
 		SessionAuth:       sessionAuth,
 		SessionCookieName: sessionCookieName,
+		Grants:            grants,
 		Db:                db,
 		registry:          &registry,
 	}
@@ -60,6 +64,7 @@ func (r *Router) Group(pattern string, fn func(sub *Router)) {
 			AuthValidator:     r.AuthValidator,
 			SessionAuth:       r.SessionAuth,
 			SessionCookieName: r.SessionCookieName,
+			Grants:            r.Grants,
 			Db:                r.Db,
 			prefix:            r.prefix + pattern,
 			registry:          r.registry,

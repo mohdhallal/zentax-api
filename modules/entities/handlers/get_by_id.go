@@ -8,6 +8,7 @@ import (
 	"github.com/mohamadhallal/zentax-api/delivery/httpkit/types"
 	"github.com/mohamadhallal/zentax-api/modules/entities/domain"
 	"github.com/mohamadhallal/zentax-api/modules/entities/dto"
+	"github.com/mohamadhallal/zentax-api/platform/authz"
 )
 
 type GetEntityByIdHandler struct {
@@ -20,10 +21,11 @@ func NewGetEntityByIdHandler(uc domain.EntityUseCases) *GetEntityByIdHandler {
 
 func (h *GetEntityByIdHandler) DefineRoute() types.RouteDefinition {
 	return types.RouteDefinition{
-		Method:   http.MethodGet,
-		Path:     "/{id}",
-		Exposure: types.Exposures.External,
-		Tenant:   true,
+		Method:     http.MethodGet,
+		Path:       "/{id}",
+		Exposure:   types.Exposures.External,
+		Tenant:     true,
+		Capability: authz.EntityRead,
 	}
 }
 

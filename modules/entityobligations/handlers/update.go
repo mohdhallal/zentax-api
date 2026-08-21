@@ -8,6 +8,7 @@ import (
 	"github.com/mohamadhallal/zentax-api/delivery/httpkit/types"
 	"github.com/mohamadhallal/zentax-api/modules/entityobligations/domain"
 	"github.com/mohamadhallal/zentax-api/modules/entityobligations/dto"
+	"github.com/mohamadhallal/zentax-api/platform/authz"
 )
 
 type UpdateEntityObligationHandler struct {
@@ -20,10 +21,11 @@ func NewUpdateEntityObligationHandler(uc domain.EntityObligationUseCases) *Updat
 
 func (h *UpdateEntityObligationHandler) DefineRoute() types.RouteDefinition {
 	return types.RouteDefinition{
-		Method:   http.MethodPut,
-		Path:     "/{id}",
-		Exposure: types.Exposures.External,
-		Tenant:   true,
+		Method:     http.MethodPut,
+		Path:       "/{id}",
+		Exposure:   types.Exposures.External,
+		Tenant:     true,
+		Capability: authz.EntityObligationWrite,
 	}
 }
 

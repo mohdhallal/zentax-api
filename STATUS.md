@@ -46,10 +46,12 @@ Migrations (sqitch): `tenants`, `entities`, `obligation_types`, `entity_obligati
 `workflows`, `workflow_tasks`, `task_instances` (+ boilerplate `appschema`,
 `internal_api_keys`, `nexus_accounts_api_keys`).
 
-**Auth / identity (Increment A):** first-party email/password + server-side sessions + TOTP MFA
+**Auth / identity (Increments A + B-1):** first-party email/password + server-side sessions + TOTP MFA
 (`modules/identity`, `platform/crypto`); `RequireSession` supplies the tenant from the session (the
-`X-Tenant-ID` header is gone); `cmd/seed-admin` bootstraps the first tenant + admin. See the Auth
-section under "remaining" for what is left (scoped-RBAC enforcement, WorkOS).
+`X-Tenant-ID` header is gone); `cmd/seed-admin` bootstraps the first tenant + admin. Plus **capability-based
+RBAC** (`platform/authz` role→capability matrix + `RequireCapability` gating every domain route by a
+declarative `RouteDefinition.Capability`) — role separation of duties enforced. See the Auth section under
+"remaining" for what is left (entity-subtree scope, submit/approve actions, WorkOS).
 
 Commits: `4cdcd4e` scaffold · `2851179` tenancy+entities · `d074780` obligation-types ·
 `94070d9` entity-obligations · `d91158c` workflows · `f85970a` workflow-tasks ·
@@ -66,14 +68,24 @@ Commits: `4cdcd4e` scaffold · `2851179` tenancy+entities · `d074780` obligatio
   (enroll/enable/verify). The tenant now comes from the authenticated **session** (`RequireSession`);
   the interim `X-Tenant-ID` header is **gone**. First user via **`cmd/seed-admin`**. `modules/identity`
   + `platform/crypto`; auth endpoints under `/auth/*`.
+- **Capability enforcement — DONE (Increment B-1, ADR-0012).** A capability model + role→capability
+  matrix (`platform/authz`) and a `RequireCapability` middleware — which runs *inside* the tenant tx so
+  its read of the RLS'd `user_grants` sees the session tenant — gate every domain route via a declarative
+  `RouteDefinition.Capability`. Role-based **separation of duties** is enforced and tested (against live
+  Postgres): a viewer cannot write, a preparer cannot approve, a manager/admin can, and a user with **no
+  grant is denied (fail-closed)**. The identity `GrantRepo` loads grants on the request tx.
 - **Remaining:**
-  - **Scoped-RBAC enforcement (Increment B).** The `user_grants` + `entity_closure` schema exist, but
-    per-endpoint capability checks over entity subtrees **do not run yet** — so **any logged-in user of
-    a tenant currently has full access within that tenant** (preparer≠approver SoD, scoped advisors: not
-    enforced). (ADR-0012)
+  - **Scoped-RBAC — entity-subtree scope (Increment B-2).** A scoped grant (`user_grants.scope_entity_id`)
+    is not yet **narrowed to its entity subtree** — the capability check is currently tenant-wide, so a
+    scoped grant authorizes across the whole tenant. Only tenant-wide grants are issued today
+    (`cmd/seed-admin`), so this is **latent, not a live hole**. Needs per-resource scope checks
+    (`grants ↔ target entity` via `entity_closure`/parent walk). (ADR-0012)
+  - **Task-lifecycle SoD** (preparer *submits* → reviewer *approves*): the `task:submit` / `task:approve`
+    capabilities exist, but the submit/approve **actions** don't yet — enforcement lands with them.
   - **WorkOS SSO/SCIM (Phase 2).** `IdentityBroker` seam is stubbed only.
   - Breach-checked passwords (HIBP), password-reset / invite flows, Redis session store (Postgres for now).
-- Consequence: the API is authenticated + tenant-isolated, but **not yet intra-tenant authorized**.
+- Consequence: the API is authenticated + tenant-isolated + **role-authorized**; entity-subtree scoping of
+  grants and the submit/approve actions remain.
 
 ### 🟠 Domain features still to build
 - **Data Templates** module — `workflow_tasks.data_template_id` / `task_instances.data_template_id`

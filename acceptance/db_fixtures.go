@@ -69,30 +69,42 @@ func (s *Suite) InsertInternalAPIKey(appName string) (key, secret string) {
 	return keyUUID.String(), secretClear
 }
 
-// As returns a request builder authenticated as a seeded user of the given
-// tenant (session-cookie auth, ADR-0011). Sessions are memoized per tenant for
-// the current test, replacing the old X-Tenant-ID header helper.
+// As returns a request builder authenticated as a seeded tenant_admin of the
+// given tenant (session-cookie auth, ADR-0011) — i.e. full capability, so the
+// existing domain suites exercise behavior without tripping RBAC. Use AsRole to
+// authenticate as a narrower role.
 func (s *Suite) As(tenantID string) *RequestBuilder {
+	return s.AsRole(tenantID, "tenant_admin")
+}
+
+// AsRole returns a request builder authenticated as a seeded user of the tenant
+// holding the given RBAC role (scoped RBAC, ADR-0012). Sessions are memoized per
+// (tenant, role) for the current test.
+func (s *Suite) AsRole(tenantID, role string) *RequestBuilder {
 	if s.sessions == nil {
 		s.sessions = map[string]string{}
 	}
-	token, ok := s.sessions[tenantID]
+	key := tenantID + "|" + role
+	token, ok := s.sessions[key]
 	if !ok {
-		token = s.seedSession(tenantID)
-		s.sessions[tenantID] = token
+		token = s.seedSession(tenantID, role)
+		s.sessions[key] = token
 	}
 	return s.Client.External().WithSession(token)
 }
 
-// seedSession inserts a user + a valid session for a tenant and returns the raw
-// cookie token (stored hashed, as RequireSession expects).
-func (s *Suite) seedSession(tenantID string) string {
+// seedSession inserts a user (with a single RBAC grant of the given role) + a
+// valid session for a tenant and returns the raw cookie token (stored hashed, as
+// RequireSession expects).
+func (s *Suite) seedSession(tenantID, role string) string {
 	var userID string
 	email := "user-" + uuid.NewString() + "@test.local"
 	err := s.DB.QueryRowx(
 		`INSERT INTO users (tenant_id, email, name, status) VALUES ($1, $2, 'Test User', 'active') RETURNING id`,
 		tenantID, email).Scan(&userID)
 	s.Require().NoError(err)
+
+	s.seedGrant(tenantID, userID, role)
 
 	token := uuid.NewString() + uuid.NewString()
 	_, err = s.DB.Exec(
@@ -103,8 +115,44 @@ func (s *Suite) seedSession(tenantID string) string {
 	return token
 }
 
+// seedGrant inserts a user_grants row. user_grants is RLS'd, so the insert runs
+// inside a short transaction that binds the tenant GUC (mirroring the app's Tx
+// seam) — otherwise the RLS WITH CHECK / tenant_id default fail closed.
+func (s *Suite) seedGrant(tenantID, userID, role string) {
+	tx := s.DB.MustBegin()
+	if _, err := tx.Exec(`SELECT set_config('app.tenant_id', $1, true)`, tenantID); err != nil {
+		_ = tx.Rollback()
+		s.Require().NoError(err)
+	}
+	if _, err := tx.Exec(`INSERT INTO user_grants (user_id, role) VALUES ($1, $2)`, userID, role); err != nil {
+		_ = tx.Rollback()
+		s.Require().NoError(err)
+	}
+	s.Require().NoError(tx.Commit())
+}
+
+// AsUngranted authenticates as a seeded user with a valid session but NO RBAC
+// grant — used to prove the capability checks fail closed (ADR-0012).
+func (s *Suite) AsUngranted(tenantID string) *RequestBuilder {
+	var userID string
+	email := "ungranted-" + uuid.NewString() + "@test.local"
+	err := s.DB.QueryRowx(
+		`INSERT INTO users (tenant_id, email, name, status) VALUES ($1, $2, 'No Grant', 'active') RETURNING id`,
+		tenantID, email).Scan(&userID)
+	s.Require().NoError(err)
+
+	token := uuid.NewString() + uuid.NewString()
+	_, err = s.DB.Exec(
+		`INSERT INTO sessions (token_hash, user_id, tenant_id, idle_expires_at, absolute_expires_at)
+		 VALUES ($1, $2, $3, NOW() + INTERVAL '1 hour', NOW() + INTERVAL '30 days')`,
+		crypto.HashToken(token), userID, tenantID)
+	s.Require().NoError(err)
+	return s.Client.External().WithSession(token)
+}
+
 // InsertUserWithPassword seeds an active user with an argon2id password hash and
-// returns its id, for exercising the login flow.
+// a tenant_admin grant (as cmd/seed-admin does — a real login user holds a role),
+// and returns its id, for exercising the login flow.
 func (s *Suite) InsertUserWithPassword(tenantID uuid.UUID, email, password string) uuid.UUID {
 	hash, err := crypto.HashPassword(password)
 	s.Require().NoError(err)
@@ -114,5 +162,6 @@ func (s *Suite) InsertUserWithPassword(tenantID uuid.UUID, email, password strin
 		 VALUES ($1, $2, 'Admin', $3, 'active') RETURNING id`,
 		tenantID, strings.ToLower(email), hash).Scan(&id)
 	s.Require().NoError(err)
+	s.seedGrant(tenantID.String(), id.String(), "tenant_admin")
 	return id
 }

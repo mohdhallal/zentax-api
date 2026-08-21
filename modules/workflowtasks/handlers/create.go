@@ -8,6 +8,7 @@ import (
 	"github.com/mohamadhallal/zentax-api/delivery/httpkit/types"
 	"github.com/mohamadhallal/zentax-api/modules/workflowtasks/domain"
 	"github.com/mohamadhallal/zentax-api/modules/workflowtasks/dto"
+	"github.com/mohamadhallal/zentax-api/platform/authz"
 )
 
 type CreateWorkflowTaskHandler struct {
@@ -20,10 +21,11 @@ func NewCreateWorkflowTaskHandler(uc domain.WorkflowTaskUseCases) *CreateWorkflo
 
 func (h *CreateWorkflowTaskHandler) DefineRoute() types.RouteDefinition {
 	return types.RouteDefinition{
-		Method:   http.MethodPost,
-		Path:     "/",
-		Exposure: types.Exposures.External,
-		Tenant:   true,
+		Method:     http.MethodPost,
+		Path:       "/",
+		Exposure:   types.Exposures.External,
+		Tenant:     true,
+		Capability: authz.WorkflowTaskWrite,
 	}
 }
 

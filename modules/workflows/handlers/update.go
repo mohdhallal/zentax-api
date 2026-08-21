@@ -8,6 +8,7 @@ import (
 	"github.com/mohamadhallal/zentax-api/delivery/httpkit/types"
 	"github.com/mohamadhallal/zentax-api/modules/workflows/domain"
 	"github.com/mohamadhallal/zentax-api/modules/workflows/dto"
+	"github.com/mohamadhallal/zentax-api/platform/authz"
 )
 
 type UpdateWorkflowHandler struct {
@@ -20,10 +21,11 @@ func NewUpdateWorkflowHandler(uc domain.WorkflowUseCases) *UpdateWorkflowHandler
 
 func (h *UpdateWorkflowHandler) DefineRoute() types.RouteDefinition {
 	return types.RouteDefinition{
-		Method:   http.MethodPut,
-		Path:     "/{id}",
-		Exposure: types.Exposures.External,
-		Tenant:   true,
+		Method:     http.MethodPut,
+		Path:       "/{id}",
+		Exposure:   types.Exposures.External,
+		Tenant:     true,
+		Capability: authz.WorkflowWrite,
 	}
 }
 
