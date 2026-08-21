@@ -17,6 +17,7 @@ import (
 	"github.com/mohamadhallal/zentax-api/modules/entityobligations"
 	"github.com/mohamadhallal/zentax-api/modules/health"
 	"github.com/mohamadhallal/zentax-api/modules/obligationtypes"
+	"github.com/mohamadhallal/zentax-api/modules/taskinstances"
 	"github.com/mohamadhallal/zentax-api/modules/workflows"
 	"github.com/mohamadhallal/zentax-api/modules/workflowtasks"
 	"github.com/mohamadhallal/zentax-api/platform/database"
@@ -81,8 +82,9 @@ func New(cfg *config.Config, mode types.ServerMode) (*App, error) {
 	entities.RegisterRoutes(router, ctr.EntityUseCases)
 	obligationtypes.RegisterRoutes(router, ctr.ObligationTypeUseCases)
 	entityobligations.RegisterRoutes(router, ctr.EntityObligationUseCases)
-	workflows.RegisterRoutes(router, ctr.WorkflowUseCases)
+	workflows.RegisterRoutes(router, ctr.WorkflowUseCases, ctr.WorkflowStarter)
 	workflowtasks.RegisterRoutes(router, ctr.WorkflowTaskUseCases)
+	taskinstances.RegisterRoutes(router, ctr.TaskInstanceUseCases)
 
 	chiRouter.NotFound(httperr.NotFoundHandler())
 

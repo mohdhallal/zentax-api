@@ -48,6 +48,14 @@ func (m *WorkflowTaskRepositoryMock) GetTotal(ctx context.Context, filters []sha
 	return args.Int(0), args.Error(1)
 }
 
+func (m *WorkflowTaskRepositoryMock) ListByWorkflow(ctx context.Context, workflowID string) ([]WorkflowTask, error) {
+	args := m.Called(ctx, workflowID)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]WorkflowTask), args.Error(1)
+}
+
 // WorkflowTaskUseCasesMock is a testify mock of WorkflowTaskUseCases.
 type WorkflowTaskUseCasesMock struct {
 	mock.Mock

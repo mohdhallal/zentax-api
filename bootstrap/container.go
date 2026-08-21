@@ -13,6 +13,9 @@ import (
 	obligationtypesdomain "github.com/mohamadhallal/zentax-api/modules/obligationtypes/domain"
 	obligationtypespg "github.com/mohamadhallal/zentax-api/modules/obligationtypes/repositories/pg"
 	obligationtypesusecases "github.com/mohamadhallal/zentax-api/modules/obligationtypes/usecases"
+	taskinstancesdomain "github.com/mohamadhallal/zentax-api/modules/taskinstances/domain"
+	taskinstancespg "github.com/mohamadhallal/zentax-api/modules/taskinstances/repositories/pg"
+	taskinstancesusecases "github.com/mohamadhallal/zentax-api/modules/taskinstances/usecases"
 	workflowsdomain "github.com/mohamadhallal/zentax-api/modules/workflows/domain"
 	workflowspg "github.com/mohamadhallal/zentax-api/modules/workflows/repositories/pg"
 	workflowsusecases "github.com/mohamadhallal/zentax-api/modules/workflows/usecases"
@@ -23,8 +26,7 @@ import (
 )
 
 // Container is the dependency-injection seam: it constructs and holds the
-// per-module use cases wired from the database. New ZenTax domain modules
-// (task instances) plug in here.
+// per-module use cases wired from the database.
 type Container struct {
 	NexusAccountAPIKeyUseCases authdomain.NexusAccountAPIKeyUseCases
 	EntityUseCases             entitiesdomain.EntityUseCases
@@ -32,6 +34,10 @@ type Container struct {
 	EntityObligationUseCases   entityobligationsdomain.EntityObligationUseCases
 	WorkflowUseCases           workflowsdomain.WorkflowUseCases
 	WorkflowTaskUseCases       workflowtasksdomain.WorkflowTaskUseCases
+	TaskInstanceUseCases       taskinstancesdomain.TaskInstanceUseCases
+	// WorkflowStarter generates task instances from a workflow's templates
+	// (POST /workflows/{id}/start). Implemented by the task-instances generator.
+	WorkflowStarter workflowsdomain.Starter
 }
 
 func NewContainer(db database.ExecerPg) *Container {
@@ -43,6 +49,9 @@ func NewContainer(db database.ExecerPg) *Container {
 	entityObligationRepo := entityobligationspg.NewEntityObligationRepo(db)
 	workflowRepo := workflowspg.NewWorkflowRepo(db)
 	workflowTaskRepo := workflowtaskspg.NewWorkflowTaskRepo(db)
+	taskInstanceRepo := taskinstancespg.NewTaskInstanceRepo(db)
+
+	generator := taskinstancesusecases.NewGenerator(taskInstanceRepo, workflowRepo, workflowTaskRepo, entityRepo)
 
 	return &Container{
 		NexusAccountAPIKeyUseCases: nexusAccountAPIKeyUC,
@@ -51,5 +60,7 @@ func NewContainer(db database.ExecerPg) *Container {
 		EntityObligationUseCases:   entityobligationsusecases.NewUseCases(entityObligationRepo),
 		WorkflowUseCases:           workflowsusecases.NewUseCases(workflowRepo),
 		WorkflowTaskUseCases:       workflowtasksusecases.NewUseCases(workflowTaskRepo),
+		TaskInstanceUseCases:       taskinstancesusecases.NewUseCases(taskInstanceRepo),
+		WorkflowStarter:            generator,
 	}
 }

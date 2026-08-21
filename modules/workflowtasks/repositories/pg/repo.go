@@ -39,6 +39,15 @@ func (r *WorkflowTaskRepo) Create(ctx context.Context, input domain.CreateWorkfl
 	return wt, nil
 }
 
+func (r *WorkflowTaskRepo) ListByWorkflow(ctx context.Context, workflowID string) ([]domain.WorkflowTask, error) {
+	var tasks []domain.WorkflowTask
+	query := `SELECT ` + workflowTaskColumns + ` FROM workflow_tasks WHERE workflow_id = $1 ORDER BY order_index ASC`
+	if err := r.DB.SelectContext(ctx, &tasks, query, workflowID); err != nil {
+		return nil, err
+	}
+	return tasks, nil
+}
+
 func (r *WorkflowTaskRepo) Update(ctx context.Context, id domain.WorkflowTaskID, input domain.UpdateWorkflowTaskInput) (*domain.WorkflowTask, error) {
 	// workflow_id is fixed at creation, so an update cannot introduce a new FK
 	// violation.
