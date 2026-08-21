@@ -1,0 +1,50 @@
+package pg
+
+import (
+	"context"
+
+	apperrors "github.com/mohamadhallal/zentax-api/errors"
+	"github.com/mohamadhallal/zentax-api/modules/workflowtasks/domain"
+	"github.com/mohamadhallal/zentax-api/platform/database"
+	baserepo "github.com/mohamadhallal/zentax-api/shared/repositories"
+)
+
+var _ domain.WorkflowTaskRepository = (*WorkflowTaskRepo)(nil)
+
+// WorkflowTaskRepo persists workflow task templates. RLS (ADR-0004) isolates by
+// tenant and scopes the workflow_id FK to the same tenant, so referencing
+// another tenant's workflow fails the FK check → surfaced as a validation error.
+type WorkflowTaskRepo struct {
+	baserepo.BaseRepo[domain.WorkflowTask, domain.WorkflowTaskID]
+}
+
+func NewWorkflowTaskRepo(db database.ExecerPg) *WorkflowTaskRepo {
+	return &WorkflowTaskRepo{
+		BaseRepo: baserepo.NewBaseRepo[domain.WorkflowTask, domain.WorkflowTaskID](db, sqlConfig),
+	}
+}
+
+func (r *WorkflowTaskRepo) Create(ctx context.Context, input domain.CreateWorkflowTaskInput) (*domain.WorkflowTask, error) {
+	wt, err := r.QueryRow(ctx, r.SQL.Create,
+		input.WorkflowID, input.Name, input.Description, input.TaskType, input.RoleLabel,
+		input.ApprovalRequired, input.DueDateReference, input.DueDateOffsetValue, input.DueDateOffsetUnit,
+		input.DueDateOffsetDirection, input.OrderIndex, input.DataTemplateID, input.RequiredDocuments,
+	)
+	if err != nil {
+		if database.IsForeignKeyViolation(err) {
+			return nil, apperrors.NewValidation(domain.ErrWorkflowNotFound())
+		}
+		return nil, err
+	}
+	return wt, nil
+}
+
+func (r *WorkflowTaskRepo) Update(ctx context.Context, id domain.WorkflowTaskID, input domain.UpdateWorkflowTaskInput) (*domain.WorkflowTask, error) {
+	// workflow_id is fixed at creation, so an update cannot introduce a new FK
+	// violation.
+	return r.QueryRow(ctx, r.SQL.Update,
+		id, input.Name, input.Description, input.TaskType, input.RoleLabel,
+		input.ApprovalRequired, input.DueDateReference, input.DueDateOffsetValue, input.DueDateOffsetUnit,
+		input.DueDateOffsetDirection, input.OrderIndex, input.DataTemplateID, input.RequiredDocuments,
+	)
+}

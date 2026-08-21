@@ -9,3 +9,4 @@
 20260821000002_obligation_types [20260821000000_tenants] 2026-08-21T00:00:02Z Mohamad Hallal <mohdhallal@gmail.com> # Create obligation_types table (tenant-scoped, RLS)
 20260821000003_entity_obligations [20260821000001_entities 20260821000002_obligation_types] 2026-08-21T00:00:03Z Mohamad Hallal <mohdhallal@gmail.com> # Create entity_obligations link table (tenant-scoped, RLS, JSONB deadline rule)
 20260821000004_workflows [20260821000001_entities 20260821000002_obligation_types] 2026-08-21T00:00:04Z Mohamad Hallal <mohdhallal@gmail.com> # Create workflows table (recurring/project, tenant-scoped, RLS, JSONB periods + due-date rule)
+20260821000005_workflow_tasks [20260821000004_workflows] 2026-08-21T00:00:05Z Mohamad Hallal <mohdhallal@gmail.com> # Create workflow_tasks table (task templates, tenant-scoped, RLS, JSONB required documents)

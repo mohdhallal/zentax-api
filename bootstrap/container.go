@@ -16,18 +16,22 @@ import (
 	workflowsdomain "github.com/mohamadhallal/zentax-api/modules/workflows/domain"
 	workflowspg "github.com/mohamadhallal/zentax-api/modules/workflows/repositories/pg"
 	workflowsusecases "github.com/mohamadhallal/zentax-api/modules/workflows/usecases"
+	workflowtasksdomain "github.com/mohamadhallal/zentax-api/modules/workflowtasks/domain"
+	workflowtaskspg "github.com/mohamadhallal/zentax-api/modules/workflowtasks/repositories/pg"
+	workflowtasksusecases "github.com/mohamadhallal/zentax-api/modules/workflowtasks/usecases"
 	"github.com/mohamadhallal/zentax-api/platform/database"
 )
 
 // Container is the dependency-injection seam: it constructs and holds the
 // per-module use cases wired from the database. New ZenTax domain modules
-// (workflow tasks, task instances) plug in here.
+// (task instances) plug in here.
 type Container struct {
 	NexusAccountAPIKeyUseCases authdomain.NexusAccountAPIKeyUseCases
 	EntityUseCases             entitiesdomain.EntityUseCases
 	ObligationTypeUseCases     obligationtypesdomain.ObligationTypeUseCases
 	EntityObligationUseCases   entityobligationsdomain.EntityObligationUseCases
 	WorkflowUseCases           workflowsdomain.WorkflowUseCases
+	WorkflowTaskUseCases       workflowtasksdomain.WorkflowTaskUseCases
 }
 
 func NewContainer(db database.ExecerPg) *Container {
@@ -38,6 +42,7 @@ func NewContainer(db database.ExecerPg) *Container {
 	obligationTypeRepo := obligationtypespg.NewObligationTypeRepo(db)
 	entityObligationRepo := entityobligationspg.NewEntityObligationRepo(db)
 	workflowRepo := workflowspg.NewWorkflowRepo(db)
+	workflowTaskRepo := workflowtaskspg.NewWorkflowTaskRepo(db)
 
 	return &Container{
 		NexusAccountAPIKeyUseCases: nexusAccountAPIKeyUC,
@@ -45,5 +50,6 @@ func NewContainer(db database.ExecerPg) *Container {
 		ObligationTypeUseCases:     obligationtypesusecases.NewUseCases(obligationTypeRepo),
 		EntityObligationUseCases:   entityobligationsusecases.NewUseCases(entityObligationRepo),
 		WorkflowUseCases:           workflowsusecases.NewUseCases(workflowRepo),
+		WorkflowTaskUseCases:       workflowtasksusecases.NewUseCases(workflowTaskRepo),
 	}
 }
