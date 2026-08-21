@@ -1,0 +1,87 @@
+// Command seed-admin bootstraps a tenant and its first admin user (ADR-0011).
+// There is no public signup yet, so this is how a first user is provisioned:
+//
+//	APP_ENV=development go run ./cmd/seed-admin \
+//	  --tenant-slug acme --tenant-name "Acme GmbH" \
+//	  --email admin@acme.com --password 's3cret' --name "Group Head of Tax"
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"os"
+	"strings"
+
+	"github.com/mohamadhallal/zentax-api/app"
+	"github.com/mohamadhallal/zentax-api/config"
+	"github.com/mohamadhallal/zentax-api/logger"
+	"github.com/mohamadhallal/zentax-api/platform/crypto"
+	"github.com/mohamadhallal/zentax-api/platform/database"
+)
+
+func main() {
+	tenantSlug := flag.String("tenant-slug", "", "tenant slug (unique)")
+	tenantName := flag.String("tenant-name", "", "tenant display name")
+	email := flag.String("email", "", "admin email")
+	password := flag.String("password", "", "admin password")
+	name := flag.String("name", "Admin", "admin display name")
+	flag.Parse()
+
+	if *tenantSlug == "" || *tenantName == "" || *email == "" || *password == "" {
+		fmt.Fprintln(os.Stderr, "usage: seed-admin --tenant-slug S --tenant-name N --email E --password P [--name Name]")
+		os.Exit(1)
+	}
+
+	logger.InitBasic()
+
+	cfg, err := config.Load()
+	if err != nil {
+		fail("load config", err)
+	}
+	dbConn, err := database.ConnectDB(&cfg.Database)
+	if err != nil {
+		fail("connect db", err)
+	}
+	defer func() { _ = dbConn.Close() }()
+	db := database.NewExec(dbConn)
+
+	ctx := context.Background()
+	hash, err := crypto.HashPassword(*password)
+	if err != nil {
+		fail("hash password", err)
+	}
+
+	// tenants + users are not RLS-scoped.
+	var tenantID string
+	if err := db.QueryRowxContext(ctx,
+		`INSERT INTO tenants (slug, name) VALUES ($1, $2) RETURNING id`,
+		*tenantSlug, *tenantName).Scan(&tenantID); err != nil {
+		fail("create tenant", err)
+	}
+
+	var userID string
+	if err := db.QueryRowxContext(ctx,
+		`INSERT INTO users (tenant_id, email, name, password_hash, status)
+		 VALUES ($1, $2, $3, $4, 'active') RETURNING id`,
+		tenantID, strings.ToLower(strings.TrimSpace(*email)), *name, hash).Scan(&userID); err != nil {
+		fail("create admin user", err)
+	}
+
+	// user_grants is RLS-scoped: set the tenant GUC (ADR-0004) for the insert.
+	if err := db.WithinTransaction(app.WithTenantID(ctx, tenantID), func(txCtx context.Context) error {
+		_, e := db.ExecContext(txCtx,
+			`INSERT INTO user_grants (user_id, role) VALUES ($1, 'tenant_admin')`, userID)
+		return e
+	}); err != nil {
+		fail("create tenant-admin grant", err)
+	}
+
+	fmt.Printf("Seeded tenant %q\n  tenant_id: %s\n  user_id:   %s\n  admin:     %s\n",
+		*tenantName, tenantID, userID, *email)
+}
+
+func fail(msg string, err error) {
+	fmt.Fprintf(os.Stderr, "seed-admin: %s: %v\n", msg, err)
+	os.Exit(1)
+}

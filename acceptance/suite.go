@@ -28,6 +28,7 @@ type Suite struct {
 	Client   *TestClient
 	extApp   *bootstrap.App
 	intApp   *bootstrap.App
+	sessions map[string]string // tenantID -> session token, memoized per test
 }
 
 func (s *Suite) SetupSuite() {
@@ -64,6 +65,7 @@ func (s *Suite) SetupTest() {
 	s.Internal = httptest.NewServer(s.intApp.Router)
 
 	s.Client = NewTestClient(s.External.URL, s.Internal.URL)
+	s.sessions = map[string]string{}
 }
 
 func (s *Suite) TearDownTest() {

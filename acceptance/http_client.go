@@ -71,10 +71,10 @@ func (b *RequestBuilder) WithInternalAuth(key, secret string) *RequestBuilder {
 	return b.withHeader("Authorization", "Basic "+encoded)
 }
 
-// WithTenant sets the interim X-Tenant-ID header that RequireTenant reads to
-// bind the request to a tenant for RLS (ADR-0004).
-func (b *RequestBuilder) WithTenant(tenantID string) *RequestBuilder {
-	return b.withHeader("X-Tenant-ID", tenantID)
+// WithSession sets the session cookie that RequireSession reads to authenticate
+// the request (ADR-0011). Suite.as() wires this to a seeded user/session.
+func (b *RequestBuilder) WithSession(token string) *RequestBuilder {
+	return b.withHeader("Cookie", "zentax_session="+token)
 }
 
 func (b *RequestBuilder) do(t *testing.T, method, path string, body any) *TestResponse {

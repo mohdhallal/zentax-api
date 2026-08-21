@@ -1,6 +1,8 @@
 package bootstrap
 
 import (
+	"time"
+
 	gochi "github.com/go-chi/chi/v5"
 	"github.com/jmoiron/sqlx"
 
@@ -16,6 +18,10 @@ import (
 	"github.com/mohamadhallal/zentax-api/modules/entities"
 	"github.com/mohamadhallal/zentax-api/modules/entityobligations"
 	"github.com/mohamadhallal/zentax-api/modules/health"
+	"github.com/mohamadhallal/zentax-api/modules/identity"
+	identityhandlers "github.com/mohamadhallal/zentax-api/modules/identity/handlers"
+	identitypg "github.com/mohamadhallal/zentax-api/modules/identity/repositories/pg"
+	identityusecases "github.com/mohamadhallal/zentax-api/modules/identity/usecases"
 	"github.com/mohamadhallal/zentax-api/modules/obligationtypes"
 	"github.com/mohamadhallal/zentax-api/modules/taskinstances"
 	"github.com/mohamadhallal/zentax-api/modules/workflows"
@@ -68,6 +74,24 @@ func New(cfg *config.Config, mode types.ServerMode) (*App, error) {
 
 	authValidator := authuc.NewInternalAuth(authpg.NewInternalAPIKeyRepo(db))
 
+	// First-party identity/auth (ADR-0011). The encryption key is validated at
+	// startup for deployed envs; a missing dev key just disables MFA (nil key).
+	encKey, _ := cfg.Auth.DecodeEncryptionKey()
+	identityUC := identityusecases.NewUseCases(
+		identitypg.NewUserRepo(db),
+		identitypg.NewSessionRepo(db),
+		identityusecases.Settings{
+			EncryptionKey:      encKey,
+			SessionIdleTTL:     time.Duration(cfg.Auth.SessionIdleTTLMinutes) * time.Minute,
+			SessionAbsoluteTTL: time.Duration(cfg.Auth.SessionAbsoluteTTLHours) * time.Hour,
+		},
+	)
+	cookieCfg := identityhandlers.CookieConfig{
+		Name:        cfg.Auth.SessionCookieName,
+		Secure:      cfg.Auth.SessionCookieSecure,
+		AbsoluteTTL: time.Duration(cfg.Auth.SessionAbsoluteTTLHours) * time.Hour,
+	}
+
 	chiRouter := gochi.NewRouter()
 
 	chiRouter.Use(middlewares.CORSMiddleware(cfg.CORS))
@@ -76,9 +100,10 @@ func New(cfg *config.Config, mode types.ServerMode) (*App, error) {
 	chiRouter.Use(middlewares.MetricsMiddleware(metricsRecorder.HTTP()))
 	chiRouter.Use(middlewares.RequestLoggerMiddleware)
 
-	router := routing.NewRouter(chiRouter, mode, authValidator, db)
+	router := routing.NewRouter(chiRouter, mode, authValidator, identityUC, cfg.Auth.SessionCookieName, db)
 
 	health.RegisterRoutes(router, mode)
+	identity.RegisterRoutes(router, identityUC, cookieCfg)
 	entities.RegisterRoutes(router, ctr.EntityUseCases)
 	obligationtypes.RegisterRoutes(router, ctr.ObligationTypeUseCases)
 	entityobligations.RegisterRoutes(router, ctr.EntityObligationUseCases)

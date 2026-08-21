@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+
+	"github.com/mohamadhallal/zentax-api/platform/crypto"
 )
 
 func (s *Suite) TruncateTables() {
@@ -62,4 +64,52 @@ func (s *Suite) InsertInternalAPIKey(appName string) (key, secret string) {
 	s.Require().NoError(err)
 
 	return keyUUID.String(), secretClear
+}
+
+// As returns a request builder authenticated as a seeded user of the given
+// tenant (session-cookie auth, ADR-0011). Sessions are memoized per tenant for
+// the current test, replacing the old X-Tenant-ID header helper.
+func (s *Suite) As(tenantID string) *RequestBuilder {
+	if s.sessions == nil {
+		s.sessions = map[string]string{}
+	}
+	token, ok := s.sessions[tenantID]
+	if !ok {
+		token = s.seedSession(tenantID)
+		s.sessions[tenantID] = token
+	}
+	return s.Client.External().WithSession(token)
+}
+
+// seedSession inserts a user + a valid session for a tenant and returns the raw
+// cookie token (stored hashed, as RequireSession expects).
+func (s *Suite) seedSession(tenantID string) string {
+	var userID string
+	email := "user-" + uuid.NewString() + "@test.local"
+	err := s.DB.QueryRowx(
+		`INSERT INTO users (tenant_id, email, name, status) VALUES ($1, $2, 'Test User', 'active') RETURNING id`,
+		tenantID, email).Scan(&userID)
+	s.Require().NoError(err)
+
+	token := uuid.NewString() + uuid.NewString()
+	_, err = s.DB.Exec(
+		`INSERT INTO sessions (token_hash, user_id, tenant_id, idle_expires_at, absolute_expires_at)
+		 VALUES ($1, $2, $3, NOW() + INTERVAL '1 hour', NOW() + INTERVAL '30 days')`,
+		crypto.HashToken(token), userID, tenantID)
+	s.Require().NoError(err)
+	return token
+}
+
+// InsertUserWithPassword seeds an active user with an argon2id password hash and
+// returns its id, for exercising the login flow.
+func (s *Suite) InsertUserWithPassword(tenantID uuid.UUID, email, password string) uuid.UUID {
+	hash, err := crypto.HashPassword(password)
+	s.Require().NoError(err)
+	var id uuid.UUID
+	err = s.DB.QueryRowx(
+		`INSERT INTO users (tenant_id, email, name, password_hash, status)
+		 VALUES ($1, $2, 'Admin', $3, 'active') RETURNING id`,
+		tenantID, strings.ToLower(email), hash).Scan(&id)
+	s.Require().NoError(err)
+	return id
 }

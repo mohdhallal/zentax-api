@@ -27,7 +27,7 @@ func (s *TaskInstancesSuite) TestWorkflowStartGeneratesInstances() {
 	other := s.InsertTenant("ti-b", "TI Tenant B").String()
 
 	post := func(path string, body any) *acceptance.TestResponse {
-		return s.Client.External().WithTenant(tenant).POST(s.T(), path, body)
+		return s.As(tenant).POST(s.T(), path, body)
 	}
 
 	var entity struct {
@@ -85,7 +85,7 @@ func (s *TaskInstancesSuite) TestWorkflowStartGeneratesInstances() {
 		FilingDeadline string `json:"filingDeadline"`
 		PeriodEndDate  string `json:"periodEndDate"`
 	}
-	s.Client.External().WithTenant(tenant).GET(s.T(), "/task-instances").DecodeData(s.T(), &list)
+	s.As(tenant).GET(s.T(), "/task-instances").DecodeData(s.T(), &list)
 	s.Require().Len(list, 2)
 
 	// M1: period end Jan 31, filing Feb 15 (+15d), task due Feb 10 (-5d).
@@ -101,6 +101,6 @@ func (s *TaskInstancesSuite) TestWorkflowStartGeneratesInstances() {
 
 	// Isolation: the other tenant sees no instances.
 	var otherList []map[string]any
-	s.Client.External().WithTenant(other).GET(s.T(), "/task-instances").DecodeData(s.T(), &otherList)
+	s.As(other).GET(s.T(), "/task-instances").DecodeData(s.T(), &otherList)
 	s.Require().Empty(otherList)
 }

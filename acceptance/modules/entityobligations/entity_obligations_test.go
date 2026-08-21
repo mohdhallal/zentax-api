@@ -21,7 +21,7 @@ func (s *EntityObligationsSuite) createEntity(tenant, name, country string) stri
 	var out struct {
 		ID string `json:"id"`
 	}
-	resp := s.Client.External().WithTenant(tenant).
+	resp := s.As(tenant).
 		POST(s.T(), "/entities", map[string]any{"name": name, "country": country})
 	resp.AssertStatus(s.T(), http.StatusCreated)
 	resp.DecodeData(s.T(), &out)
@@ -32,7 +32,7 @@ func (s *EntityObligationsSuite) createObligationType(tenant, code string) strin
 	var out struct {
 		ID string `json:"id"`
 	}
-	resp := s.Client.External().WithTenant(tenant).
+	resp := s.As(tenant).
 		POST(s.T(), "/obligation-types", map[string]any{"name": "VAT", "code": code, "template": "VAT"})
 	resp.AssertStatus(s.T(), http.StatusCreated)
 	resp.DecodeData(s.T(), &out)
@@ -61,20 +61,20 @@ func (s *EntityObligationsSuite) TestTenantIsolationAndCrossTenantFK() {
 	}
 
 	// Tenant A links its own entity + obligation type.
-	s.Client.External().WithTenant(tenantA).
+	s.As(tenantA).
 		POST(s.T(), "/entity-obligations", body).
 		AssertStatus(s.T(), http.StatusCreated)
 
 	// Tenant A sees the link; tenant B does not (RLS).
 	var listA, listB []map[string]any
-	s.Client.External().WithTenant(tenantA).GET(s.T(), "/entity-obligations").DecodeData(s.T(), &listA)
-	s.Client.External().WithTenant(tenantB).GET(s.T(), "/entity-obligations").DecodeData(s.T(), &listB)
+	s.As(tenantA).GET(s.T(), "/entity-obligations").DecodeData(s.T(), &listA)
+	s.As(tenantB).GET(s.T(), "/entity-obligations").DecodeData(s.T(), &listB)
 	s.Require().Len(listA, 1)
 	s.Require().Empty(listB)
 
 	// Cross-tenant FK: tenant B references tenant A's ids — invisible under RLS,
 	// so the FK check fails and the API returns 400, never leaking A's rows.
-	s.Client.External().WithTenant(tenantB).
+	s.As(tenantB).
 		POST(s.T(), "/entity-obligations", body).
 		AssertStatus(s.T(), http.StatusBadRequest)
 

@@ -32,6 +32,17 @@ type SessionAuthenticator interface {
 	Authenticate(ctx context.Context, token string) (*Session, *User, error)
 }
 
+// AuthUseCases is the handler-facing auth surface.
+type AuthUseCases interface {
+	Login(ctx context.Context, input LoginInput) (*LoginResult, error)
+	MfaEnroll(ctx context.Context, userID string) (*MfaEnrollResult, error)
+	MfaEnable(ctx context.Context, userID, code string) error
+	MfaVerify(ctx context.Context, sessionToken, code string) (*LoginResult, error)
+	Logout(ctx context.Context, sessionToken string) error
+	LogoutAll(ctx context.Context, userID string) error
+	Me(ctx context.Context, userID string) (*User, error)
+}
+
 // --- use-case contract types ---
 
 type LoginInput struct {

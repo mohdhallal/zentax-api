@@ -31,5 +31,12 @@ func DefaultConfig() *config.Config {
 		Metrics: config.MetricsConfig{
 			Enabled: false,
 		},
+		Auth: config.AuthConfig{
+			EncryptionKey:           "emVudGF4LWRldi1lbmNyeXB0aW9uLWtleS0zMmJ5dGU=", // dev/test key
+			SessionCookieName:       "zentax_session",
+			SessionCookieSecure:     false,
+			SessionIdleTTLMinutes:   480,
+			SessionAbsoluteTTLHours: 720,
+		},
 	}
 }

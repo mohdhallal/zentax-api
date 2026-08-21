@@ -26,7 +26,7 @@ func (s *EntitiesSuite) TestTenantIsolation() {
 	tenantB := s.InsertTenant("tenant-b", "Tenant B")
 
 	// Tenant A creates an entity.
-	respA := s.Client.External().WithTenant(tenantA.String()).
+	respA := s.As(tenantA.String()).
 		POST(s.T(), "/entities", map[string]any{"name": "Acme A GmbH", "country": "Germany"})
 	respA.AssertStatus(s.T(), http.StatusCreated)
 
@@ -37,14 +37,14 @@ func (s *EntitiesSuite) TestTenantIsolation() {
 	s.Require().NotEmpty(entityA.ID)
 
 	// Tenant B creates its own entity.
-	respB := s.Client.External().WithTenant(tenantB.String()).
+	respB := s.As(tenantB.String()).
 		POST(s.T(), "/entities", map[string]any{"name": "Beta B SA", "country": "France"})
 	respB.AssertStatus(s.T(), http.StatusCreated)
 
 	// Each tenant lists only its own entity.
 	var listA, listB []map[string]any
-	s.Client.External().WithTenant(tenantA.String()).GET(s.T(), "/entities").DecodeData(s.T(), &listA)
-	s.Client.External().WithTenant(tenantB.String()).GET(s.T(), "/entities").DecodeData(s.T(), &listB)
+	s.As(tenantA.String()).GET(s.T(), "/entities").DecodeData(s.T(), &listA)
+	s.As(tenantB.String()).GET(s.T(), "/entities").DecodeData(s.T(), &listB)
 	s.Require().Len(listA, 1)
 	s.Require().Len(listB, 1)
 	s.Require().Equal("Acme A GmbH", listA[0]["name"])
@@ -52,7 +52,7 @@ func (s *EntitiesSuite) TestTenantIsolation() {
 
 	// Tenant B cannot fetch tenant A's entity by id — RLS yields 404, never another
 	// tenant's data.
-	s.Client.External().WithTenant(tenantB.String()).
+	s.As(tenantB.String()).
 		GET(s.T(), "/entities/"+entityA.ID).
 		AssertStatus(s.T(), http.StatusNotFound)
 

@@ -73,10 +73,11 @@ func buildRoute(route types.Route, router *Router) http.HandlerFunc {
 		handler = middlewares.Transaction(router.Db)(handler)
 	}
 
-	// RequireTenant must wrap OUTSIDE Transaction so the tenant is bound to the
-	// context before WithinTransaction opens the tx and sets the GUC.
+	// RequireSession must wrap OUTSIDE Transaction so the session-derived tenant
+	// is bound to the context before WithinTransaction opens the tx and sets the
+	// GUC (ADR-0011 replaces the interim X-Tenant-ID header).
 	if config.Tenant {
-		handler = middlewares.RequireTenant()(handler)
+		handler = middlewares.RequireSession(router.SessionAuth, router.SessionCookieName)(handler)
 	}
 
 	if mp, ok := route.(types.RouteMiddlewareDefinition); ok {

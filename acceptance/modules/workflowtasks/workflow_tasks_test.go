@@ -21,7 +21,7 @@ func (s *WorkflowTasksSuite) createWorkflow(tenant, name string) string {
 	var out struct {
 		ID string `json:"id"`
 	}
-	resp := s.Client.External().WithTenant(tenant).POST(s.T(), "/workflows", map[string]any{
+	resp := s.As(tenant).POST(s.T(), "/workflows", map[string]any{
 		"name": name, "workflowCategory": "project", "projectType": "advisory",
 	})
 	resp.AssertStatus(s.T(), http.StatusCreated)
@@ -46,20 +46,20 @@ func (s *WorkflowTasksSuite) TestTenantIsolationAndWorkflowFK() {
 	}
 
 	// Tenant A adds a task template to its own workflow.
-	s.Client.External().WithTenant(tenantA).
+	s.As(tenantA).
 		POST(s.T(), "/workflow-tasks", task).
 		AssertStatus(s.T(), http.StatusCreated)
 
 	// Each tenant sees only its own task templates (RLS).
 	var listA, listB []map[string]any
-	s.Client.External().WithTenant(tenantA).GET(s.T(), "/workflow-tasks").DecodeData(s.T(), &listA)
-	s.Client.External().WithTenant(tenantB).GET(s.T(), "/workflow-tasks").DecodeData(s.T(), &listB)
+	s.As(tenantA).GET(s.T(), "/workflow-tasks").DecodeData(s.T(), &listA)
+	s.As(tenantB).GET(s.T(), "/workflow-tasks").DecodeData(s.T(), &listB)
 	s.Require().Len(listA, 1)
 	s.Require().Empty(listB)
 
 	// Cross-tenant FK: tenant B references tenant A's workflow — invisible under
 	// RLS → FK violation → 400.
-	s.Client.External().WithTenant(tenantB).
+	s.As(tenantB).
 		POST(s.T(), "/workflow-tasks", task).
 		AssertStatus(s.T(), http.StatusBadRequest)
 

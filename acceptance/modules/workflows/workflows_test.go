@@ -21,7 +21,7 @@ func (s *WorkflowsSuite) createEntity(tenant, name string) string {
 	var out struct {
 		ID string `json:"id"`
 	}
-	resp := s.Client.External().WithTenant(tenant).
+	resp := s.As(tenant).
 		POST(s.T(), "/entities", map[string]any{"name": name, "country": "Germany"})
 	resp.AssertStatus(s.T(), http.StatusCreated)
 	resp.DecodeData(s.T(), &out)
@@ -32,7 +32,7 @@ func (s *WorkflowsSuite) createObligationType(tenant, code string) string {
 	var out struct {
 		ID string `json:"id"`
 	}
-	resp := s.Client.External().WithTenant(tenant).
+	resp := s.As(tenant).
 		POST(s.T(), "/obligation-types", map[string]any{"name": "VAT", "code": code, "template": "VAT"})
 	resp.AssertStatus(s.T(), http.StatusCreated)
 	resp.DecodeData(s.T(), &out)
@@ -63,7 +63,7 @@ func (s *WorkflowsSuite) TestTenantIsolationAndWorkflows() {
 		ID              string   `json:"id"`
 		SelectedPeriods []string `json:"selectedPeriods"`
 	}
-	resp := s.Client.External().WithTenant(tenantA).POST(s.T(), "/workflows", recurring)
+	resp := s.As(tenantA).POST(s.T(), "/workflows", recurring)
 	resp.AssertStatus(s.T(), http.StatusCreated)
 	resp.DecodeData(s.T(), &created)
 	s.Require().Equal([]string{"M1", "M2"}, created.SelectedPeriods)
@@ -72,20 +72,20 @@ func (s *WorkflowsSuite) TestTenantIsolationAndWorkflows() {
 	project := map[string]any{
 		"name": "Audit 2025", "workflowCategory": "project", "projectType": "audit_verification",
 	}
-	s.Client.External().WithTenant(tenantB).
+	s.As(tenantB).
 		POST(s.T(), "/workflows", project).
 		AssertStatus(s.T(), http.StatusCreated)
 
 	// Each tenant sees only its own workflow (RLS).
 	var listA, listB []map[string]any
-	s.Client.External().WithTenant(tenantA).GET(s.T(), "/workflows").DecodeData(s.T(), &listA)
-	s.Client.External().WithTenant(tenantB).GET(s.T(), "/workflows").DecodeData(s.T(), &listB)
+	s.As(tenantA).GET(s.T(), "/workflows").DecodeData(s.T(), &listA)
+	s.As(tenantB).GET(s.T(), "/workflows").DecodeData(s.T(), &listB)
 	s.Require().Len(listA, 1)
 	s.Require().Len(listB, 1)
 
 	// Cross-tenant FK: tenant B references tenant A's entity — invisible under RLS
 	// → FK violation → 400.
-	s.Client.External().WithTenant(tenantB).
+	s.As(tenantB).
 		POST(s.T(), "/workflows", recurring).
 		AssertStatus(s.T(), http.StatusBadRequest)
 
