@@ -157,8 +157,13 @@ Commits: `4cdcd4e` scaffold · `2851179` tenancy+entities · `d074780` obligatio
   authed routes, 404 on id-addressed, 409 on tenant mutations). **Proven generator-ready:**
   `openapi-typescript` consumed the live spec cleanly (typed operations + envelopes). The `data`
   payloads are deliberately untyped until per-module response DTOs land with the client-generation
-  pass. **The TS client is NOT wired yet** — the React frontend (`../TaxFlowReports`) is still on
-  MSW mocks; wiring it is the next frontend step.
+  pass. **The frontend IS wired (2026-08-23, hybrid):** the React app authenticates and runs the core
+  chain against this API through a transitional Express adapter (`TaxFlowReports/server/go-proxy.ts` —
+  path rewrites, envelope unwrapping, cookie passthrough, per-endpoint body whitelists because this API
+  rightly rejects unknown fields). Verified live in the browser (login → entities from Postgres → UI
+  create → audit entry). Unmigrated surfaces (dashboard aggregates, documents, templates, team,
+  notifications, reports) remain on MSW/legacy Express until their Go modules exist; remaining forms'
+  payloads migrate module-by-module.
 - **`zentax-mcp` sidecar — DEFERRED (logged 2026-08-23).** Both readiness blockers are closed
   (machine identity + audit) and the spec now carries `x-required-capability` for tool generation,
   so the sidecar is buildable when picked up — see
