@@ -24,10 +24,14 @@ type Config struct {
 	Description string
 	Version     string
 	BaseURL     string
+	// SessionCookieName names the session cookie in the cookie security scheme
+	// (defaults to "zentax_session").
+	SessionCookieName string
 }
 
 type Components struct {
 	SecuritySchemes map[string]SecurityScheme `json:"securitySchemes,omitempty"`
+	Schemas         map[string]Schema         `json:"schemas,omitempty"`
 }
 
 type SecurityScheme struct {
@@ -62,6 +66,10 @@ type Operation struct {
 	RequestBody *RequestBody        `json:"requestBody,omitempty"`
 	Responses   map[string]Response `json:"responses"`
 	Security    []SecurityReq       `json:"security,omitempty"`
+	// XRequiredCapability surfaces the RBAC capability the route demands
+	// (RouteDefinition.Capability) so generated clients / MCP tooling can
+	// annotate operations with the permission they need (ADR-0012).
+	XRequiredCapability string `json:"x-required-capability,omitempty"`
 }
 
 type Parameter struct {
@@ -89,6 +97,7 @@ type Response struct {
 }
 
 type Schema struct {
+	Ref        string            `json:"$ref,omitempty"`
 	Type       string            `json:"type,omitempty"`
 	Format     string            `json:"format,omitempty"`
 	Items      *Schema           `json:"items,omitempty"`

@@ -51,44 +51,94 @@ func TestGenerateIncludesDTOExamples(t *testing.T) {
 	assertExample(t, paramsByName["sort"].Example, "createdAt")
 }
 
-func TestGenerateExternalAuthUsesGatewayHeaders(t *testing.T) {
+func TestGenerateExternalSecurityIsSessionOrBearer(t *testing.T) {
 	spec := Generate([]routing.RouteMeta{
 		{
-			FullPath: "/users",
+			FullPath: "/entities",
 			Definition: types.RouteDefinition{
-				Method: http.MethodGet,
-				Path:   "/users",
-				Auth:   true,
+				Method:     http.MethodPost,
+				Path:       "/",
+				Tenant:     true,
+				Capability: "entity:write",
+			},
+		},
+	}, types.ModeExternal, Config{Title: "Test API", SessionCookieName: "zentax_session"})
+
+	cookie := spec.Components.SecuritySchemes["sessionCookie"]
+	if cookie.Type != "apiKey" || cookie.In != "cookie" || cookie.Name != "zentax_session" {
+		t.Fatalf("session cookie scheme mismatch: %#v", cookie)
+	}
+	bearer := spec.Components.SecuritySchemes["bearerToken"]
+	if bearer.Type != "http" || bearer.Scheme != "bearer" {
+		t.Fatalf("bearer scheme mismatch: %#v", bearer)
+	}
+	if _, gone := spec.Components.SecuritySchemes["gatewayAccountId"]; gone {
+		t.Fatal("gateway schemes must be gone — they never described this API's auth")
+	}
+
+	op := spec.Paths["/entities"]["post"]
+	// Alternatives: cookie OR bearer — two separate requirement objects.
+	if len(op.Security) != 2 {
+		t.Fatalf("expected two alternative security requirements, got %#v", op.Security)
+	}
+	if _, ok := op.Security[0]["sessionCookie"]; !ok {
+		t.Fatalf("first alternative must be sessionCookie: %#v", op.Security)
+	}
+	if _, ok := op.Security[1]["bearerToken"]; !ok {
+		t.Fatalf("second alternative must be bearerToken: %#v", op.Security)
+	}
+}
+
+func TestGenerateSurfacesCapabilityAndResponses(t *testing.T) {
+	spec := Generate([]routing.RouteMeta{
+		{
+			FullPath: "/task-instances/{id}/approve",
+			Definition: types.RouteDefinition{
+				Method:     http.MethodPost,
+				Path:       "/{id}/approve",
+				Tenant:     true,
+				Capability: "task:approve",
+			},
+		},
+		{
+			FullPath: "/entities",
+			Definition: types.RouteDefinition{
+				Method:     http.MethodGet,
+				Path:       "/",
+				Tenant:     true,
+				Paginated:  true,
+				Capability: "entity:read",
 			},
 		},
 	}, types.ModeExternal, Config{Title: "Test API"})
 
-	scheme := spec.Components.SecuritySchemes["gatewayAccountId"]
-	if scheme.Type != "apiKey" || scheme.In != "header" || scheme.Name != "X-Account-Id" {
-		t.Fatalf("external auth scheme mismatch: %#v", scheme)
+	approve := spec.Paths["/task-instances/{id}/approve"]["post"]
+	if approve.XRequiredCapability != "task:approve" {
+		t.Fatalf("x-required-capability missing: %#v", approve.XRequiredCapability)
 	}
-
-	for schemeName, headerName := range map[string]string{
-		"gatewayAPIKeyId":      "X-API-Key-Id",
-		"gatewayCustomerId":    "X-Customer-Id",
-		"gatewayCorrelationId": "X-Correlation-Id",
-		"gatewayClientIP":      "X-Client-IP",
-	} {
-		scheme := spec.Components.SecuritySchemes[schemeName]
-		if scheme.Type != "apiKey" || scheme.In != "header" || scheme.Name != headerName {
-			t.Fatalf("external auth scheme %s mismatch: %#v", schemeName, scheme)
+	// Authenticated + id-addressed mutation: the full error contract.
+	for _, code := range []string{"400", "401", "403", "404", "409", "500"} {
+		if _, ok := approve.Responses[code]; !ok {
+			t.Fatalf("approve must declare %s", code)
 		}
 	}
+	// Action POST on an id declares 200 alongside 201.
+	if _, ok := approve.Responses["200"]; !ok {
+		t.Fatal("action-style POST must declare 200")
+	}
+	if got := approve.Responses["403"].Content["application/json"].Schema.Ref; got != "#/components/schemas/ErrorEnvelope" {
+		t.Fatalf("errors must reference the ErrorEnvelope, got %q", got)
+	}
 
-	op := spec.Paths["/users"]["get"]
-	assertSecurity(t, op.Security, "gatewayAccountId")
-	assertSecurity(t, op.Security, "gatewayAPIKeyId")
-	assertSecurity(t, op.Security, "gatewayCustomerId")
-	assertSecurity(t, op.Security, "gatewayCorrelationId")
-	assertSecurity(t, op.Security, "gatewayClientIP")
-
-	if len(op.Parameters) != 0 {
-		t.Fatalf("expected external auth headers to be configured via security schemes, got parameters %#v", op.Parameters)
+	list := spec.Paths["/entities"]["get"]
+	if got := list.Responses["200"].Content["application/json"].Schema.Ref; got != "#/components/schemas/PaginatedEnvelope" {
+		t.Fatalf("paginated list must reference the PaginatedEnvelope, got %q", got)
+	}
+	if _, ok := spec.Components.Schemas["SuccessEnvelope"]; !ok {
+		t.Fatal("SuccessEnvelope component schema missing")
+	}
+	if _, ok := spec.Components.Schemas["ErrorEnvelope"]; !ok {
+		t.Fatal("ErrorEnvelope component schema missing")
 	}
 }
 

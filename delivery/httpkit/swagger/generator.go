@@ -28,21 +28,34 @@ func Generate(routes []routing.RouteMeta, mode types.ServerMode, cfg Config) Spe
 		spec.Servers = []Server{{URL: cfg.BaseURL}}
 	}
 
+	// Security schemes mirror the real auth middleware (RequireAuth): humans
+	// authenticate with the server-side session cookie (ADR-0011), machines
+	// with a bearer API token (agentic-AI B1). Internal mode keeps the
+	// boilerplate's basic-auth service credentials.
+	cookieName := cfg.SessionCookieName
+	if cookieName == "" {
+		cookieName = "zentax_session"
+	}
 	if mode == types.ModeExternal {
 		spec.Components = &Components{
 			SecuritySchemes: map[string]SecurityScheme{
-				"gatewayAccountId":     gatewayHeaderSecurityScheme("X-Account-Id", "Authenticated account ID injected by the upstream auth gateway"),
-				"gatewayAPIKeyId":      gatewayHeaderSecurityScheme("X-API-Key-Id", "API key ID injected by the upstream auth gateway"),
-				"gatewayCustomerId":    gatewayHeaderSecurityScheme("X-Customer-Id", "Customer ID injected by the upstream auth gateway"),
-				"gatewayCorrelationId": gatewayHeaderSecurityScheme("X-Correlation-Id", "Correlation ID injected by the upstream auth gateway"),
-				"gatewayClientIP":      gatewayHeaderSecurityScheme("X-Client-IP", "Client IP injected by the upstream auth gateway"),
+				"sessionCookie": {
+					Type: "apiKey", In: "cookie", Name: cookieName,
+					Description: "Server-side session for human users, set by POST /auth/login (httpOnly; MFA-gated when enrolled).",
+				},
+				"bearerToken": {
+					Type: "http", Scheme: "bearer", BearerFormat: "ztx_...",
+					Description: "Service-account API token (machine identity), issued via POST /service-accounts/{id}/tokens. Machines are denied human-only capabilities (task:approve).",
+				},
 			},
+			Schemas: envelopeSchemas(),
 		}
 	} else {
 		spec.Components = &Components{
 			SecuritySchemes: map[string]SecurityScheme{
 				"basicAuth": {Type: "http", Scheme: "basic", Description: "API key as username, SHA512-hashed secret as password"},
 			},
+			Schemas: envelopeSchemas(),
 		}
 	}
 
@@ -61,18 +74,20 @@ func Generate(routes []routing.RouteMeta, mode types.ServerMode, cfg Config) Spe
 		}
 
 		op := &Operation{
-			Tags:        []string{tag},
-			Summary:     summary,
-			OperationID: buildOperationID(rm.Definition.Method, rm.FullPath),
-			Responses:   defaultResponses(rm.Definition.Method),
+			Tags:                []string{tag},
+			Summary:             summary,
+			OperationID:         buildOperationID(rm.Definition.Method, rm.FullPath),
+			Responses:           buildResponses(rm.Definition),
+			XRequiredCapability: string(rm.Definition.Capability),
 		}
 
-		if rm.Definition.Auth {
-			if mode == types.ModeExternal {
-				op.Security = []SecurityReq{gatewayHeaderSecurityReq()}
-			} else {
-				op.Security = []SecurityReq{{"basicAuth": {}}}
-			}
+		// Tenant routes require an authenticated principal: a human session
+		// cookie OR a service-account bearer token (alternatives, not both).
+		if rm.Definition.Tenant && mode == types.ModeExternal {
+			op.Security = []SecurityReq{{"sessionCookie": {}}, {"bearerToken": {}}}
+		}
+		if rm.Definition.Auth && mode == types.ModeInternal {
+			op.Security = []SecurityReq{{"basicAuth": {}}}
 		}
 
 		if rm.Schema != nil {
@@ -119,7 +134,10 @@ func buildInfo(mode types.ServerMode, cfg Config) Info {
 	if desc == "" {
 		switch mode {
 		case types.ModeExternal:
-			desc = "Public-facing API for client applications. Authenticated by the upstream gateway using injected request headers."
+			desc = "ZenTax tenant API. Humans authenticate with a server-side session cookie (POST /auth/login, MFA-gated); " +
+				"machines with a service-account bearer token (ztx_...). Every operation lists its required RBAC capability " +
+				"as x-required-capability; writes are additionally scoped to the principal's entity subtree, and approval " +
+				"actions are human-only."
 		case types.ModeInternal:
 			desc = "Internal service-to-service API. Authenticated via HTTP Basic using API key and hashed secret."
 		}
@@ -218,60 +236,108 @@ func buildOperationID(method, path string) string {
 	return strings.ToLower(method) + "_" + clean
 }
 
-func defaultResponses(method string) map[string]Response {
-	responses := map[string]Response{
-		"400": {Description: "Bad request"},
-		"500": {Description: "Internal server error"},
+// buildResponses declares the response contract per route. Success bodies use
+// the shared envelope component schemas; error statuses reflect the middleware
+// chain (401/403 on authenticated routes, 404 on id-addressed routes, 409 on
+// tenant mutations — duplicates, already-started, approval-locked). Success
+// codes follow the handler convention: POST creates → 201, action-style POSTs
+// on an id (submit/approve/start) may return 200, DELETE → 204, else 200.
+func buildResponses(def types.RouteDefinition) map[string]Response {
+	success := envelopeContent("SuccessEnvelope")
+	if def.Paginated {
+		success = envelopeContent("PaginatedEnvelope")
 	}
 
-	switch method {
+	responses := map[string]Response{
+		"400": errorResponse("Bad request (validation or malformed input)"),
+		"500": errorResponse("Internal server error"),
+	}
+
+	switch def.Method {
 	case http.MethodPost:
-		responses["201"] = Response{
-			Description: "Created",
-			Content:     jsonResponseContent(),
+		responses["201"] = Response{Description: "Created", Content: success}
+		if hasPathParam(def.Path) {
+			// Action-style POSTs (…/{id}/approve, …/{id}/start) return 200.
+			responses["200"] = Response{Description: "Success", Content: success}
 		}
 	case http.MethodDelete:
 		responses["204"] = Response{Description: "No content"}
 	default:
-		responses["200"] = Response{
-			Description: "Success",
-			Content:     jsonResponseContent(),
+		responses["200"] = Response{Description: "Success", Content: success}
+	}
+
+	if def.Tenant {
+		responses["401"] = errorResponse("Not authenticated (missing or invalid session / API token)")
+		responses["403"] = errorResponse("Not authorized (missing capability, out-of-scope entity, or human-only action)")
+		switch def.Method {
+		case http.MethodPost, http.MethodPut, http.MethodPatch:
+			responses["409"] = errorResponse("Conflict (duplicate, already started, or locked by approval)")
 		}
+	}
+	if hasPathParam(def.Path) {
+		responses["404"] = errorResponse("Not found (or not visible in this tenant)")
 	}
 
 	return responses
 }
 
-func jsonResponseContent() map[string]Content {
+func envelopeContent(name string) map[string]Content {
 	return map[string]Content{
-		"application/json": {
-			Schema: Schema{
-				Type: schemaTypeObject,
-				Properties: map[string]Schema{
-					"status": {Type: schemaTypeBoolean},
-					"data":   {Type: schemaTypeObject},
+		"application/json": {Schema: Schema{Ref: "#/components/schemas/" + name}},
+	}
+}
+
+func errorResponse(description string) Response {
+	return Response{
+		Description: description,
+		Content:     envelopeContent("ErrorEnvelope"),
+	}
+}
+
+// envelopeSchemas are the shared response envelopes every endpoint uses. The
+// `data` payload is deliberately untyped at this stage — typed response DTOs
+// land with the client-generation pass.
+func envelopeSchemas() map[string]Schema {
+	intSchema := Schema{Type: schemaTypeInteger}
+	return map[string]Schema{
+		"SuccessEnvelope": {
+			Type: schemaTypeObject,
+			Properties: map[string]Schema{
+				"status": {Type: schemaTypeBoolean, Example: true},
+				"data":   {}, // any
+			},
+			Required: []string{"status", "data"},
+		},
+		"PaginatedEnvelope": {
+			Type: schemaTypeObject,
+			Properties: map[string]Schema{
+				"status": {Type: schemaTypeBoolean, Example: true},
+				"data":   {Type: "array", Items: &Schema{}},
+				"pagination": {
+					Type: schemaTypeObject,
+					Properties: map[string]Schema{
+						"total": intSchema, "limit": intSchema, "offset": intSchema,
+					},
+					Required: []string{"total", "limit", "offset"},
 				},
 			},
+			Required: []string{"status", "data", "pagination"},
 		},
-	}
-}
-
-func gatewayHeaderSecurityScheme(name, description string) SecurityScheme {
-	return SecurityScheme{
-		Type:        "apiKey",
-		In:          "header",
-		Name:        name,
-		Description: description,
-	}
-}
-
-func gatewayHeaderSecurityReq() SecurityReq {
-	return SecurityReq{
-		"gatewayAccountId":     {},
-		"gatewayAPIKeyId":      {},
-		"gatewayCustomerId":    {},
-		"gatewayCorrelationId": {},
-		"gatewayClientIP":      {},
+		"ErrorEnvelope": {
+			Type: schemaTypeObject,
+			Properties: map[string]Schema{
+				"status": {Type: schemaTypeBoolean, Example: false},
+				"error": {
+					Type: schemaTypeObject,
+					Properties: map[string]Schema{
+						"code":    {Type: schemaTypeString, Example: "FORBIDDEN"},
+						"message": {Type: schemaTypeString},
+					},
+					Required: []string{"code", "message"},
+				},
+			},
+			Required: []string{"status", "error"},
+		},
 	}
 }
 

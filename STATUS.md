@@ -147,12 +147,23 @@ Commits: `4cdcd4e` scaffold · `2851179` tenancy+entities · `d074780` obligatio
 - Feature flags / entitlements (ADR-0010); region/residency cells + control-plane (ADR-0005).
 
 ### 🟡 Frontend integration
-- **OpenAPI spec: GENERATED (correction 2026-08-21)** — the boilerplate's `delivery/httpkit/swagger`
-  reflects the route registry + DTO validator tags (required/enums/min-max) into an **OpenAPI 3.0.3 spec
-  served at `/swagger/spec.json`** (+ `/swagger` UI). Gaps in the spec: security schemes still describe the
-  boilerplate's gateway/basic auth (not the session cookie), `RouteDefinition.Capability` isn't surfaced,
-  and response bodies aren't schematized. **The TS client is NOT generated yet** — the React frontend
-  (`../TaxFlowReports`) is still on MSW mocks.
+- **OpenAPI contract: FINISHED (B3, 2026-08-23).** `/swagger/spec.json` now describes the real API:
+  **security schemes are `sessionCookie` (apiKey-in-cookie, named from config) + `bearerToken`
+  (`ztx_...`)** — the boilerplate gateway schemes are gone; every tenant route declares
+  cookie-OR-bearer alternatives; public routes (login, health) carry none. Every operation surfaces
+  its RBAC permission as **`x-required-capability`** (36 of 44 ops). **Responses are schematized**
+  via shared component envelopes — `SuccessEnvelope` / `PaginatedEnvelope` (driven by the
+  `Paginated` flag) / `ErrorEnvelope` — with the accurate error contract per route (401/403 on
+  authed routes, 404 on id-addressed, 409 on tenant mutations). **Proven generator-ready:**
+  `openapi-typescript` consumed the live spec cleanly (typed operations + envelopes). The `data`
+  payloads are deliberately untyped until per-module response DTOs land with the client-generation
+  pass. **The TS client is NOT wired yet** — the React frontend (`../TaxFlowReports`) is still on
+  MSW mocks; wiring it is the next frontend step.
+- **`zentax-mcp` sidecar — DEFERRED (logged 2026-08-23).** Both readiness blockers are closed
+  (machine identity + audit) and the spec now carries `x-required-capability` for tool generation,
+  so the sidecar is buildable when picked up — see
+  `../TaxFlowReports/docs/assessments/agentic-ai-mcp-readiness.md` for the design (thin stateless
+  translator, tools from the route registry, approval never exposed as a tool).
 - **Strip `server/` from `TaxFlowReports`** — deferred until the Go API + client replace the Express dev server.
 
 ---

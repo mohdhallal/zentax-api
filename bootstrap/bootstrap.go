@@ -122,8 +122,9 @@ func New(cfg *config.Config, mode types.ServerMode) (*App, error) {
 	}
 
 	swagger.Mount(chiRouter, router.Routes(), mode, swagger.Config{
-		Title:   cfg.Swagger.Title,
-		Version: cfg.Swagger.Version,
+		Title:             cfg.Swagger.Title,
+		Version:           cfg.Swagger.Version,
+		SessionCookieName: cfg.Auth.SessionCookieName,
 	})
 
 	if cfg.IsDevelopment() {
