@@ -201,6 +201,14 @@ First real end-to-end run on **Postgres 14** (local Homebrew cluster, connecting
   postgres://zentax_app:...@host/zentax?sslmode=disable` (`DATABASE_URL` overrides config).
 - Build with gvm Go 1.27: `export GOROOT="$HOME/.gvm/gos/go1.27"; export PATH="$GOROOT/bin:$PATH"`.
 
+## ⚠️ Standing schema directive (ADR-0020, 2026-08-23)
+**Partition new tables by default** — HASH(tenant_id) for tenant-scoped OLTP (the composite
+`(tenant_id, id)` unique/FK pattern already satisfies partition-key rules), RANGE(time) for
+append-only/expiring streams (audit/email logs, sessions, api_tokens). Not partitioning requires a
+stated reason in the migration comment (fine for small registries: tenants, users, grants).
+**Retrofit gate:** the 13 existing tables must be recreated partitioned BEFORE first pilot/real data —
+tracked in PROJECT_PLAN Phase 1.
+
 ## Minor tech debt
 - Generation loops `Create` (N inserts) — could batch.
 - `strip server/` and the audit-actor columns both wait on later work (auth).
