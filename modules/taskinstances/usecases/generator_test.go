@@ -56,6 +56,10 @@ func TestGenerator_ComputesDeadlines(t *testing.T) {
 	instances.On("CountByWorkflow", ctx, "wf-1").Return(0, nil).Once()
 	entities.On("GetById", ctx, "ent-1").Return(entity, nil).Once()
 	workflowTasks.On("ListByWorkflow", ctx, "wf-1").Return([]workflowtasksdomain.WorkflowTask{task}, nil).Once()
+	// Start is the draft → active transition; everything else is re-submitted as is.
+	workflows.On("Update", ctx, "wf-1", mock.MatchedBy(func(in workflowsdomain.UpdateWorkflowInput) bool {
+		return in.Status == "active" && in.EntityID != nil && *in.EntityID == "ent-1" && len(in.SelectedPeriods) == 2
+	})).Return(wf, nil).Once()
 
 	var created []tidomain.CreateTaskInstanceInput
 	instances.On("Create", ctx, mock.Anything).
@@ -64,7 +68,7 @@ func TestGenerator_ComputesDeadlines(t *testing.T) {
 		}).
 		Return(&tidomain.TaskInstance{}, nil).Times(2)
 
-	count, err := gen.StartWorkflow(ctx, "wf-1")
+	count, err := gen.StartWorkflow(ctx, "wf-1", nil)
 	require.NoError(t, err)
 	assert.Equal(t, 2, count)
 	require.Len(t, created, 2)
@@ -96,7 +100,7 @@ func TestGenerator_FailsClosedOnUnsupportedPattern(t *testing.T) {
 	instances.On("CountByWorkflow", ctx, "wf-1").Return(0, nil).Once()
 	entities.On("GetById", ctx, "ent-1").Return(entity, nil).Once()
 
-	_, err := gen.StartWorkflow(ctx, "wf-1")
+	_, err := gen.StartWorkflow(ctx, "wf-1", nil)
 	assert.IsType(t, &apperrors.ValidationError{}, err)
 	assert.Contains(t, err.Error(), "445")
 }
@@ -109,7 +113,7 @@ func TestGenerator_RefusesIfAlreadyStarted(t *testing.T) {
 	workflows.On("GetById", ctx, "wf-1").Return(recurringWorkflow(), nil).Once()
 	instances.On("CountByWorkflow", ctx, "wf-1").Return(3, nil).Once()
 
-	_, err := gen.StartWorkflow(ctx, "wf-1")
+	_, err := gen.StartWorkflow(ctx, "wf-1", nil)
 	assert.IsType(t, &apperrors.ConflictError{}, err)
 }
 
@@ -121,7 +125,7 @@ func TestGenerator_RejectsNonRecurring(t *testing.T) {
 	project := &workflowsdomain.Workflow{ID: "wf-1", WorkflowCategory: "project"}
 	workflows.On("GetById", ctx, "wf-1").Return(project, nil).Once()
 
-	_, err := gen.StartWorkflow(ctx, "wf-1")
+	_, err := gen.StartWorkflow(ctx, "wf-1", nil)
 	assert.IsType(t, &apperrors.ValidationError{}, err)
 }
 
@@ -132,6 +136,6 @@ func TestGenerator_WorkflowNotFound(t *testing.T) {
 
 	workflows.On("GetById", ctx, "missing").Return(nil, nil).Once()
 
-	_, err := gen.StartWorkflow(ctx, "missing")
+	_, err := gen.StartWorkflow(ctx, "missing", nil)
 	assert.IsType(t, &apperrors.NotFoundError{}, err)
 }

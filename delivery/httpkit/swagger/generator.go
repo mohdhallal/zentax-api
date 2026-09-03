@@ -498,7 +498,10 @@ func typeToSchema(t reflect.Type) Schema {
 		return Schema{Type: schemaTypeArray, Items: &items}
 	case reflect.Struct:
 		return structTypeToSchema(t)
-	case reflect.Map, reflect.Interface:
+	case reflect.Map:
+		values := typeToSchema(t.Elem())
+		return Schema{Type: schemaTypeObject, AdditionalProperties: &values}
+	case reflect.Interface:
 		return Schema{Type: schemaTypeObject}
 	default:
 		return Schema{Type: schemaTypeString}

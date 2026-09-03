@@ -19,13 +19,17 @@ func TestStructToSchemaFollowsNestedTypes(t *testing.T) {
 	}
 	type periods []string
 	type requirements []requirement
+	type override struct {
+		DueDate *string `json:"dueDate" validate:"omitempty,len=10"`
+	}
 	type body struct {
-		Periods      periods      `json:"periods" validate:"omitempty,dive,max=10"`
-		Rule         rule         `json:"rule" validate:"omitempty"`
-		RulePtr      *rule        `json:"rulePtr"`
-		Requirements requirements `json:"requirements" validate:"omitempty,dive"`
-		Raw          []byte       `json:"raw"`
-		At           time.Time    `json:"at"`
+		Periods      periods             `json:"periods" validate:"omitempty,dive,max=10"`
+		Rule         rule                `json:"rule" validate:"omitempty"`
+		RulePtr      *rule               `json:"rulePtr"`
+		Requirements requirements        `json:"requirements" validate:"omitempty,dive"`
+		Overrides    map[string]override `json:"overrides" validate:"omitempty,dive"`
+		Raw          []byte              `json:"raw"`
+		At           time.Time           `json:"at"`
 	}
 
 	s := structToSchema(body{})
@@ -54,6 +58,12 @@ func TestStructToSchemaFollowsNestedTypes(t *testing.T) {
 	}
 	if reqs.Items.Properties["required"].Type != "boolean" || len(reqs.Items.Required) != 1 || reqs.Items.Required[0] != "name" {
 		t.Fatalf("requirements: item schema must carry its own properties/required, got %+v", reqs.Items)
+	}
+
+	ovs := s.Properties["overrides"]
+	if ovs.Type != "object" || ovs.AdditionalProperties == nil || ovs.AdditionalProperties.Type != "object" ||
+		ovs.AdditionalProperties.Properties["dueDate"].Type != "string" {
+		t.Fatalf("map fields must describe their values via additionalProperties, got %+v", ovs)
 	}
 
 	if s.Properties["raw"].Type != "string" {

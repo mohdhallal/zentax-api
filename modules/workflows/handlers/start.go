@@ -12,7 +12,9 @@ import (
 )
 
 // StartWorkflowHandler handles POST /workflows/{id}/start — it materializes
-// per-period task instances from the workflow's task templates.
+// per-period task instances from the workflow's task templates, applying the
+// caller's optional per-instance date overrides (keys as listed by
+// GET /workflows/{id}/preview).
 type StartWorkflowHandler struct {
 	starter domain.Starter
 }
@@ -34,6 +36,7 @@ func (h *StartWorkflowHandler) DefineRoute() types.RouteDefinition {
 func (h *StartWorkflowHandler) DefineSchema() types.SchemaDefinition {
 	return types.SchemaDefinition{
 		Params: dto.WorkflowIdParams{},
+		Body:   dto.StartWorkflowBody{}, // optional: an absent body validates to the zero value
 	}
 }
 
@@ -42,7 +45,15 @@ func (h *StartWorkflowHandler) Execute(
 ) (*types.HttpResponse, error) {
 	params, _ := input.Params.(*dto.WorkflowIdParams)
 
-	count, err := h.starter.StartWorkflow(r.Context(), params.ID)
+	var overrides domain.TaskOverrides
+	if body, ok := input.Body.(*dto.StartWorkflowBody); ok && body != nil {
+		var err error
+		if overrides, err = body.ToDomain(); err != nil {
+			return nil, err
+		}
+	}
+
+	count, err := h.starter.StartWorkflow(r.Context(), params.ID, overrides)
 	if err != nil {
 		return nil, err
 	}

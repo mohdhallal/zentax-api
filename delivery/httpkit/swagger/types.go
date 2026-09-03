@@ -102,14 +102,16 @@ type Schema struct {
 	Format     string            `json:"format,omitempty"`
 	Items      *Schema           `json:"items,omitempty"`
 	Properties map[string]Schema `json:"properties,omitempty"`
-	Required   []string          `json:"required,omitempty"`
-	Enum       []string          `json:"enum,omitempty"`
-	Minimum    *float64          `json:"minimum,omitempty"`
-	Maximum    *float64          `json:"maximum,omitempty"`
-	MaxLength  *int              `json:"maxLength,omitempty"`
-	MinLength  *int              `json:"minLength,omitempty"`
-	Default    any               `json:"default,omitempty"`
-	Example    any               `json:"example,omitempty"`
+	// AdditionalProperties describes the values of a map-typed field.
+	AdditionalProperties *Schema  `json:"additionalProperties,omitempty"`
+	Required             []string `json:"required,omitempty"`
+	Enum                 []string `json:"enum,omitempty"`
+	Minimum              *float64 `json:"minimum,omitempty"`
+	Maximum              *float64 `json:"maximum,omitempty"`
+	MaxLength            *int     `json:"maxLength,omitempty"`
+	MinLength            *int     `json:"minLength,omitempty"`
+	Default              any      `json:"default,omitempty"`
+	Example              any      `json:"example,omitempty"`
 }
 
 type SecurityReq map[string][]string

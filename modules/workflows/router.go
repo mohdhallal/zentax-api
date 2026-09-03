@@ -13,6 +13,7 @@ func RegisterRoutes(router *routing.Router, uc domain.WorkflowUseCases, starter 
 		routing.RegisterRoute(r, handlers.NewGetWorkflowByIdHandler(uc))
 		routing.RegisterRoute(r, handlers.NewUpdateWorkflowHandler(uc))
 		routing.RegisterRoute(r, handlers.NewDeleteWorkflowHandler(uc))
+		routing.RegisterRoute(r, handlers.NewPreviewWorkflowHandler(starter))
 		routing.RegisterRoute(r, handlers.NewStartWorkflowHandler(starter))
 	})
 }

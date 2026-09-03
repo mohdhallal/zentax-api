@@ -40,7 +40,16 @@ green on both the main module and `acceptance/`.
 6. **task-instances** — generated per-period tasks; `DATE` legal-date columns; JSONB `tax_data`.
    `POST /workflows/{id}/start` materializes an instance per period × template
    (period-end → filing deadline → task due date); idempotent-guarded (409),
-   fail-closed on unsupported fiscal calendars.
+   fail-closed on unsupported fiscal calendars. **Dry run (2026-09-03):**
+   `GET /workflows/{id}/preview` (read capability) returns the summary + every
+   planned row (`templateId`, `periodCode`, date-only dates, in selectedPeriods
+   order) from the **same planner** start persists — pure read, no audit entry.
+   Start accepts an optional `{ taskOverrides: { "<templateId>_<periodCode>":
+   { dueDate?, periodEndDate? } } }` body: a period-end override recomputes that
+   instance's filing deadline + due date, a due-date override replaces the due
+   date; unknown keys / bad dates → 400 before anything is created. Start also
+   transitions the workflow **draft → active** in the same transaction. This is
+   what the frontend's "Run Workflow" dialog is built on.
 
 Migrations (sqitch): `tenants`, `entities`, `obligation_types`, `entity_obligations`,
 `workflows`, `workflow_tasks`, `task_instances`, `task_instance_approvals`, `actor_columns`,
