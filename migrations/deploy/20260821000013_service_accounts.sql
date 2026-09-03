@@ -15,9 +15,14 @@ ALTER TABLE users
 -- exists, hence NOT RLS-scoped — every tenant-sensitive query in the app layer
 -- scopes by tenant_id explicitly. Expiry is mandatory; revocation is a
 -- tombstone (revoked_at), never a delete, so issuance history survives.
+-- Partitioned by RANGE(created_at), monthly (ADR-0020): tokens expire and are
+-- tombstoned, so old partitions can be dropped once past the maximum token
+-- lifetime. token_hash uniqueness is per-partition (partition-key rule) —
+-- fine, the hash is over 256 bits of entropy. Never drop a partition younger
+-- than the longest allowed expiry.
 CREATE TABLE api_tokens (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    token_hash TEXT NOT NULL UNIQUE,
+    id UUID NOT NULL DEFAULT gen_random_uuid(),
+    token_hash TEXT NOT NULL,
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     label TEXT NOT NULL,
@@ -25,8 +30,15 @@ CREATE TABLE api_tokens (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     expires_at TIMESTAMPTZ NOT NULL,
     last_used_at TIMESTAMPTZ,
-    revoked_at TIMESTAMPTZ
-);
+    revoked_at TIMESTAMPTZ,
+    PRIMARY KEY (id, created_at),
+    UNIQUE (token_hash, created_at)
+) PARTITION BY RANGE (created_at);
+
+SELECT ensure_month_partitions('api_tokens', DATE '2026-08-01', 3);
+CREATE TABLE api_tokens_default PARTITION OF api_tokens DEFAULT;
+ALTER TABLE api_tokens_default ENABLE ROW LEVEL SECURITY;
+ALTER TABLE api_tokens_default FORCE ROW LEVEL SECURITY;
 
 CREATE INDEX idx_api_tokens_user_id ON api_tokens(user_id);
 CREATE INDEX idx_api_tokens_tenant_id ON api_tokens(tenant_id);

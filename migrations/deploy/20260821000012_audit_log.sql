@@ -17,8 +17,17 @@ BEGIN;
 --
 -- PII rule: details carries ONLY explicitly whitelisted non-PII values (enum
 -- transitions, counts, ids). Names are resolved at read time from the user row.
+--
+-- Partitioned by RANGE(occurred_at), monthly (ADR-0020): the fastest-growing
+-- append-only stream. Retention (ADR-0007) and WORM export (ADR-0008) become
+-- per-partition lifecycle: export, then DETACH/DROP. Conscious trade-off: the
+-- unique on (tenant_id, seq) must include the partition key, so it is
+-- effectively per-partition — sequence integrity is guaranteed by the
+-- advisory-lock-serialized writer and VERIFIED by the hash chain (duplicates,
+-- gaps, and reorders all break recomputation); the chain, not the index, is
+-- the ledger's integrity mechanism.
 CREATE TABLE audit_log (
-    event_id      UUID PRIMARY KEY,
+    event_id      UUID NOT NULL,
     tenant_id     UUID NOT NULL DEFAULT NULLIF(current_setting('app.tenant_id', true), '')::uuid
         REFERENCES tenants(id) ON DELETE RESTRICT,
     seq           BIGINT NOT NULL,
@@ -31,8 +40,14 @@ CREATE TABLE audit_log (
     details       JSONB NOT NULL DEFAULT '{}'::jsonb,
     prev_hash     CHAR(64) NOT NULL,      -- sha256 hex of the previous entry; 64 zeros at genesis
     hash          CHAR(64) NOT NULL,
-    UNIQUE (tenant_id, seq)
-);
+    PRIMARY KEY (event_id, occurred_at),
+    UNIQUE (tenant_id, seq, occurred_at)
+) PARTITION BY RANGE (occurred_at);
+
+SELECT ensure_month_partitions('audit_log', DATE '2026-08-01', 3);
+CREATE TABLE audit_log_default PARTITION OF audit_log DEFAULT;
+ALTER TABLE audit_log_default ENABLE ROW LEVEL SECURITY;
+ALTER TABLE audit_log_default FORCE ROW LEVEL SECURITY;
 
 CREATE INDEX idx_audit_log_tenant_seq ON audit_log (tenant_id, seq DESC);
 CREATE INDEX idx_audit_log_resource ON audit_log (resource_type, resource_id);

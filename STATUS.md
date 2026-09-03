@@ -191,6 +191,10 @@ First real end-to-end run on **Postgres 14** (local Homebrew cluster, connecting
      (`order_index`) now sort ASC** — earliest deadline / natural step order.
 
 ### Runbook — local Postgres (no Docker needed)
+- **Postgres 15+ required** since the partition retrofit (column-targeted
+  `ON DELETE SET NULL (parent_entity_id)` on `entities`); the compose stack runs PG16. The old
+  Homebrew PG14 cluster no longer works — easiest scratch DB now: `CREATE DATABASE` inside the
+  running compose postgres (`localhost:5433`, superuser `postgres`).
 - Migrations run as a privileged role (pgcrypto needs superuser); the **app + tests must connect
   as a non-owner, non-`BYPASSRLS` role** — `FORCE ROW LEVEL SECURITY` binds the owner too, but a
   `BYPASSRLS`/superuser connection silently defeats isolation.
@@ -206,8 +210,18 @@ First real end-to-end run on **Postgres 14** (local Homebrew cluster, connecting
 `(tenant_id, id)` unique/FK pattern already satisfies partition-key rules), RANGE(time) for
 append-only/expiring streams (audit/email logs, sessions, api_tokens). Not partitioning requires a
 stated reason in the migration comment (fine for small registries: tenants, users, grants).
-**Retrofit gate:** the 13 existing tables must be recreated partitioned BEFORE first pilot/real data —
-tracked in PROJECT_PLAN Phase 1.
+**Retrofit gate: CLOSED (2026-09-03)** — baseline migrations rewritten in place (pre-release history
+edit; existing DBs must be reset — `docker compose down -v`): 6 domain tables HASH(tenant_id, 16)
+with composite `(tenant_id, id)` PKs; `audit_log`/`sessions`/`api_tokens` RANGE(month) + `_default`
+backstop. Use the helpers from the tenants migration for every new table:
+`SELECT create_hash_partitions('<table>', 16)` / `SELECT ensure_month_partitions('<table>', <first
+month>, 3)` — both set **RLS ENABLE+FORCE with no policies on each partition** (direct partition
+access denied; only the parent, whose policies apply, is reachable). `migrate.sh` runs the
+create-ahead maintenance on every start; add any new range table to that block. Bonus fix in the
+retrofit: `entities.parent_entity_id` is now a composite FK with column-targeted SET NULL — the last
+id-only FK, which (FK checks bypass RLS) had admitted cross-tenant parents. 11/11 acceptance suites
++ unit tests green on the partitioned schema; direct-partition denial, cross-tenant-parent rejection,
+and pointer-only SET NULL verified live via psql.
 
 ## Minor tech debt
 - Generation loops `Create` (N inserts) — could batch.

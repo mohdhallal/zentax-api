@@ -6,8 +6,10 @@ BEGIN;
 -- Tenant-scoped; the workflow_id FK is COMPOSITE on (tenant_id, id) so a cross-
 -- tenant reference fails the FK check (FK validation bypasses RLS). The flat
 -- due_date_* columns are the per-task offset rule the generator will apply.
+-- Partitioned by HASH(tenant_id) (ADR-0020); composite PK (tenant_id, id) is
+-- also the FK target for task_instances.
 CREATE TABLE workflow_tasks (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID NOT NULL DEFAULT gen_random_uuid(),
     tenant_id UUID NOT NULL DEFAULT NULLIF(current_setting('app.tenant_id', true), '')::uuid
         REFERENCES tenants(id) ON DELETE CASCADE,
     workflow_id UUID NOT NULL,
@@ -25,11 +27,12 @@ CREATE TABLE workflow_tasks (
     required_documents JSONB NOT NULL DEFAULT '[]'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (tenant_id, id), -- composite FK target for task_instances
+    PRIMARY KEY (tenant_id, id),
     FOREIGN KEY (tenant_id, workflow_id) REFERENCES workflows(tenant_id, id) ON DELETE CASCADE
-);
+) PARTITION BY HASH (tenant_id);
 
-CREATE INDEX idx_workflow_tasks_tenant_id ON workflow_tasks(tenant_id);
+SELECT create_hash_partitions('workflow_tasks', 16);
+
 CREATE INDEX idx_workflow_tasks_workflow ON workflow_tasks(workflow_id);
 
 ALTER TABLE workflow_tasks ENABLE ROW LEVEL SECURITY;

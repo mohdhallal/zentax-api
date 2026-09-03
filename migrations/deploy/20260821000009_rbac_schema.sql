@@ -7,6 +7,9 @@ BEGIN;
 
 -- A grant = (user, role, scope). scope_entity_id NULL means tenant-wide;
 -- otherwise the role applies to that entity subtree (via entity_closure).
+-- user_grants + entity_closure are not partitioned (ADR-0020 exception): small
+-- bounded registries proportional to team size / entity-tree size, hot on
+-- every authorized request — no growth risk, pure planning overhead.
 CREATE TABLE user_grants (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id UUID NOT NULL DEFAULT NULLIF(current_setting('app.tenant_id', true), '')::uuid

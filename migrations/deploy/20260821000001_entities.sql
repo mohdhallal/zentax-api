@@ -7,11 +7,19 @@ BEGIN;
 -- tenant_id defaults to the app.tenant_id GUC bound at the Tx seam (ADR-0004),
 -- so INSERTs never spell it out; a tenant-less transaction leaves the GUC unset
 -- → the default is NULL → NOT NULL fails closed.
+-- Partitioned by HASH(tenant_id) (ADR-0020): per-tenant locality, bounded
+-- tenant offboarding deletes. The PK is composite (tenant_id, id) — it both
+-- includes the partition key (a partitioned-table requirement) and is the FK
+-- target for child tables: Postgres FK checks BYPASS RLS, so an id-only FK
+-- would admit a cross-tenant reference; pinning tenant_id into the key makes a
+-- cross-tenant id fail the FK. The parent_entity_id self-FK is composite for
+-- the same reason, with a column-targeted SET NULL (PG15+) so detaching a
+-- child on parent delete never nulls tenant_id.
 CREATE TABLE entities (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID NOT NULL DEFAULT gen_random_uuid(),
     tenant_id UUID NOT NULL DEFAULT NULLIF(current_setting('app.tenant_id', true), '')::uuid
         REFERENCES tenants(id) ON DELETE CASCADE,
-    parent_entity_id UUID REFERENCES entities(id) ON DELETE SET NULL,
+    parent_entity_id UUID,
     name TEXT NOT NULL,
     legal_name TEXT,
     country TEXT NOT NULL,
@@ -21,13 +29,13 @@ CREATE TABLE entities (
     status VARCHAR(20) NOT NULL DEFAULT 'active',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    -- Composite target so child tables can FK on (tenant_id, id). Postgres FK
-    -- checks BYPASS RLS, so an id-only FK would admit a cross-tenant reference;
-    -- pinning tenant_id into the key makes a cross-tenant id fail the FK.
-    UNIQUE (tenant_id, id)
-);
+    PRIMARY KEY (tenant_id, id),
+    FOREIGN KEY (tenant_id, parent_entity_id) REFERENCES entities(tenant_id, id)
+        ON DELETE SET NULL (parent_entity_id)
+) PARTITION BY HASH (tenant_id);
 
-CREATE INDEX idx_entities_tenant_id ON entities(tenant_id);
+SELECT create_hash_partitions('entities', 16);
+
 CREATE INDEX idx_entities_parent ON entities(parent_entity_id);
 
 -- Row-Level Security (ADR-0004): every row is isolated by the app.tenant_id

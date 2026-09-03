@@ -44,6 +44,16 @@ for f in $(ls "$MIGRATIONS_DIR"/*.sql | sort); do
 done
 echo "migrations: $applied_count newly applied"
 
+# Range-partition create-ahead (ADR-0020): top up monthly partitions for the
+# time-partitioned streams on EVERY run, so a long-lived deployment never runs
+# out of partitions (each table also has a _default backstop). Idempotent.
+psql -v ON_ERROR_STOP=1 -q <<'SQL'
+SELECT ensure_month_partitions('audit_log',  DATE '2026-08-01', 3);
+SELECT ensure_month_partitions('sessions',   DATE '2026-08-01', 3);
+SELECT ensure_month_partitions('api_tokens', DATE '2026-08-01', 3);
+SQL
+echo "range partitions ensured (now + 3 months)"
+
 # App role + grants — re-run every time so tables from new migrations are
 # covered. The password is (re)set from the environment on every run.
 psql -v ON_ERROR_STOP=1 -q <<SQL

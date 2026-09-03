@@ -6,8 +6,11 @@ BEGIN;
 -- filing_deadline are DATE (legal date-only, ADR-0002 — never a timestamp).
 -- Tenant-scoped; the workflow_id / workflow_task_id FKs are COMPOSITE on
 -- (tenant_id, id) so a cross-tenant reference fails the FK check (bypasses RLS).
+-- Partitioned by HASH(tenant_id) (ADR-0020); composite PK (tenant_id, id).
+-- The fastest-growing OLTP table (one row per task per period per workflow) —
+-- exactly the case hash-by-tenant partitioning exists for.
 CREATE TABLE task_instances (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID NOT NULL DEFAULT gen_random_uuid(),
     tenant_id UUID NOT NULL DEFAULT NULLIF(current_setting('app.tenant_id', true), '')::uuid
         REFERENCES tenants(id) ON DELETE CASCADE,
     workflow_id UUID NOT NULL,
@@ -32,11 +35,13 @@ CREATE TABLE task_instances (
     tax_data_status VARCHAR(20) NOT NULL DEFAULT 'draft',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (tenant_id, id),
     FOREIGN KEY (tenant_id, workflow_id) REFERENCES workflows(tenant_id, id) ON DELETE CASCADE,
     FOREIGN KEY (tenant_id, workflow_task_id) REFERENCES workflow_tasks(tenant_id, id) ON DELETE CASCADE
-);
+) PARTITION BY HASH (tenant_id);
 
-CREATE INDEX idx_task_instances_tenant_id ON task_instances(tenant_id);
+SELECT create_hash_partitions('task_instances', 16);
+
 CREATE INDEX idx_task_instances_workflow ON task_instances(workflow_id);
 CREATE INDEX idx_task_instances_workflow_task ON task_instances(workflow_task_id);
 CREATE INDEX idx_task_instances_status ON task_instances(status);

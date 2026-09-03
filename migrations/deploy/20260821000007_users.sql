@@ -6,6 +6,8 @@ BEGIN;
 -- globally unique for v1 (stored lowercased by the app); ADR-0005 domain-scoped
 -- identity refines this later. password_hash is argon2id (nullable for future
 -- SSO-only users); totp_secret_enc is AES-GCM-encrypted (interim, ADR-0006).
+-- Not partitioned (ADR-0020 exception): small bounded registry (people, not
+-- events), and email needs a truly global UNIQUE for the login path.
 CREATE TABLE users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,

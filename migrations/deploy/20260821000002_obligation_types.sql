@@ -5,8 +5,11 @@ BEGIN;
 -- curated-predefined or tenant-custom. Tenant-scoped like entities; code is
 -- unique per tenant. (Globally-shared curated content is a later concern —
 -- ADR-0017 tax-rule versioning.)
+-- Partitioned by HASH(tenant_id) (ADR-0020). Composite PK (tenant_id, id):
+-- partition-key requirement + the cross-tenant-safe FK target (FK checks
+-- bypass RLS).
 CREATE TABLE obligation_types (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    id UUID NOT NULL DEFAULT gen_random_uuid(),
     tenant_id UUID NOT NULL DEFAULT NULLIF(current_setting('app.tenant_id', true), '')::uuid
         REFERENCES tenants(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
@@ -17,11 +20,11 @@ CREATE TABLE obligation_types (
     description TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (tenant_id, code),
-    UNIQUE (tenant_id, id) -- composite FK target (Postgres FK checks bypass RLS)
-);
+    PRIMARY KEY (tenant_id, id),
+    UNIQUE (tenant_id, code)
+) PARTITION BY HASH (tenant_id);
 
-CREATE INDEX idx_obligation_types_tenant_id ON obligation_types(tenant_id);
+SELECT create_hash_partitions('obligation_types', 16);
 
 ALTER TABLE obligation_types ENABLE ROW LEVEL SECURITY;
 ALTER TABLE obligation_types FORCE ROW LEVEL SECURITY;
