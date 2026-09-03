@@ -38,6 +38,8 @@ var sqlConfig = baserepo.SQLConfig{
 		    notes = $4,
 		    tax_data = $5,
 		    tax_data_status = $6,
+		    due_date = COALESCE($7, due_date),
+		    completed_at = CASE WHEN $2::varchar = 'completed' THEN COALESCE(completed_at, NOW()) ELSE NULL END,
 		    updated_by = NULLIF(current_setting('app.user_id', true), '')::uuid,
 		    updated_at = NOW()
 		WHERE id = $1

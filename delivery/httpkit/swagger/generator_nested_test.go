@@ -28,6 +28,7 @@ func TestStructToSchemaFollowsNestedTypes(t *testing.T) {
 		RulePtr      *rule               `json:"rulePtr"`
 		Requirements requirements        `json:"requirements" validate:"omitempty,dive"`
 		Overrides    map[string]override `json:"overrides" validate:"omitempty,dive"`
+		FreeForm     map[string]any      `json:"freeForm"`
 		Raw          []byte              `json:"raw"`
 		At           time.Time           `json:"at"`
 	}
@@ -64,6 +65,11 @@ func TestStructToSchemaFollowsNestedTypes(t *testing.T) {
 	if ovs.Type != "object" || ovs.AdditionalProperties == nil || ovs.AdditionalProperties.Type != "object" ||
 		ovs.AdditionalProperties.Properties["dueDate"].Type != "string" {
 		t.Fatalf("map fields must describe their values via additionalProperties, got %+v", ovs)
+	}
+
+	ff := s.Properties["freeForm"]
+	if ff.Type != "object" || ff.AdditionalProperties == nil || ff.AdditionalProperties.Type != "" || ff.AdditionalProperties.Properties != nil {
+		t.Fatalf("map[string]any values must be an unconstrained (empty) schema, got %+v", ff)
 	}
 
 	if s.Properties["raw"].Type != "string" {

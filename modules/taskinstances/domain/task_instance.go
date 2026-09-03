@@ -63,6 +63,7 @@ type CreateTaskInstanceInput struct {
 type UpdateTaskInstanceInput struct {
 	Status        string
 	AssigneeID    *string
+	DueDate       *dateonly.Date // nil keeps the current due date
 	Notes         *string
 	TaxData       TaxData
 	TaxDataStatus string

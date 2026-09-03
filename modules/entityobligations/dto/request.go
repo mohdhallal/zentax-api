@@ -2,19 +2,29 @@ package dto
 
 import "github.com/mohamadhallal/zentax-api/modules/entityobligations/domain"
 
+// Periodicity vocabulary: `weekly` is accepted so the obligation can be
+// recorded; the deadline engine still fails closed on weekly at workflow
+// start (shared/deadline) — recording is not the same as scheduling.
+// Currency is ISO 4217 alpha-3 (validated len=3 + uppercase).
 type CreateEntityObligationBody struct {
-	EntityID         string              `json:"entityId"         validate:"required,uuid" example:"6ba7b810-9dad-11d1-80b4-00c04fd430c8"`
-	ObligationTypeID string              `json:"obligationTypeId" validate:"required,uuid" example:"6ba7b811-9dad-11d1-80b4-00c04fd430c8"`
-	Jurisdiction     *string             `json:"jurisdiction"     validate:"omitempty,max=100" example:"DE"`
-	Periodicity      string              `json:"periodicity"      validate:"required,oneof=monthly quarterly bi-annual annual consolidated-annual" example:"monthly"`
-	DeadlineRule     domain.DeadlineRule `json:"deadlineRule"     validate:"omitempty"`
+	EntityID           string              `json:"entityId"           validate:"required,uuid" example:"6ba7b810-9dad-11d1-80b4-00c04fd430c8"`
+	ObligationTypeID   string              `json:"obligationTypeId"   validate:"required,uuid" example:"6ba7b811-9dad-11d1-80b4-00c04fd430c8"`
+	TaxReferenceNumber *string             `json:"taxReferenceNumber" validate:"omitempty,max=100" example:"DE123456789"`
+	Jurisdiction       *string             `json:"jurisdiction"       validate:"omitempty,max=100" example:"Germany"`
+	JurisdictionState  *string             `json:"jurisdictionState"  validate:"omitempty,max=100" example:"Bavaria"`
+	Currency           *string             `json:"currency"           validate:"omitempty,len=3,uppercase" example:"EUR"`
+	Periodicity        string              `json:"periodicity"        validate:"required,oneof=weekly monthly quarterly bi-annual annual consolidated-annual" example:"monthly"`
+	DeadlineRule       domain.DeadlineRule `json:"deadlineRule"       validate:"omitempty"`
 }
 
 type UpdateEntityObligationBody struct {
-	Jurisdiction *string             `json:"jurisdiction" validate:"omitempty,max=100"`
-	Periodicity  string              `json:"periodicity"  validate:"required,oneof=monthly quarterly bi-annual annual consolidated-annual"`
-	DeadlineRule domain.DeadlineRule `json:"deadlineRule" validate:"omitempty"`
-	Status       string              `json:"status"       validate:"omitempty,oneof=active inactive"`
+	TaxReferenceNumber *string             `json:"taxReferenceNumber" validate:"omitempty,max=100"`
+	Jurisdiction       *string             `json:"jurisdiction"       validate:"omitempty,max=100"`
+	JurisdictionState  *string             `json:"jurisdictionState"  validate:"omitempty,max=100"`
+	Currency           *string             `json:"currency"           validate:"omitempty,len=3,uppercase"`
+	Periodicity        string              `json:"periodicity"        validate:"required,oneof=weekly monthly quarterly bi-annual annual consolidated-annual"`
+	DeadlineRule       domain.DeadlineRule `json:"deadlineRule"       validate:"omitempty"`
+	Status             string              `json:"status"             validate:"omitempty,oneof=active inactive"`
 }
 
 type EntityObligationIdParams struct {

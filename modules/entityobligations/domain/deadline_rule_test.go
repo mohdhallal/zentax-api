@@ -28,6 +28,46 @@ func TestDeadlineRule_ValueScanRoundTrip(t *testing.T) {
 	assert.Equal(t, original, scanned)
 }
 
+// TestDeadlineRule_FullBuilderRoundTrip covers the complete legacy builder —
+// fixed filing + payment dates, period start, distinct filing/payment offsets,
+// and additional deadlines — through Value/Scan, so a JSONB row written by one
+// API version reads back identically (ADR-0017: rules are data).
+func TestDeadlineRule_FullBuilderRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	original := DeadlineRule{
+		Type:                "period_offset",
+		Reference:           "period_end",
+		OffsetUnit:          "days",
+		OffsetValue:         20,
+		OffsetDirection:     "after",
+		WeekendAdjustment:   "prev-business-day",
+		FixedDates:          []string{"03-15", "09-15"},
+		PaymentFixedDates:   []string{"03-31", "09-30"},
+		PeriodStart:         &PeriodStart{Day: 1, Month: 4},
+		FilingOffset:        &MonthDayOffset{Months: 1, Days: 20},
+		PaymentOffset:       &MonthDayOffset{Months: 2, Days: 0},
+		AdditionalDeadlines: []AdditionalDeadline{{Type: "advance_payment", Months: 0, Days: 10}},
+	}
+
+	v, err := original.Value()
+	require.NoError(t, err)
+
+	var scanned DeadlineRule
+	require.NoError(t, scanned.Scan(v))
+	assert.Equal(t, original, scanned)
+
+	// A nil PaymentOffset ("same as filing") stays nil, not an empty object.
+	sameAsFiling := DeadlineRule{Type: "period_offset", FilingOffset: &MonthDayOffset{Days: 20}}
+	v2, err := sameAsFiling.Value()
+	require.NoError(t, err)
+	assert.NotContains(t, string(v2.([]byte)), "paymentOffset")
+	var scanned2 DeadlineRule
+	require.NoError(t, scanned2.Scan(v2))
+	assert.Nil(t, scanned2.PaymentOffset)
+	assert.Equal(t, sameAsFiling, scanned2)
+}
+
 func TestDeadlineRule_ScanNilAndEmpty(t *testing.T) {
 	t.Parallel()
 

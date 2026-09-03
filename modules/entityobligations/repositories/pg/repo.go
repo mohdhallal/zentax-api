@@ -29,7 +29,8 @@ func (r *EntityObligationRepo) Create(
 	ctx context.Context, input domain.CreateEntityObligationInput,
 ) (*domain.EntityObligation, error) {
 	eo, err := r.QueryRow(ctx, r.SQL.Create,
-		input.EntityID, input.ObligationTypeID, input.Jurisdiction, input.Periodicity, input.DeadlineRule,
+		input.EntityID, input.ObligationTypeID, input.TaxReferenceNumber, input.Jurisdiction,
+		input.JurisdictionState, input.Currency, input.Periodicity, input.DeadlineRule,
 	)
 	if err != nil {
 		if database.IsForeignKeyViolation(err) {
@@ -46,6 +47,7 @@ func (r *EntityObligationRepo) Update(
 	// entity_id / obligation_type_id are fixed at creation, so an update cannot
 	// introduce a new FK violation.
 	return r.QueryRow(ctx, r.SQL.Update,
-		id, input.Jurisdiction, input.Periodicity, input.DeadlineRule, input.Status,
+		id, input.TaxReferenceNumber, input.Jurisdiction, input.JurisdictionState, input.Currency,
+		input.Periodicity, input.DeadlineRule, input.Status,
 	)
 }

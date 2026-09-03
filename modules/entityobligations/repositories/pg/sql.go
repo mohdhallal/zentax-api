@@ -5,8 +5,8 @@ import baserepo "github.com/mohamadhallal/zentax-api/shared/repositories"
 // entityObligationColumns is the domain projection — WITHOUT tenant_id (RLS
 // infra, absent from the model). deadline_rule (JSONB) scans into the
 // domain.DeadlineRule Scanner/Valuer type.
-const entityObligationColumns = `id, entity_id, obligation_type_id, jurisdiction, periodicity, ` +
-	`deadline_rule, status, created_at, updated_at, created_by, updated_by`
+const entityObligationColumns = `id, entity_id, obligation_type_id, tax_reference_number, jurisdiction, ` +
+	`jurisdiction_state, currency, periodicity, deadline_rule, status, created_at, updated_at, created_by, updated_by`
 
 var sqlConfig = baserepo.SQLConfig{
 	AllowedColumns: map[string]bool{
@@ -22,15 +22,19 @@ var sqlConfig = baserepo.SQLConfig{
 	GetById:          `SELECT ` + entityObligationColumns + ` FROM entity_obligations WHERE id = $1 LIMIT 1`,
 	// tenant_id defaults from the GUC; status/deadline_rule default in DDL.
 	Create: `
-		INSERT INTO entity_obligations (entity_id, obligation_type_id, jurisdiction, periodicity, deadline_rule)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO entity_obligations (entity_id, obligation_type_id, tax_reference_number, jurisdiction,
+		                                jurisdiction_state, currency, periodicity, deadline_rule)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		RETURNING ` + entityObligationColumns,
 	Update: `
 		UPDATE entity_obligations
-		SET jurisdiction = $2,
-		    periodicity = $3,
-		    deadline_rule = $4,
-		    status = $5,
+		SET tax_reference_number = $2,
+		    jurisdiction = $3,
+		    jurisdiction_state = $4,
+		    currency = $5,
+		    periodicity = $6,
+		    deadline_rule = $7,
+		    status = $8,
 		    updated_by = NULLIF(current_setting('app.user_id', true), '')::uuid,
 		    updated_at = NOW()
 		WHERE id = $1

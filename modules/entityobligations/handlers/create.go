@@ -41,11 +41,14 @@ func (h *CreateEntityObligationHandler) Execute(
 	body, _ := input.Body.(*dto.CreateEntityObligationBody)
 
 	eo, err := h.usecases.Create(r.Context(), domain.CreateEntityObligationInput{
-		EntityID:         body.EntityID,
-		ObligationTypeID: body.ObligationTypeID,
-		Jurisdiction:     body.Jurisdiction,
-		Periodicity:      body.Periodicity,
-		DeadlineRule:     body.DeadlineRule,
+		EntityID:           body.EntityID,
+		ObligationTypeID:   body.ObligationTypeID,
+		TaxReferenceNumber: body.TaxReferenceNumber,
+		Jurisdiction:       body.Jurisdiction,
+		JurisdictionState:  body.JurisdictionState,
+		Currency:           body.Currency,
+		Periodicity:        body.Periodicity,
+		DeadlineRule:       body.DeadlineRule,
 	})
 	if err != nil {
 		return nil, err

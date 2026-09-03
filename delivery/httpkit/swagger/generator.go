@@ -502,7 +502,9 @@ func typeToSchema(t reflect.Type) Schema {
 		values := typeToSchema(t.Elem())
 		return Schema{Type: schemaTypeObject, AdditionalProperties: &values}
 	case reflect.Interface:
-		return Schema{Type: schemaTypeObject}
+		// `any` is unconstrained: an empty schema, not an empty object (which a
+		// generated client would type as Record<string, never>).
+		return Schema{}
 	default:
 		return Schema{Type: schemaTypeString}
 	}

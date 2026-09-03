@@ -32,7 +32,7 @@ func (r *TaskInstanceRepo) Create(ctx context.Context, input domain.CreateTaskIn
 
 func (r *TaskInstanceRepo) Update(ctx context.Context, id domain.TaskInstanceID, input domain.UpdateTaskInstanceInput) (*domain.TaskInstance, error) {
 	return r.QueryRow(ctx, r.SQL.Update,
-		id, input.Status, input.AssigneeID, input.Notes, input.TaxData, input.TaxDataStatus,
+		id, input.Status, input.AssigneeID, input.Notes, input.TaxData, input.TaxDataStatus, input.DueDate,
 	)
 }
 

@@ -43,10 +43,13 @@ func (h *UpdateEntityObligationHandler) Execute(
 	params, _ := input.Params.(*dto.EntityObligationIdParams)
 
 	eo, err := h.usecases.Update(r.Context(), params.ID, domain.UpdateEntityObligationInput{
-		Jurisdiction: body.Jurisdiction,
-		Periodicity:  body.Periodicity,
-		DeadlineRule: body.DeadlineRule,
-		Status:       body.Status,
+		TaxReferenceNumber: body.TaxReferenceNumber,
+		Jurisdiction:       body.Jurisdiction,
+		JurisdictionState:  body.JurisdictionState,
+		Currency:           body.Currency,
+		Periodicity:        body.Periodicity,
+		DeadlineRule:       body.DeadlineRule,
+		Status:             body.Status,
 	})
 	if err != nil {
 		return nil, err

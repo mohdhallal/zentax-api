@@ -35,6 +35,16 @@ green on both the main module and `acceptance/`.
 1. **entities** — tax-paying orgs (hierarchical, fiscal config).
 2. **obligation-types** — VAT/CIT/TP/WHT/Custom definitions; `code` unique per tenant (→409).
 3. **entity-obligations** — links entity ↔ obligation type; JSONB deadline rule.
+   **Legacy builder + registration details (2026-09-03):** migration
+   `20260903000014_entity_obligation_details` adds `tax_reference_number`, `jurisdiction_state`
+   (`jurisdiction` stays the country) and `currency` (ISO 4217, `len=3,uppercase`) as nullable
+   columns; `weekly` joins the periodicity vocabulary (recordable — the engine still fails closed on
+   it at start). `domain.DeadlineRule` now carries the whole legacy builder as data (ADR-0017):
+   `paymentFixedDates` (parallel to the filing `fixedDates`, MM-DD), `periodStart {day, month}`,
+   `filingOffset` / `paymentOffset {months, days}` (nil payment offset = "same as filing") and
+   `additionalDeadlines [{type, months, days}]`. Acceptance: full-builder round trip (POST → GET,
+   nested objects exact), PUT replaces (offsets do not linger), bad currency → 400. The frontend
+   maps its legacy form through `client/src/api/entity-obligations.ts`.
 4. **workflows** — recurring/project; JSONB `selected_periods` + `due_date_rule`.
 5. **workflow-tasks** — ordered task templates; per-task offset rule; JSONB `required_documents`.
 6. **task-instances** — generated per-period tasks; `DATE` legal-date columns; JSONB `tax_data`.
@@ -49,7 +59,10 @@ green on both the main module and `acceptance/`.
    instance's filing deadline + due date, a due-date override replaces the due
    date; unknown keys / bad dates → 400 before anything is created. Start also
    transitions the workflow **draft → active** in the same transaction. This is
-   what the frontend's "Run Workflow" dialog is built on.
+   what the frontend's "Run Workflow" dialog is built on. **Update (2026-09-03):**
+   `PUT /task-instances/{id}` accepts an optional date-only `dueDate` override
+   (omit = keep) and stamps `completed_at` on `completed` / clears it on reopen;
+   approval statuses are never settable through PUT (submit/approve/reject only).
 
 Migrations (sqitch): `tenants`, `entities`, `obligation_types`, `entity_obligations`,
 `workflows`, `workflow_tasks`, `task_instances`, `task_instance_approvals`, `actor_columns`,
