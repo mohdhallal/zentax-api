@@ -157,7 +157,12 @@ Commits: `4cdcd4e` scaffold · `2851179` tenancy+entities · `d074780` obligatio
   authed routes, 404 on id-addressed, 409 on tenant mutations). **Proven generator-ready:**
   `openapi-typescript` consumed the live spec cleanly (typed operations + envelopes). The `data`
   payloads are deliberately untyped until per-module response DTOs land with the client-generation
-  pass. **The frontend IS wired (2026-08-23, hybrid):** the React app authenticates and runs the core
+  pass. **Generator fix (2026-09-03):** request-body fields backed by JSONB value types
+  (`domain.Periods`, `domain.DueDateRule`, `DocumentRequirements`) were rendered as `string`;
+  `typeToSchema` now follows slices → `array`+items, structs → nested `object` (with their own
+  required/enum), `time.Time` → `date-time`, `[]byte` → string, and validator rules after `dive`
+  apply to array items (`generator_nested_test.go`). The frontend's workflow wizard is typed off
+  these shapes. **The frontend IS wired (2026-08-23, hybrid):** the React app authenticates and runs the core
   chain against this API through a transitional Express adapter (`TaxFlowReports/server/go-proxy.ts` —
   path rewrites, envelope unwrapping, cookie passthrough, per-endpoint body whitelists because this API
   rightly rejects unknown fields). Verified live in the browser (login → entities from Postgres → UI

@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"reflect"
 	"strings"
+	"time"
 
 	"github.com/mohamadhallal/zentax-api/delivery/httpkit/routing"
 	"github.com/mohamadhallal/zentax-api/delivery/httpkit/types"
@@ -15,7 +16,10 @@ const (
 	schemaTypeObject  = "object"
 	schemaTypeNumber  = "number"
 	schemaTypeBoolean = "boolean"
+	schemaTypeArray   = "array"
 )
+
+var timeType = reflect.TypeOf(time.Time{})
 
 func Generate(routes []routing.RouteMeta, mode types.ServerMode, cfg Config) Spec {
 	spec := Spec{
@@ -349,7 +353,10 @@ func structToSchema(v any) Schema {
 	if t.Kind() != reflect.Struct {
 		return Schema{Type: schemaTypeObject}
 	}
+	return structTypeToSchema(t)
+}
 
+func structTypeToSchema(t reflect.Type) Schema {
 	schema := Schema{
 		Type:       schemaTypeObject,
 		Properties: make(map[string]Schema),
@@ -442,38 +449,60 @@ func structToParams(v any, in string) []Parameter {
 	return params
 }
 
+// fieldToSchema renders a struct field, following the Go type into nested
+// objects and arrays so JSONB-backed value types (a []string of period codes,
+// a due-date-rule struct, a list of document requirements) surface with their
+// real shape instead of collapsing to "string". Validator rules before `dive`
+// describe the field itself; rules after `dive` describe each array element.
 func fieldToSchema(field reflect.StructField) Schema {
-	s := Schema{}
-	ft := field.Type
-	isPtr := false
-	if ft.Kind() == reflect.Ptr {
-		ft = ft.Elem()
-		isPtr = true
-	}
-
-	switch ft.Kind() {
-	case reflect.String:
-		s.Type = schemaTypeString
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		s.Type = schemaTypeInteger
-		if ft.Kind() == reflect.Int64 {
-			s.Format = "int64"
-		}
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		s.Type = schemaTypeInteger
-	case reflect.Float32, reflect.Float64:
-		s.Type = schemaTypeNumber
-	case reflect.Bool:
-		s.Type = schemaTypeBoolean
-	default:
-		s.Type = schemaTypeString
-	}
-	_ = isPtr
+	s := typeToSchema(field.Type)
 
 	validate := field.Tag.Get("validate")
+	if s.Type == schemaTypeArray && s.Items != nil {
+		// Pre-dive min=/max= are item counts, which Schema does not model.
+		if _, inner, hasDive := strings.Cut(validate, "dive"); hasDive {
+			applyValidationConstraints(s.Items, strings.Trim(inner, ", "))
+		}
+		return s
+	}
 	applyValidationConstraints(&s, validate)
-
 	return s
+}
+
+func typeToSchema(t reflect.Type) Schema {
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	if t == timeType {
+		return Schema{Type: schemaTypeString, Format: "date-time"}
+	}
+
+	switch t.Kind() {
+	case reflect.String:
+		return Schema{Type: schemaTypeString}
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32:
+		return Schema{Type: schemaTypeInteger}
+	case reflect.Int64:
+		return Schema{Type: schemaTypeInteger, Format: "int64"}
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return Schema{Type: schemaTypeInteger}
+	case reflect.Float32, reflect.Float64:
+		return Schema{Type: schemaTypeNumber}
+	case reflect.Bool:
+		return Schema{Type: schemaTypeBoolean}
+	case reflect.Slice, reflect.Array:
+		if t.Elem().Kind() == reflect.Uint8 { // []byte travels as a string
+			return Schema{Type: schemaTypeString}
+		}
+		items := typeToSchema(t.Elem())
+		return Schema{Type: schemaTypeArray, Items: &items}
+	case reflect.Struct:
+		return structTypeToSchema(t)
+	case reflect.Map, reflect.Interface:
+		return Schema{Type: schemaTypeObject}
+	default:
+		return Schema{Type: schemaTypeString}
+	}
 }
 
 func applyValidationConstraints(s *Schema, validate string) {
