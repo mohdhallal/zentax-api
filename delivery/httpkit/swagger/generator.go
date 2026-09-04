@@ -398,6 +398,20 @@ func structToParams(v any, in string) []Parameter {
 	var params []Parameter
 	for i := 0; i < t.NumField(); i++ {
 		field := t.Field(i)
+
+		// An anonymous embedded struct is a reusable parameter set (e.g. the
+		// shared report filter trio): flatten its fields into this list.
+		if field.Anonymous {
+			et := field.Type
+			if et.Kind() == reflect.Ptr {
+				et = et.Elem()
+			}
+			if et.Kind() == reflect.Struct {
+				params = append(params, structToParams(reflect.New(et).Interface(), in)...)
+				continue
+			}
+		}
+
 		name := fieldName(field)
 		if name == "-" {
 			continue

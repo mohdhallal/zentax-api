@@ -5,6 +5,7 @@ package domain
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/mohamadhallal/zentax-api/shared/dateonly"
@@ -95,6 +96,279 @@ func (s WorkflowStats) CompletionPercent() int {
 	return (2*s.CompletedTasks*100 + s.TotalTasks) / (2 * s.TotalTasks)
 }
 
+// ---------------------------------------------------------------------------
+// Compliance / financial reports (ADR-0021: SQL aggregation over the tenant's
+// own partitions; capped row lists with exact totals).
+// ---------------------------------------------------------------------------
+
+// Row-list caps shared by every report that returns rows (ADR-0021 rule 2).
+const (
+	DefaultReportLimit = 1000
+	MaxReportLimit     = 5000
+)
+
+// ReportFilters are the workflow-level filters every compliance / financial
+// report accepts. nil means "any". FinancialYear matches workflows.financial_year
+// exactly ("2025"); the ids match workflows.entity_id / obligation_type_id.
+type ReportFilters struct {
+	FinancialYear    *string
+	EntityID         *string
+	ObligationTypeID *string
+}
+
+// Heatmap view modes: columns are period codes or obligation types.
+const (
+	ViewModePeriod  = "period"
+	ViewModeTaxType = "tax-type"
+)
+
+// Cell / instance classifications, as the SQL yields them.
+const (
+	ComplianceOnTime = "on_time"
+	ComplianceLate   = "late"
+	ComplianceMissed = "missed"
+	ComplianceNotDue = "not_due"
+
+	CellGreen = "green"
+	CellAmber = "amber"
+	CellRed   = "red"
+	CellGrey  = "grey"
+)
+
+type HeatmapArgs struct {
+	ReportFilters
+	ViewMode string // ViewModePeriod | ViewModeTaxType
+}
+
+// HeatmapCell is one (entity × period|obligation-type) aggregate: counts by
+// status plus the distinct workflow ids feeding the cell (comma-joined by the
+// SQL string_agg; see WorkflowIDList). Cells only exist where instances exist,
+// so TotalTasks is never 0 in practice — Status still handles it.
+type HeatmapCell struct {
+	RowID           string `db:"row_id"`
+	RowLabel        string `db:"row_label"`
+	ColID           string `db:"col_id"`
+	ColLabel        string `db:"col_label"`
+	TotalTasks      int    `db:"total_tasks"`
+	CompletedTasks  int    `db:"completed_tasks"`
+	OverdueTasks    int    `db:"overdue_tasks"`
+	CompletedLate   int    `db:"completed_late"`
+	InProgressTasks int    `db:"in_progress_tasks"`
+	WorkflowIDs     string `db:"workflow_ids"`
+	// FirstPeriodEnd orders columns by the calendar (M2 before M10), not by
+	// period-code text; it is never serialized.
+	FirstPeriodEnd time.Time `db:"first_period_end"`
+}
+
+// Status is the legacy traffic-light rule: no tasks → grey; anything overdue
+// or completed late → red; everything completed → green; otherwise amber.
+func (c HeatmapCell) Status() string {
+	switch {
+	case c.TotalTasks == 0:
+		return CellGrey
+	case c.OverdueTasks > 0 || c.CompletedLate > 0:
+		return CellRed
+	case c.CompletedTasks == c.TotalTasks:
+		return CellGreen
+	default:
+		return CellAmber
+	}
+}
+
+// WorkflowIDList splits the aggregated ids; never nil.
+func (c HeatmapCell) WorkflowIDList() []string {
+	if c.WorkflowIDs == "" {
+		return []string{}
+	}
+	return strings.Split(c.WorkflowIDs, ",")
+}
+
+type ComplianceStatusArgs struct {
+	ReportFilters
+	Status *string // Compliance* constant; nil = any
+	Limit  int
+	Offset int
+}
+
+// ComplianceRow is one task instance classified against its filing deadline.
+// FilingDeadline is date-only (ADR-0002); CompletedAt is the filing instant
+// (UTC, ADR-0003) when the instance is completed.
+type ComplianceRow struct {
+	EntityName       string        `db:"entity_name"`
+	EntityID         string        `db:"entity_id"`
+	TaxType          string        `db:"tax_type"`
+	ObligationName   string        `db:"obligation_name"`
+	ObligationCode   string        `db:"obligation_code"`
+	Period           string        `db:"period"`
+	FilingDeadline   dateonly.Date `db:"filing_deadline"`
+	CompletedAt      *time.Time    `db:"completed_at"`
+	ComplianceStatus string        `db:"compliance_status"`
+	PenaltyInterest  string        `db:"penalty_interest"`
+	WorkflowID       string        `db:"workflow_id"`
+	TaskInstanceID   string        `db:"task_instance_id"`
+}
+
+// ComplianceSummary counts the classified set AFTER the status filter (legacy
+// behaviour), so Total doubles as the page's totalCount.
+type ComplianceSummary struct {
+	Total  int `db:"total"`
+	OnTime int `db:"on_time"`
+	Late   int `db:"late"`
+	Missed int `db:"missed"`
+	NotDue int `db:"not_due"`
+}
+
+// Tax-financial grouping keys.
+const (
+	GroupByEntity     = "entity"
+	GroupByCountry    = "country"
+	GroupByTaxType    = "taxType"
+	GroupByPeriod     = "period"
+	GroupByObligation = "obligation"
+)
+
+type TaxFinancialArgs struct {
+	ReportFilters
+	GroupBy string // GroupBy* constant
+	Limit   int
+	Offset  int
+}
+
+// Figures are the fixed set of financial amounts extracted from tax_data
+// (ADR-0021 rule 6: bounded key set, safe numeric cast — never a string).
+type Figures struct {
+	OutputVat      float64 `db:"output_vat"`
+	InputVat       float64 `db:"input_vat"`
+	NetVat         float64 `db:"net_vat"`
+	TaxableIncome  float64 `db:"taxable_income"`
+	TaxLiability   float64 `db:"tax_liability"`
+	WhtAmount      float64 `db:"wht_amount"`
+	EngagementCost float64 `db:"engagement_cost"`
+	TotalAmount    float64 `db:"total_amount"`
+}
+
+// FinancialRow is one instance with tax data, with its figures.
+type FinancialRow struct {
+	EntityName     string `db:"entity_name"`
+	EntityID       string `db:"entity_id"`
+	Country        string `db:"country"`
+	TaxType        string `db:"tax_type"`
+	ObligationName string `db:"obligation_name"`
+	ObligationCode string `db:"obligation_code"`
+	Period         string `db:"period"`
+	FinancialYear  string `db:"financial_year"`
+	Figures
+}
+
+// FinancialGroup is one GROUP BY bucket of the requested groupBy.
+type FinancialGroup struct {
+	Key   string `db:"group_key"`
+	Label string `db:"group_label"`
+	Figures
+	Count int `db:"cnt"`
+}
+
+// FinancialPeriodPoint is one chart point: the figures summed per period.
+type FinancialPeriodPoint struct {
+	Period string `db:"period"`
+	Figures
+}
+
+type FinancialSummary struct {
+	Figures
+	RecordCount int
+}
+
+// TaxFinancialResult: Rows is a capped page; Aggregated / ChartData / Summary
+// are exact aggregates over the whole filtered set; TotalCount is exact.
+type TaxFinancialResult struct {
+	Rows       []FinancialRow
+	Aggregated []FinancialGroup
+	ChartData  []FinancialPeriodPoint
+	Summary    FinancialSummary
+	TotalCount int
+}
+
+// Export datasets.
+const (
+	DatasetWorkflows = "workflows"
+	DatasetTasks     = "tasks"
+	DatasetTaxData   = "tax-data"
+)
+
+// ExportArgs: Category filters workflows.workflow_category; the date window
+// (inclusive, date-only) applies to workflows.created_at (UTC date) for the
+// workflows dataset and to the instance's due_date for tasks / tax-data —
+// mirroring the legacy export. Every workflow status takes part.
+type ExportArgs struct {
+	EntityID         *string
+	ObligationTypeID *string
+	Category         *string
+	DateFrom         *dateonly.Date
+	DateTo           *dateonly.Date
+	Limit            int
+	Offset           int
+}
+
+type ExportWorkflowRow struct {
+	Name            string    `db:"name"`
+	Category        string    `db:"category"`
+	ProjectType     *string   `db:"project_type"`
+	FinancialYear   *string   `db:"financial_year"`
+	Periodicity     *string   `db:"periodicity"`
+	EntityName      *string   `db:"entity_name"`
+	Country         *string   `db:"country"`
+	ObligationName  *string   `db:"obligation_name"`
+	ObligationCode  *string   `db:"obligation_code"`
+	TaxType         *string   `db:"tax_type"`
+	Status          string    `db:"status"`
+	StartDate       *string   `db:"start_date"`
+	EndDate         *string   `db:"end_date"`
+	TasksSequential bool      `db:"tasks_sequential"`
+	CreatedAt       time.Time `db:"created_at"`
+}
+
+type ExportTaskRow struct {
+	Name             string        `db:"name"`
+	TaskType         string        `db:"task_type"`
+	Status           string        `db:"status"`
+	WorkflowName     string        `db:"workflow_name"`
+	WorkflowCategory string        `db:"workflow_category"`
+	EntityName       *string       `db:"entity_name"`
+	Country          *string       `db:"country"`
+	ObligationName   *string       `db:"obligation_name"`
+	TaxType          *string       `db:"tax_type"`
+	PeriodCode       string        `db:"period_code"`
+	FinancialYear    *string       `db:"financial_year"`
+	AssigneeName     *string       `db:"assignee_name"`
+	DueDate          dateonly.Date `db:"due_date"`
+	FilingDeadline   dateonly.Date `db:"filing_deadline"`
+	CompletedAt      *time.Time    `db:"completed_at"`
+	ApprovalRequired bool          `db:"approval_required"`
+	TaxDataStatus    string        `db:"tax_data_status"`
+}
+
+type ExportTaxDataRow struct {
+	Name           string  `db:"name"`
+	WorkflowName   string  `db:"workflow_name"`
+	EntityName     *string `db:"entity_name"`
+	Country        *string `db:"country"`
+	ObligationName *string `db:"obligation_name"`
+	TaxType        *string `db:"tax_type"`
+	PeriodCode     string  `db:"period_code"`
+	FinancialYear  *string `db:"financial_year"`
+	TaxDataStatus  string  `db:"tax_data_status"`
+	OutputVat      float64 `db:"output_vat"`
+	InputVat       float64 `db:"input_vat"`
+	NetVat         float64 `db:"net_vat"`
+	TaxableIncome  float64 `db:"taxable_income"`
+	TaxLiability   float64 `db:"tax_liability"`
+	WhtAmount      float64 `db:"wht_amount"`
+	PenaltyAmount  float64 `db:"penalty_amount"`
+	InterestAmount float64 `db:"interest_amount"`
+	EngagementCost float64 `db:"engagement_cost"`
+}
+
 // Reader is the read-side port implemented by the Postgres repository. Every
 // query runs on the request transaction, so RLS confines it to the session
 // tenant (ADR-0004) — implementations never filter by tenant_id themselves.
@@ -105,4 +379,17 @@ type Reader interface {
 	// WorkflowStats returns one entry per workflow in the tenant, including
 	// workflows with no instances yet.
 	WorkflowStats(ctx context.Context) ([]WorkflowStats, error)
+
+	// ComplianceHeatmap returns one aggregate cell per (entity, column), sorted
+	// by (row label, column id) — one GROUP BY statement.
+	ComplianceHeatmap(ctx context.Context, args HeatmapArgs) ([]HeatmapCell, error)
+	// ComplianceStatus returns one page of classified instances plus the exact
+	// summary of the (status-filtered) set.
+	ComplianceStatus(ctx context.Context, args ComplianceStatusArgs) ([]ComplianceRow, ComplianceSummary, error)
+	// TaxFinancial returns a page of figure rows plus exact aggregates.
+	TaxFinancial(ctx context.Context, args TaxFinancialArgs) (*TaxFinancialResult, error)
+	// Export* return one page of the dataset plus its exact total.
+	ExportWorkflows(ctx context.Context, args ExportArgs) ([]ExportWorkflowRow, int, error)
+	ExportTasks(ctx context.Context, args ExportArgs) ([]ExportTaskRow, int, error)
+	ExportTaxData(ctx context.Context, args ExportArgs) ([]ExportTaxDataRow, int, error)
 }

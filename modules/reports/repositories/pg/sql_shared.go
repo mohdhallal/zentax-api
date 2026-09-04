@@ -1,0 +1,87 @@
+package pg
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/mohamadhallal/zentax-api/modules/reports/domain"
+)
+
+// Shared SQL building blocks for the compliance / financial reports
+// (ADR-0021). Everything here is a constant expression or a function over
+// fixed, code-owned identifiers — no caller-controlled text is ever
+// interpolated; filters travel as bind parameters.
+
+// complianceClassTemplate classifies task instance `ti` against a DATE column
+// (%[1]s: ti.filing_deadline or ti.due_date) — ONE definition shared by the
+// heatmap and the compliance-status report (ADR-0021 rule 5):
+//
+//	completed with a completion instant → on_time | late (completed_at's UTC
+//	calendar date vs the deadline, ADR-0002/0003); otherwise missed when the
+//	deadline has passed, else not_due.
+//
+// The heatmap reads "overdue" as missed and "completed late" as late.
+const complianceClassTemplate = `CASE
+    WHEN ti.status = 'completed' AND ti.completed_at IS NOT NULL THEN
+        CASE WHEN (ti.completed_at AT TIME ZONE 'UTC')::date <= %[1]s THEN 'on_time' ELSE 'late' END
+    WHEN %[1]s < CURRENT_DATE THEN 'missed'
+    ELSE 'not_due'
+END`
+
+func complianceClass(deadlineColumn string) string {
+	return fmt.Sprintf(complianceClassTemplate, deadlineColumn)
+}
+
+// participatingWorkflows is the legacy rule for the three compliance /
+// financial reports: only active or completed workflows take part.
+const participatingWorkflows = `w.status IN ('active', 'completed')`
+
+// reportFiltersWhere binds the shared filter trio as $1..$3 (NULL = any).
+const reportFiltersWhere = `
+  AND ($1::varchar IS NULL OR w.financial_year = $1::varchar)
+  AND ($2::uuid IS NULL OR w.entity_id = $2::uuid)
+  AND ($3::uuid IS NULL OR w.obligation_type_id = $3::uuid)`
+
+func filterArgs(f domain.ReportFilters) []any {
+	return []any{f.FinancialYear, f.EntityID, f.ObligationTypeID}
+}
+
+// numericRegex accepts a plain decimal number ("1000", "-12.5"); anything else
+// (text, blank, scientific notation) counts as 0 — the legacy parseFloat →
+// NaN → 0 rule, without a cast that could abort the statement.
+const numericRegex = `'^-?[0-9]+(\.[0-9]+)?$'`
+
+// jsonNum extracts one tax_data key as a numeric, 0 when absent or not a
+// number (ADR-0021 rule 6: fixed key, ->> only, safe cast).
+func jsonNum(key string) string {
+	v := "ti.tax_data->>'" + key + "'"
+	return "CASE WHEN (" + v + ") ~ " + numericRegex + " THEN (" + v + ")::numeric ELSE 0 END"
+}
+
+// firstNonZero mirrors the legacy `num(a) || num(b) || num(c)` alias chain:
+// the first key whose numeric value is non-zero wins, else 0.
+func firstNonZero(keys ...string) string {
+	parts := make([]string, 0, len(keys)+1)
+	for _, k := range keys {
+		parts = append(parts, "NULLIF("+jsonNum(k)+", 0)")
+	}
+	parts = append(parts, "0")
+	return "COALESCE(" + strings.Join(parts, ", ") + ")"
+}
+
+// jsonText extracts one tax_data key as text, NULL when absent or blank.
+func jsonText(key string) string {
+	return "NULLIF(ti.tax_data->>'" + key + "', '')"
+}
+
+// jsonTruthy extracts one tax_data key as text, NULL when it is absent or
+// JS-falsy (0, false, "") — the legacy `data.key || …` presence test, so a
+// numeric template field left at 0 does not render as "Penalty: 0".
+func jsonTruthy(key string) string {
+	v := "ti.tax_data->>'" + key + "'"
+	return "CASE jsonb_typeof(ti.tax_data->'" + key + "')" +
+		" WHEN 'number' THEN NULLIF(NULLIF(" + v + ", '0'), '0.0')" +
+		" WHEN 'boolean' THEN NULLIF(" + v + ", 'false')" +
+		" WHEN 'string' THEN NULLIF(" + v + ", '')" +
+		" ELSE NULL END"
+}

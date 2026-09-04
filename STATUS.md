@@ -77,6 +77,37 @@ green on both the main module and `acceptance/`.
    non-completed instances, or null) from a single LEFT JOIN + GROUP BY. Acceptance: 4 enriched rows
    sorted by due date, filters + paging, 25 % after one completion, zeros/null for an unstarted
    workflow, empty list / `{}` for the other tenant.
+   **Compliance / financial reports (2026-09-04, ADR-0021 — reporting on Postgres):** the four
+   legacy report endpoints now live in the same module, all `task:read`, with the legacy
+   query-parameter names (`year` / `entityId` / `obligationTypeId`, `"all"` = no filter) and exactly
+   the response shapes the React pages declare, so the Express proxy passes them through untouched.
+   `GET /reports/compliance-heatmap` (`viewMode=period|tax-type`): one `GROUP BY` with `FILTER`
+   aggregates → rows / cols / cells (green | amber | red) / summary. `GET /reports/compliance-status`
+   (`status=on_time|late|missed|not_due`, `limit` / `offset`): one instance per row classified in
+   SQL against `filing_deadline`, `CURRENT_DATE` and `completed_at`'s UTC date — the same expression
+   the heatmap uses for overdue / completed-late (one Go const) — with `penaltyInterest` from a
+   fixed set of `tax_data` keys, plus an exact `summary` + `totalCount` over the status-filtered
+   set. `GET /reports/tax-financial` (`groupBy=entity|country|taxType|period|obligation`, `limit` /
+   `offset`): figures extracted from a fixed `tax_data` key set with a safe numeric cast
+   (non-numbers count as 0) in one CTE; `aggregated` / `chartData` / `summary` come from ONE
+   `GROUPING SETS` statement over it, `rows` is a page with an exact `totalCount`. `GET
+   /reports/export-raw` (`dataset=workflows|tasks|tax-data`, `category`, inclusive date-only
+   `dateFrom` / `dateTo` on `workflows.created_at` resp. `due_date`, `limit` / `offset`): exactly
+   the column keys of the export page. Row lists are capped (default 1 000, max 5 000) with exact
+   totals from an aggregate over the same `WHERE`; only `active` / `completed` workflows take part
+   in the three compliance reports, every workflow in the export. Migration
+   `20260904000015_reporting_indexes` adds `task_instances (due_date)` (export window),
+   `task_instances (workflow_id, period_code)` (replacing the prefix-redundant `(workflow_id)`
+   index), `workflows (financial_year)`, `workflows (status)` (parent indexes propagate to every
+   hash partition, ADR-0020); at pilot scale the aggregates scan the tenant's own partition, which
+   is optimal — re-check with EXPLAIN as partitions grow (ADR-0021). Review fixes (2026-09-04):
+   heatmap columns are ordered by the calendar (M2 before M10), penalty/interest treat JSON 0 /
+   false / "" as absent (legacy truthiness), empty-string enum filters mean "no filter", the export
+   dataset uses the legacy snake_case key pairs, and the tax-data predicate is planner-estimable
+   (`IS NOT NULL AND <> '{}'`). Acceptance: 2 entities × VAT/CIT,
+   late / on-time / missed classification, both heatmap view modes, status filter + paging totals,
+   VAT/CIT figure extraction and group-bys, the three export datasets with window / category
+   filters, viewer 200, anonymous 401, empty reports for the other tenant.
 8. **auditlog** (`modules/auditlog`) — `GET /audit-log`, the read API for the ADR-0008 trail behind a
    **new capability `audit:read`** held by **reviewer, manager and tenant_admin only** (viewer and
    preparer → 403; a service principal may hold it like any read). Rows are the stored PII-free
