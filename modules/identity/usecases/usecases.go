@@ -5,7 +5,9 @@ import (
 	"time"
 
 	"github.com/mohamadhallal/zentax-api/modules/identity/domain"
+	"github.com/mohamadhallal/zentax-api/platform/audit"
 	"github.com/mohamadhallal/zentax-api/platform/crypto"
+	"github.com/mohamadhallal/zentax-api/platform/database"
 )
 
 // Settings holds the auth config the use cases need (derived from config.AuthConfig).
@@ -32,6 +34,33 @@ type UseCases struct {
 	grants   domain.GrantWriter
 	settings Settings
 	now      func() time.Time
+
+	// Member administration (optional wiring; nil-safe for the auth-only tests).
+	members domain.MemberRepository
+	invites domain.InviteTokenRepository
+	tx      database.ExecerPgTx // opens a tenant-bound tx for the public accept-invite step
+	audit   *audit.Recorder      // nil = no-op
+}
+
+// WithMembers injects the member-administration repositories.
+func (uc *UseCases) WithMembers(members domain.MemberRepository, invites domain.InviteTokenRepository) *UseCases {
+	uc.members = members
+	uc.invites = invites
+	return uc
+}
+
+// WithTx injects the transaction seam used by AcceptInvite, which runs on a
+// public route (no session, no tenant) and must open its own transaction bound
+// to the tenant taken from the token row.
+func (uc *UseCases) WithTx(tx database.ExecerPgTx) *UseCases {
+	uc.tx = tx
+	return uc
+}
+
+// WithAudit injects the audit recorder (ADR-0008). Nil-safe.
+func (uc *UseCases) WithAudit(r *audit.Recorder) *UseCases {
+	uc.audit = r
+	return uc
 }
 
 func NewUseCases(

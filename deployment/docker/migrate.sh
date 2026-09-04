@@ -51,6 +51,7 @@ psql -v ON_ERROR_STOP=1 -q <<'SQL'
 SELECT ensure_month_partitions('audit_log',  DATE '2026-08-01', 3);
 SELECT ensure_month_partitions('sessions',   DATE '2026-08-01', 3);
 SELECT ensure_month_partitions('api_tokens', DATE '2026-08-01', 3);
+SELECT ensure_month_partitions('invite_tokens', DATE '2026-09-01', 3);
 SQL
 echo "range partitions ensured (now + 3 months)"
 

@@ -182,3 +182,28 @@ func (s *ServiceAccountsSuite) TestApprovalIsHumanOnly() {
 	machine().POST(s.T(), "/service-accounts", map[string]any{"name": "clone", "role": "manager"}).
 		AssertStatus(s.T(), http.StatusForbidden)
 }
+
+// TestMemberAdminIsHumanOnly: member:manage is human-only at the gate — even a
+// machine that somehow holds a tenant_admin grant (planted directly: the API
+// refuses to mint one) can read the directory but never administer members or
+// machines (no self-replication, ADR-0012).
+func (s *ServiceAccountsSuite) TestMemberAdminIsHumanOnly() {
+	tenant := s.InsertTenant("sa-h", "SA Tenant H").String()
+	saID := s.createSA(tenant, "legacy-admin", "manager")
+	tok := s.issueToken(tenant, saID)
+	machine := func() *acceptance.RequestBuilder { return s.Client.External().WithBearer(tok.Token) }
+
+	// user_grants is RLS'd: bind the tenant GUC for the direct insert.
+	tx := s.DB.MustBegin()
+	_, err := tx.Exec(`SELECT set_config('app.tenant_id', $1, true)`, tenant)
+	s.Require().NoError(err)
+	_, err = tx.Exec(`INSERT INTO user_grants (user_id, role) VALUES ($1, 'tenant_admin')`, saID)
+	s.Require().NoError(err)
+	s.Require().NoError(tx.Commit())
+
+	machine().GET(s.T(), "/members").AssertStatus(s.T(), http.StatusOK)
+	machine().POST(s.T(), "/members", map[string]any{"email": "x@acme.com", "name": "X", "role": "viewer"}).
+		AssertStatus(s.T(), http.StatusForbidden)
+	machine().POST(s.T(), "/service-accounts", map[string]any{"name": "clone", "role": "manager"}).
+		AssertStatus(s.T(), http.StatusForbidden)
+}

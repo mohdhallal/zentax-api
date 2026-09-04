@@ -28,6 +28,7 @@ import (
 	"github.com/mohamadhallal/zentax-api/modules/taskinstances"
 	"github.com/mohamadhallal/zentax-api/modules/workflows"
 	"github.com/mohamadhallal/zentax-api/modules/workflowtasks"
+	"github.com/mohamadhallal/zentax-api/platform/audit"
 	"github.com/mohamadhallal/zentax-api/platform/database"
 	"github.com/mohamadhallal/zentax-api/platform/metrics"
 	metricsmock "github.com/mohamadhallal/zentax-api/platform/metrics/mock"
@@ -77,8 +78,9 @@ func New(cfg *config.Config, mode types.ServerMode) (*App, error) {
 	authValidator := authuc.NewInternalAuth(authpg.NewInternalAPIKeyRepo(db))
 
 	// First-party identity/auth (ADR-0011) + machine identity (service
-	// accounts / API tokens). The encryption key is validated at startup for
-	// deployed envs; a missing dev key just disables MFA (nil key).
+	// accounts / API tokens) + member administration (invites, roles). The
+	// encryption key is validated at startup for deployed envs; a missing dev
+	// key just disables MFA (nil key).
 	encKey, _ := cfg.Auth.DecodeEncryptionKey()
 	grantRepo := identitypg.NewGrantRepo(db)
 	identityUC := identityusecases.NewUseCases(
@@ -91,7 +93,10 @@ func New(cfg *config.Config, mode types.ServerMode) (*App, error) {
 			SessionIdleTTL:     time.Duration(cfg.Auth.SessionIdleTTLMinutes) * time.Minute,
 			SessionAbsoluteTTL: time.Duration(cfg.Auth.SessionAbsoluteTTLHours) * time.Hour,
 		},
-	)
+	).
+		WithMembers(identitypg.NewMemberRepo(db), identitypg.NewInviteRepo(db)).
+		WithTx(db). // accept-invite opens its own tenant-bound tx (public route)
+		WithAudit(audit.NewRecorder(db))
 	cookieCfg := identityhandlers.CookieConfig{
 		Name:        cfg.Auth.SessionCookieName,
 		Secure:      cfg.Auth.SessionCookieSecure,
@@ -109,7 +114,7 @@ func New(cfg *config.Config, mode types.ServerMode) (*App, error) {
 	router := routing.NewRouter(chiRouter, mode, authValidator, identityUC, cfg.Auth.SessionCookieName, grantRepo, db)
 
 	health.RegisterRoutes(router, mode)
-	identity.RegisterRoutes(router, identityUC, identityUC, cookieCfg)
+	identity.RegisterRoutes(router, identityUC, identityUC, identityUC, cookieCfg)
 	entities.RegisterRoutes(router, ctr.EntityUseCases)
 	obligationtypes.RegisterRoutes(router, ctr.ObligationTypeUseCases)
 	entityobligations.RegisterRoutes(router, ctr.EntityObligationUseCases)

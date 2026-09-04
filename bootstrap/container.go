@@ -12,6 +12,7 @@ import (
 	entityobligationsdomain "github.com/mohamadhallal/zentax-api/modules/entityobligations/domain"
 	entityobligationspg "github.com/mohamadhallal/zentax-api/modules/entityobligations/repositories/pg"
 	entityobligationsusecases "github.com/mohamadhallal/zentax-api/modules/entityobligations/usecases"
+	identitypg "github.com/mohamadhallal/zentax-api/modules/identity/repositories/pg"
 	obligationtypesdomain "github.com/mohamadhallal/zentax-api/modules/obligationtypes/domain"
 	obligationtypespg "github.com/mohamadhallal/zentax-api/modules/obligationtypes/repositories/pg"
 	obligationtypesusecases "github.com/mohamadhallal/zentax-api/modules/obligationtypes/usecases"
@@ -82,7 +83,12 @@ func NewContainer(db database.ExecerPg) *Container {
 		EntityObligationUseCases:   entityobligationsusecases.NewUseCases(entityObligationRepo, authorizer).WithAudit(auditRec),
 		WorkflowUseCases:           workflowsusecases.NewUseCases(workflowRepo, authorizer).WithAudit(auditRec),
 		WorkflowTaskUseCases:       workflowtasksusecases.NewUseCases(workflowTaskRepo, authorizer).WithAudit(auditRec),
-		TaskInstanceUseCases:       taskinstancesusecases.NewUseCases(taskInstanceRepo, authorizer).WithAudit(auditRec),
+		// Task assignment is validated against the tenant directory: an assignee
+		// must be an ACTIVE HUMAN member of the caller's tenant (identity owns
+		// the users query; task-instances only sees the AssigneeChecker port).
+		TaskInstanceUseCases: taskinstancesusecases.NewUseCases(taskInstanceRepo, authorizer).
+			WithAudit(auditRec).
+			WithAssigneeChecker(identitypg.NewAssigneeChecker(db)),
 		WorkflowStarter:            generator,
 		ReportsReader:              reportspg.NewReportsRepo(db),
 		AuditLogReader:             auditlogpg.NewAuditLogRepo(db),

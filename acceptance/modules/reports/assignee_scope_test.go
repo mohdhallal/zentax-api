@@ -24,10 +24,20 @@ func (s *ReportsSuite) TestAssigneeNameNeverCrossesTenants() {
 	s.As(tenantA.String()).GET(s.T(), "/reports/task-instances?workflowId="+seed.WorkflowID).DecodeData(s.T(), &rows)
 	s.Require().Len(rows, 1)
 
-	// A foreign user id is accepted as an opaque uuid but must never resolve to a name.
+	// The API refuses a foreign assignee outright (member administration:
+	// assigneeId must be an active member of the caller's tenant)…
 	s.As(tenantA.String()).PUT(s.T(), "/task-instances/"+rows[0].ID, map[string]any{
 		"status": "in_progress", "assigneeId": foreignUser.String(),
-	}).AssertStatus(s.T(), http.StatusOK)
+	}).AssertStatus(s.T(), http.StatusBadRequest)
+	// …and even a foreign id planted directly in the row (defense in depth:
+	// the column carries no FK) must never resolve to a name at read time.
+	// (task_instances is RLS-scoped: bind the tenant GUC for the direct write.)
+	tx := s.DB.MustBegin()
+	_, err := tx.Exec(`SELECT set_config('app.tenant_id', $1, true)`, tenantA.String())
+	s.Require().NoError(err)
+	_, err = tx.Exec(`UPDATE task_instances SET assignee_id = $1 WHERE id = $2`, foreignUser, rows[0].ID)
+	s.Require().NoError(err)
+	s.Require().NoError(tx.Commit())
 	s.As(tenantA.String()).GET(s.T(), "/reports/task-instances?workflowId="+seed.WorkflowID).DecodeData(s.T(), &rows)
 	s.Require().Equal(foreignUser.String(), *rows[0].AssigneeID)
 	s.Require().Nil(rows[0].AssigneeName)

@@ -58,6 +58,12 @@ func (r *TokenRepo) TouchLastUsed(ctx context.Context, id string, at time.Time) 
 	return err
 }
 
+func (r *TokenRepo) RevokeAllForUser(ctx context.Context, userID string) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE api_tokens SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL`, userID)
+	return err
+}
+
 func (r *TokenRepo) Revoke(ctx context.Context, id, tenantID string) (bool, error) {
 	res, err := r.db.ExecContext(ctx,
 		`UPDATE api_tokens SET revoked_at = NOW() WHERE id = $1 AND tenant_id = $2 AND revoked_at IS NULL`,

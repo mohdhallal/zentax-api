@@ -29,6 +29,22 @@ func (uc *UseCases) Update(ctx context.Context, id domain.TaskInstanceID, input 
 		return nil, apperrors.NewConflict(domain.MsgAlreadyPending)
 	}
 
+	// assigneeId must be an ACTIVE HUMAN member of the caller's tenant (the
+	// column carries no FK — users is not RLS-scoped — so it is checked here).
+	// Only a CHANGE of assignee is checked: clients send the current assignee
+	// back on every save, and a task whose assignee was since disabled must
+	// stay editable (and reassignable).
+	if input.AssigneeID != nil && uc.assignees != nil &&
+		(current.AssigneeID == nil || *current.AssigneeID != *input.AssigneeID) {
+		ok, err := uc.assignees.IsAssignable(ctx, *input.AssigneeID)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, apperrors.NewValidation(domain.MsgAssigneeNotMember)
+		}
+	}
+
 	if input.TaxDataStatus == "" {
 		input.TaxDataStatus = "draft"
 	}

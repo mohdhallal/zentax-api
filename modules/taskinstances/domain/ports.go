@@ -22,6 +22,13 @@ type TaskInstanceRepository interface {
 	Reject(ctx context.Context, id TaskInstanceID, reason *string) (*TaskInstance, error)
 }
 
+// AssigneeChecker answers whether a user id may be assigned a task in the
+// requester's tenant (an ACTIVE HUMAN member of that tenant). Implemented by
+// the identity module; optional on the use cases (nil = no check).
+type AssigneeChecker interface {
+	IsAssignable(ctx context.Context, userID string) (bool, error)
+}
+
 // TaskInstanceUseCases is the read/update surface. Instances are created by
 // workflow-start generation, not via a public create endpoint.
 type TaskInstanceUseCases interface {

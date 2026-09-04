@@ -10,6 +10,15 @@ type UseCases struct {
 	repo       domain.TaskInstanceRepository
 	authorizer *authz.Authorizer
 	audit      *audit.Recorder
+	assignees  domain.AssigneeChecker
+}
+
+// WithAssigneeChecker injects the tenant-directory check for assigneeId
+// (identity module). Optional and nil-safe — without it, assignment is not
+// validated (unit tests); the container always wires one.
+func (uc *UseCases) WithAssigneeChecker(c domain.AssigneeChecker) *UseCases {
+	uc.assignees = c
+	return uc
 }
 
 // NewUseCases builds the task-instance use cases; the authorizer is optional

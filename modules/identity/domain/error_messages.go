@@ -15,4 +15,18 @@ const (
 	MsgTokenInvalid           = "API token is invalid, expired, or revoked"
 	MsgTokenNotFound          = "API token not found"
 	MsgServiceAccountNotFound = "service account not found"
+
+	// Member administration. The invite failure is deliberately generic — it
+	// never reveals whether a token / email exists or why it was refused.
+	MsgMemberNotFound         = "member not found"
+	MsgMemberEmailTaken       = "a member with this email already exists"
+	MsgMemberNotInvited       = "member is not pending an invitation"
+	MsgCannotDisableSelf      = "you cannot disable your own account"
+	MsgInvitedNotActivatable  = "an invited member becomes active by accepting the invite"
+	MsgLastTenantAdmin        = "the tenant must keep at least one tenant admin"
+	MsgServiceCannotBeAdmin   = "a service account cannot be granted tenant_admin"
+	MsgAdminMustBeTenantWide  = "tenant_admin is tenant-wide: it cannot be scoped to an entity"
+	MsgScopeEntityNotInTenant = "scopeEntityId is not an entity of this tenant"
+	MsgGrantNotFound          = "grant not found"
+	MsgInviteInvalid          = "invite is invalid or has expired"
 )

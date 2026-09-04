@@ -38,6 +38,17 @@ func TestRoleMatrix_SeparationOfDuties(t *testing.T) {
 		{RoleTenantAdmin, WorkflowWrite, true},
 		{RoleTenantAdmin, TaskApprove, true},
 
+		// member:read (the tenant directory) is held by every role; member:manage
+		// (invite / disable / roles) by tenant_admin only.
+		{RoleViewer, MemberRead, true},
+		{RolePreparer, MemberRead, true},
+		{RoleReviewer, MemberRead, true},
+		{RoleManager, MemberRead, true},
+		{RoleTenantAdmin, MemberRead, true},
+		{RoleViewer, MemberManage, false},
+		{RolePreparer, MemberManage, false},
+		{RoleReviewer, MemberManage, false},
+
 		// audit:read is an oversight capability: reviewer/manager/admin only.
 		{RoleViewer, AuditRead, false},
 		{RolePreparer, AuditRead, false},
@@ -70,5 +81,18 @@ func TestHasCapability_UnionOverGrants(t *testing.T) {
 func TestHasCapability_EmptyGrantsDenies(t *testing.T) {
 	if HasCapability(nil, EntityRead) {
 		t.Error("a user with no grants must have no capabilities")
+	}
+}
+
+func TestHumanOnly_ApprovalAndMemberAdmin(t *testing.T) {
+	for _, cap := range []Capability{TaskApprove, MemberManage} {
+		if !HumanOnly(cap) {
+			t.Errorf("%s must be human-only", cap)
+		}
+	}
+	for _, cap := range []Capability{TaskWrite, TaskSubmit, MemberRead, EntityWrite} {
+		if HumanOnly(cap) {
+			t.Errorf("%s must stay open to service principals", cap)
+		}
 	}
 }

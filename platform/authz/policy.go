@@ -39,7 +39,10 @@ const (
 	TaskSubmit  Capability = "task:submit"  // submit a task instance for approval
 	TaskApprove Capability = "task:approve" // approve / reject a submitted task instance
 
-	MemberManage Capability = "member:manage" // manage tenant users + their grants
+	// MemberRead lists the tenant directory (names, emails, roles). Held by
+	// every role: any member must be able to see who can be assigned a task.
+	MemberRead   Capability = "member:read"
+	MemberManage Capability = "member:manage" // manage tenant users + their grants (invite, disable, roles)
 
 	// AuditRead reads the application audit trail (ADR-0008 stream 1). Held by
 	// the oversight roles only — reviewer, manager, tenant_admin — never by a
@@ -63,7 +66,7 @@ const (
 // reads: every read capability, held by every role (any tenant member may view).
 var reads = []Capability{
 	EntityRead, ObligationTypeRead, EntityObligationRead,
-	WorkflowRead, WorkflowTaskRead, TaskRead,
+	WorkflowRead, WorkflowTaskRead, TaskRead, MemberRead,
 }
 
 // setupWrites: the "administer the compliance program" writes — defining
@@ -131,10 +134,12 @@ func KnownRole(role Role) bool {
 // HumanOnly reports whether cap may never be exercised by a service principal,
 // regardless of granted roles. Approval is the attestation at the heart of
 // segregation of duties (ADR-0012/0018) — a machine can prepare and submit,
-// but only a human approves (or rejects). Enforced by the capability
-// middleware and again by the Authorizer (defense in depth).
+// but only a human approves (or rejects). Member administration is human-only
+// too: a machine never mints principals or grants (no self-replication) —
+// refused at grant time AND here, so a legacy grant cannot reopen it. Enforced
+// by the capability middleware and again by the Authorizer (defense in depth).
 func HumanOnly(cap Capability) bool {
-	return cap == TaskApprove
+	return cap == TaskApprove || cap == MemberManage
 }
 
 // Grant is one user_grants row, reduced to what authorization needs: the role

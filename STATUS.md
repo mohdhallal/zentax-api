@@ -4,7 +4,7 @@
 > lands. The cross-session roadmap lives in `../TaxFlowReports/PROJECT_PLAN.md`;
 > architecture decisions in `../TaxFlowReports/docs/adr/` (ADRs 0001–0019).
 
-**Last updated:** 2026-08-21 · **Toolchain:** Go 1.27 via gvm (`~/.gvm/gos/go1.27`;
+**Last updated:** 2026-09-04 · **Toolchain:** Go 1.27 via gvm (`~/.gvm/gos/go1.27`;
 the system `/usr/local/go` is a stale 1.19). **Gate:** `go build/vet/test ./...`
 green on both the main module and `acceptance/`.
 
@@ -124,7 +124,7 @@ green on both the main module and `acceptance/`.
 
 Migrations (sqitch): `tenants`, `entities`, `obligation_types`, `entity_obligations`,
 `workflows`, `workflow_tasks`, `task_instances`, `task_instance_approvals`, `actor_columns`,
-`audit_log`, `service_accounts` (+ boilerplate `appschema`,
+`audit_log`, `service_accounts`, `entity_obligation_details`, `reporting_indexes`, `invite_tokens` (+ boilerplate `appschema`,
 `internal_api_keys`, `nexus_accounts_api_keys`).
 
 **Auth / identity (Increments A + B):** first-party email/password + server-side sessions + TOTP MFA
@@ -172,7 +172,65 @@ Commits: `4cdcd4e` scaffold · `2851179` tenancy+entities · `d074780` obligatio
     document-version / rule-version snapshots need documents + audit first. The freeze + preparer≠approver
     SoD + the submit/approve/reject actions are **done** (see Domain features).
   - **WorkOS SSO/SCIM (Phase 2).** `IdentityBroker` seam is stubbed only.
-  - Breach-checked passwords (HIBP), password-reset / invite flows, Redis session store (Postgres for now).
+  - Breach-checked passwords (HIBP), password-reset flow, Redis session store (Postgres for now).
+    ~~Invite flow~~ — **done (2026-09-04, see Member administration below).**
+- **Member administration — DONE (2026-09-04).** `modules/identity` grows a members surface backed by the
+  same users / user_grants rails. **Capabilities:** a new `member:read` joins the read set every role holds
+  (the tenant directory — names, emails, roles — is visible to every member so tasks can be assigned);
+  `member:manage` (tenant_admin only) guards every mutation. **Routes** (all `Tenant:true`, tenant from the
+  session — users is not RLS'd, so every members query pins `tenant_id = requester tenant` explicitly and a
+  foreign user id is a plain 404): `GET /members?kind=human|service&status=&limit&offset` (default 100 /
+  max 500, sorted name → email, grants embedded via ONE `user_grants ⟕ entities` query — no N+1 —
+  `scopeEntityName` from the RLS-scoped join) + `GET /members/{id}`; `POST /members` (email lowercased,
+  duplicate → 409, `scopeEntityId` of another tenant → 400 via the composite FK) creates a `kind=human,
+  status=invited` user with no password, its grant and an **invite token**; `POST /members/{id}/invite`
+  re-issues for a still-invited member (409 otherwise) and tombstones the earlier unused tokens;
+  `PUT /members/{id}` (name + `active|disabled`): self-disable → 400, invited → active → 400 (activation is
+  accept-invite only), disabling revokes every session, API token and outstanding invite; `PUT
+  /members/{id}/role` replaces all grants, `POST /members/{id}/grants` adds one (201), `DELETE
+  /members/{id}/grants/{grantId}` removes one (204). **Guards:** the tenant must keep ≥1 ACTIVE HUMAN
+  member holding a tenant-wide `tenant_admin` grant — checked on the request tx after every grant mutation
+  (and on disable), 409 rolls the whole request back; a service account can never be granted
+  `tenant_admin` (400, at creation and by later grant — no self-replication). **Invite token model**
+  (migration `20260904000016_invite_tokens`, RANGE(created_at) monthly + `_default`, in `migrate.sh`'s
+  create-ahead): `"zti_" + 32 random bytes base64url`, cleartext returned ONCE (`inviteToken` +
+  `inviteExpiresAt`, 7 days), stored as SHA-256 only, `accepted_at` / `revoked_at` tombstones, **not**
+  RLS-scoped (looked up by hash before any context, like api_tokens). **`POST /auth/accept-invite`
+  (public):** `{token, password (12..200), name?}` → sets the argon2id hash, `status=active`,
+  `accepted_at`, returns `{email}`; single use (a second accept → 400); every failure is the same generic
+  400 "invite is invalid or has expired". The handler carries no Tx flag — the use case resolves the token
+  first, then runs the writes through `database.Exec.WithinTransaction` with the tenant **taken from the
+  token row** and the activating user as requester, so `audit_log` (RLS'd) receives `member.activated`
+  in the right tenant chain. Audit actions (PII-free details): `member.invited {role, scoped}`,
+  `member.invite_reissued`, `member.updated {status}`, `member.role_changed {role, scoped, grants}`,
+  `member.activated`. **Task assignment:** `PUT /task-instances/{id}` with `assigneeId` now requires an
+  ACTIVE HUMAN user of the caller's tenant (400 "assignee is not an active member of this tenant") via a
+  nil-safe `AssigneeChecker` port on the task-instance use cases, implemented in identity's pg repo (users
+  pinned to the requester's tenant) and wired in the container; `/reports/task-instances` resolves such
+  users' `assigneeName`. Acceptance (`acceptance/modules/members`, 8 tests): invite → list → accept →
+  real login → `/auth/me`, single-use / wrong / expired / short-password 400s, every role reads but only
+  admins mutate, cross-tenant 404s + scope 400, re-issue rotates the token, disable kills sessions +
+  login and re-enable restores it, last-admin guard on role / grant delete, grant add/remove with
+  resolved scope names, service-account admin 400, and the whole task-assignment matrix (foreign / invited
+  / service / disabled → 400, active → 200 with `assigneeName`). Unit tests cover the use-case guards with
+  mocks. **Review hardening (2026-09-04, adversarial review of the increment):** (1) `tenant_admin` is
+  **tenant-wide only** — a scoped admin grant is refused (400) on invite / role / add-grant, because
+  capability checks on tenant-level routes (`/members`, `/service-accounts`) are scope-agnostic and a
+  "limited admin" would have administered the whole tenant; (2) `member:manage` is **human-only at the
+  gate** (`authz.HumanOnly`, like `task:approve`), so a machine can never administer members even through
+  a legacy grant; (3) the last-admin guard is serialised per tenant with a transaction-scoped advisory
+  lock (`pg_advisory_xact_lock`, `MemberRepository.LockAdminGuard`) taken before every admin-guard
+  mutation — two concurrent demotions can no longer each see the other admin still standing; (4)
+  re-enabling a disabled human that never accepted its invite (no password) returns it to `invited`
+  (re-issue the invite) instead of minting an `active` account nobody can sign in to (service accounts
+  stay `active`); (5) `PUT /task-instances/{id}` validates `assigneeId` only when it **changes** —
+  clients send the current assignee back on every save, so a task whose assignee was since disabled
+  stays editable and reassignable. Acceptance +3 (scoped admin 400s, invitee restore, machine admin
+  403), unit +3. **Known limitation (logged):** `users.email` is globally unique, so `POST /members`
+  answers 409 for an address registered in *another* tenant — a cross-tenant email-existence oracle
+  inherent to v1 identity; ADR-0005's domain-scoped identity is the fix. **Remaining:** e-mail delivery
+  of the invite link (the token is returned to the admin for now), invite expiry configurability,
+  read-side scope narrowing of the directory, rate limiting on `POST /auth/accept-invite`.
 - **Machine identity — DONE (agentic-AI B1).** Service accounts are `users.kind='service'` rows (grants,
   audit actor_id, and created_by attribution reuse the same rails; synthetic internal email; login rejects
   them). Bearer **API tokens** (`ztx_...`, sha256-hashed at rest, mandatory expiry, revocation tombstones)
@@ -211,7 +269,7 @@ Commits: `4cdcd4e` scaffold · `2851179` tenancy+entities · `d074780` obligatio
   export to S3 Object Lock (Phase 2), the centralized **security stream** (auth events — Phase 2;
   interim: structured slog). The read API for the Audit Trail page is **done** (2026-09-03:
   `GET /audit-log`, `modules/auditlog`, capability `audit:read` — see "Read models" above).
-- **Team members / roles**, **notifications / email / digests**, **reports**
+- ~~**Team members / roles**~~ (done 2026-09-04 — see Member administration under Auth), **notifications / email / digests**, **reports**
   (compliance-heatmap / status / tax-financial / export-raw — the enriched task-instance list and
   per-workflow stats under `/reports` are done, 2026-09-03; the compliance aggregates are not).
 

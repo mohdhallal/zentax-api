@@ -29,6 +29,10 @@ func (uc *UseCases) CreateServiceAccount(ctx context.Context, input domain.Creat
 	if !authz.KnownRole(authz.Role(input.Role)) {
 		return nil, apperrors.NewValidation("unknown role: " + input.Role)
 	}
+	// No self-replication: a machine never holds member:manage.
+	if authz.Role(input.Role) == authz.RoleTenantAdmin {
+		return nil, apperrors.NewValidation(domain.MsgServiceCannotBeAdmin)
+	}
 
 	user, err := uc.users.Create(ctx, domain.CreateUserInput{
 		TenantID: tenantID,
