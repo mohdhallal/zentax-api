@@ -13,6 +13,7 @@ import (
 	"github.com/mohamadhallal/zentax-api/delivery/httpkit/routing"
 	"github.com/mohamadhallal/zentax-api/delivery/httpkit/swagger"
 	"github.com/mohamadhallal/zentax-api/delivery/httpkit/types"
+	"github.com/mohamadhallal/zentax-api/modules/auditlog"
 	authpg "github.com/mohamadhallal/zentax-api/modules/auth/repositories/pg"
 	authuc "github.com/mohamadhallal/zentax-api/modules/auth/usecases"
 	"github.com/mohamadhallal/zentax-api/modules/entities"
@@ -23,6 +24,7 @@ import (
 	identitypg "github.com/mohamadhallal/zentax-api/modules/identity/repositories/pg"
 	identityusecases "github.com/mohamadhallal/zentax-api/modules/identity/usecases"
 	"github.com/mohamadhallal/zentax-api/modules/obligationtypes"
+	"github.com/mohamadhallal/zentax-api/modules/reports"
 	"github.com/mohamadhallal/zentax-api/modules/taskinstances"
 	"github.com/mohamadhallal/zentax-api/modules/workflows"
 	"github.com/mohamadhallal/zentax-api/modules/workflowtasks"
@@ -114,6 +116,8 @@ func New(cfg *config.Config, mode types.ServerMode) (*App, error) {
 	workflows.RegisterRoutes(router, ctr.WorkflowUseCases, ctr.WorkflowStarter)
 	workflowtasks.RegisterRoutes(router, ctr.WorkflowTaskUseCases)
 	taskinstances.RegisterRoutes(router, ctr.TaskInstanceUseCases)
+	reports.RegisterRoutes(router, ctr.ReportsReader)
+	auditlog.RegisterRoutes(router, ctr.AuditLogReader)
 
 	chiRouter.NotFound(httperr.NotFoundHandler())
 

@@ -1,6 +1,8 @@
 package bootstrap
 
 import (
+	auditlogdomain "github.com/mohamadhallal/zentax-api/modules/auditlog/domain"
+	auditlogpg "github.com/mohamadhallal/zentax-api/modules/auditlog/repositories/pg"
 	authdomain "github.com/mohamadhallal/zentax-api/modules/auth/domain"
 	authpg "github.com/mohamadhallal/zentax-api/modules/auth/repositories/pg"
 	authusecases "github.com/mohamadhallal/zentax-api/modules/auth/usecases"
@@ -13,6 +15,8 @@ import (
 	obligationtypesdomain "github.com/mohamadhallal/zentax-api/modules/obligationtypes/domain"
 	obligationtypespg "github.com/mohamadhallal/zentax-api/modules/obligationtypes/repositories/pg"
 	obligationtypesusecases "github.com/mohamadhallal/zentax-api/modules/obligationtypes/usecases"
+	reportsdomain "github.com/mohamadhallal/zentax-api/modules/reports/domain"
+	reportspg "github.com/mohamadhallal/zentax-api/modules/reports/repositories/pg"
 	taskinstancesdomain "github.com/mohamadhallal/zentax-api/modules/taskinstances/domain"
 	taskinstancespg "github.com/mohamadhallal/zentax-api/modules/taskinstances/repositories/pg"
 	taskinstancesusecases "github.com/mohamadhallal/zentax-api/modules/taskinstances/usecases"
@@ -41,6 +45,11 @@ type Container struct {
 	// WorkflowStarter generates task instances from a workflow's templates
 	// (POST /workflows/{id}/start). Implemented by the task-instances generator.
 	WorkflowStarter workflowsdomain.Starter
+	// ReportsReader serves the read-only /reports views (enriched task
+	// instances, per-workflow stats); AuditLogReader the /audit-log trail.
+	// Both are hand-written SQL over RLS-scoped tables — no use-case layer.
+	ReportsReader  reportsdomain.Reader
+	AuditLogReader auditlogdomain.Reader
 }
 
 func NewContainer(db database.ExecerPg) *Container {
@@ -75,5 +84,7 @@ func NewContainer(db database.ExecerPg) *Container {
 		WorkflowTaskUseCases:       workflowtasksusecases.NewUseCases(workflowTaskRepo, authorizer).WithAudit(auditRec),
 		TaskInstanceUseCases:       taskinstancesusecases.NewUseCases(taskInstanceRepo, authorizer).WithAudit(auditRec),
 		WorkflowStarter:            generator,
+		ReportsReader:              reportspg.NewReportsRepo(db),
+		AuditLogReader:             auditlogpg.NewAuditLogRepo(db),
 	}
 }

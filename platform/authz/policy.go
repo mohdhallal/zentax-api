@@ -40,6 +40,13 @@ const (
 	TaskApprove Capability = "task:approve" // approve / reject a submitted task instance
 
 	MemberManage Capability = "member:manage" // manage tenant users + their grants
+
+	// AuditRead reads the application audit trail (ADR-0008 stream 1). Held by
+	// the oversight roles only — reviewer, manager, tenant_admin — never by a
+	// viewer or preparer: who-did-what is evidence for the people accountable
+	// for the compliance program, not general-purpose read data. Not human-only:
+	// a service principal may hold it like any other read.
+	AuditRead Capability = "audit:read"
 )
 
 // Role is a named bundle of capabilities granted to a user (user_grants.role).
@@ -94,18 +101,18 @@ func buildMatrix() map[Role]map[Capability]bool {
 	// reviewer — reads + approves/rejects submitted task instances (the approver
 	// side of SoD). No setup writes, no preparing.
 	add(RoleReviewer, reads...)
-	add(RoleReviewer, TaskApprove)
+	add(RoleReviewer, TaskApprove, AuditRead)
 
 	// manager — the full compliance program: all reads, all setup writes, and the
 	// whole task lifecycle including approval. No member management.
 	add(RoleManager, reads...)
 	add(RoleManager, setupWrites...)
-	add(RoleManager, TaskWrite, TaskSubmit, TaskApprove)
+	add(RoleManager, TaskWrite, TaskSubmit, TaskApprove, AuditRead)
 
 	// tenant_admin — everything the manager has, plus member management.
 	add(RoleTenantAdmin, reads...)
 	add(RoleTenantAdmin, setupWrites...)
-	add(RoleTenantAdmin, TaskWrite, TaskSubmit, TaskApprove, MemberManage)
+	add(RoleTenantAdmin, TaskWrite, TaskSubmit, TaskApprove, AuditRead, MemberManage)
 
 	return m
 }

@@ -64,6 +64,33 @@ green on both the main module and `acceptance/`.
    (omit = keep) and stamps `completed_at` on `completed` / clears it on reopen;
    approval statuses are never settable through PUT (submit/approve/reject only).
 
+**Read models (2026-09-03, hand-written SQL over RLS-scoped tables, no writes, no migrations):**
+7. **reports** (`modules/reports`) — `GET /reports/task-instances` (`task:read`, paginated, default
+   100 / max 500, sort `dueDate|createdAt:asc|desc`, filters `workflowId` / `entityId` / `status`):
+   task instances JOINed to their workflow, LEFT JOINed to the entity, obligation type and assignee
+   user — each row carries `workflowName`/`workflowCategory`/`projectType`/`financialYear`,
+   `entityId`/`entityName`, `obligationTypeId`/`obligationTypeName`, `taxType` (= the obligation
+   type's template) and `assigneeName` (users.name, resolved at read time), date-only legal dates and
+   UTC instants like the other DTOs. `GET /reports/workflow-stats` (`workflow:read`, not paginated):
+   one object keyed by workflow id for **every** workflow in the tenant → `{totalTasks,
+   completedTasks, completionPercent (rounded, 0 when empty), nextDueDate}` (earliest due date among
+   non-completed instances, or null) from a single LEFT JOIN + GROUP BY. Acceptance: 4 enriched rows
+   sorted by due date, filters + paging, 25 % after one completion, zeros/null for an unstarted
+   workflow, empty list / `{}` for the other tenant.
+8. **auditlog** (`modules/auditlog`) — `GET /audit-log`, the read API for the ADR-0008 trail behind a
+   **new capability `audit:read`** held by **reviewer, manager and tenant_admin only** (viewer and
+   preparer → 403; a service principal may hold it like any read). Rows are the stored PII-free
+   envelope (`id`=event_id, `seq`, `action`, `resourceType`, `resourceId`, `actorId`, `occurredAt`,
+   `requestId`, `details`, `hash`) plus read-time enrichment: `actorName` (LEFT JOIN users — an erased
+   user renders as null, exactly as the ADR intends) and the **resolved** `workflowId`/`workflowName`
+   (the event's own id for workflow events, the parent workflow for workflow_task / task_instance
+   events via LEFT JOINs, null otherwise). Filters: `workflowId` (against the *resolved* id, so a
+   workflow's own + its templates' + its instances' events all match), `resourceType`, `resourceId`,
+   `action`, `from`/`to` (inclusive YYYY-MM-DD, half-open UTC day bounds on `occurred_at` so
+   partition pruning still applies); `occurred_at DESC, seq DESC`; paginated (100 / max 500).
+   Acceptance: full flow lists 6 events newest-first with `actorName` = the seeded user, workflow
+   filter picks 4 (not the entity), type/id/action/date-window filters, paging totals, role gate, RLS.
+
 Migrations (sqitch): `tenants`, `entities`, `obligation_types`, `entity_obligations`,
 `workflows`, `workflow_tasks`, `task_instances`, `task_instance_approvals`, `actor_columns`,
 `audit_log`, `service_accounts` (+ boilerplate `appschema`,
@@ -151,9 +178,11 @@ Commits: `4cdcd4e` scaffold · `2851179` tenancy+entities · `d074780` obligatio
   `created_by`/`updated_by` on all domain tables, defaulted/stamped from the `app.user_id` GUC bound
   at the Tx seam. Verified live incl. tamper attempts + cross-tenant isolation. **Remaining:** WORM
   export to S3 Object Lock (Phase 2), the centralized **security stream** (auth events — Phase 2;
-  interim: structured slog), and a read API for the user-facing Audit Trail page.
+  interim: structured slog). The read API for the Audit Trail page is **done** (2026-09-03:
+  `GET /audit-log`, `modules/auditlog`, capability `audit:read` — see "Read models" above).
 - **Team members / roles**, **notifications / email / digests**, **reports**
-  (compliance-heatmap / status / tax-financial / export-raw).
+  (compliance-heatmap / status / tax-financial / export-raw — the enriched task-instance list and
+  per-workflow stats under `/reports` are done, 2026-09-03; the compliance aggregates are not).
 
 ### 🟠 Deadline engine
 - **Non-standard fiscal patterns** (445 / 454 / 544 / 13-period / weekly / custom) —

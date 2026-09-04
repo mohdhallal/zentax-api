@@ -37,6 +37,13 @@ func TestRoleMatrix_SeparationOfDuties(t *testing.T) {
 		{RoleTenantAdmin, MemberManage, true},
 		{RoleTenantAdmin, WorkflowWrite, true},
 		{RoleTenantAdmin, TaskApprove, true},
+
+		// audit:read is an oversight capability: reviewer/manager/admin only.
+		{RoleViewer, AuditRead, false},
+		{RolePreparer, AuditRead, false},
+		{RoleReviewer, AuditRead, true},
+		{RoleManager, AuditRead, true},
+		{RoleTenantAdmin, AuditRead, true},
 	}
 	for _, c := range cases {
 		if got := RoleHasCapability(c.role, c.cap); got != c.want {
