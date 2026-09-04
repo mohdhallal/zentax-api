@@ -23,10 +23,16 @@ func NewUseCases(repo domain.WorkflowTaskRepository, authorizer ...*authz.Author
 }
 
 // applyDueDateDefaults fills the offset-rule fields the DB defaults would set,
-// since the INSERT/UPDATE always passes explicit values.
-func applyDueDateDefaults(reference, unit, direction *string) {
+// since the INSERT/UPDATE always passes explicit values. A payment-type task
+// with no explicit reference is due off the payment deadline (ADR-0023 §5);
+// every other task off the filing deadline.
+func applyDueDateDefaults(taskType string, reference, unit, direction *string) {
 	if *reference == "" {
-		*reference = "filing_deadline"
+		if taskType == "payment" {
+			*reference = "payment_deadline"
+		} else {
+			*reference = "filing_deadline"
+		}
 	}
 	if *unit == "" {
 		*unit = "days"

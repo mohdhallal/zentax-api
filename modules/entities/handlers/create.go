@@ -48,6 +48,9 @@ func (h *CreateEntityHandler) Execute(
 		TaxResidency:          body.TaxResidency,
 		FiscalCalendarPattern: body.FiscalCalendarPattern,
 		FinancialYearEnd:      body.FinancialYearEnd,
+		FiscalWeekEndDay:      body.FiscalWeekEndDay,
+		FiscalYearEndRule:     body.FiscalYearEndRule,
+		CustomPeriods:         body.CustomPeriods,
 	})
 	if err != nil {
 		return nil, err

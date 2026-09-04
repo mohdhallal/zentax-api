@@ -11,6 +11,7 @@ func RegisterRoutes(
 	uc domain.AuthUseCases,
 	sa domain.ServiceAccountUseCases,
 	members domain.MemberUseCases,
+	tenants domain.TenantUseCases,
 	cookie handlers.CookieConfig,
 ) {
 	router.Group("/auth", func(r *routing.Router) {
@@ -20,9 +21,16 @@ func RegisterRoutes(
 		routing.RegisterRoute(r, handlers.NewMfaEnableHandler(uc))
 		routing.RegisterRoute(r, handlers.NewLogoutHandler(uc, cookie))
 		routing.RegisterRoute(r, handlers.NewLogoutAllHandler(uc, cookie))
-		routing.RegisterRoute(r, handlers.NewMeHandler(uc))
+		routing.RegisterRoute(r, handlers.NewMeHandler(uc, tenants))
 		// Public: an invited person redeems their token (no session, no tenant).
 		routing.RegisterRoute(r, handlers.NewAcceptInviteHandler(members))
+	})
+
+	// Account settings (ADR-0003): the caller's own tenant — read by every
+	// role (member:read), name + timezone written by tenant admins.
+	router.Group("/tenant", func(r *routing.Router) {
+		routing.RegisterRoute(r, handlers.NewGetTenantHandler(tenants))
+		routing.RegisterRoute(r, handlers.NewUpdateTenantHandler(tenants))
 	})
 
 	// Member administration: the tenant directory (member:read, every role)

@@ -10,13 +10,15 @@ import (
 	"github.com/mohamadhallal/zentax-api/modules/identity/dto"
 )
 
-// MeHandler returns the authenticated user (full session).
+// MeHandler returns the authenticated user (full session) together with its
+// tenant (id, slug, name, timezone — ADR-0003).
 type MeHandler struct {
 	usecases domain.AuthUseCases
+	tenants  domain.TenantUseCases
 }
 
-func NewMeHandler(uc domain.AuthUseCases) *MeHandler {
-	return &MeHandler{usecases: uc}
+func NewMeHandler(uc domain.AuthUseCases, tenants domain.TenantUseCases) *MeHandler {
+	return &MeHandler{usecases: uc, tenants: tenants}
 }
 
 func (h *MeHandler) DefineRoute() types.RouteDefinition {
@@ -35,5 +37,9 @@ func (h *MeHandler) Execute(
 	if err != nil {
 		return nil, err
 	}
-	return httpkit.Ok(dto.UserToJSON(user)), nil
+	tenant, err := h.tenants.GetTenant(r.Context())
+	if err != nil {
+		return nil, err
+	}
+	return httpkit.Ok(dto.MeToJSON(user, tenant)), nil
 }

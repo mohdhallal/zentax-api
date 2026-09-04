@@ -5,6 +5,7 @@ import (
 
 	"github.com/stretchr/testify/mock"
 
+	"github.com/mohamadhallal/zentax-api/shared/deadline"
 	sharedtypes "github.com/mohamadhallal/zentax-api/shared/types"
 )
 
@@ -81,6 +82,14 @@ func (m *EntityUseCasesMock) List(ctx context.Context, listArgs sharedtypes.List
 		return nil, args.Error(1)
 	}
 	return args.Get(0).(*sharedtypes.ListResult[Entity]), args.Error(1)
+}
+
+func (m *EntityUseCasesMock) Periods(ctx context.Context, id EntityID, periodicity string, financialYear int) ([]deadline.Period, error) {
+	args := m.Called(ctx, id, periodicity, financialYear)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]deadline.Period), args.Error(1)
 }
 
 func entityOrNil(v any) *Entity {

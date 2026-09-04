@@ -16,6 +16,32 @@ func UserToJSON(u *domain.User) map[string]any {
 	}
 }
 
+// TenantToJSON renders the account record (GET/PUT /tenant).
+func TenantToJSON(t *domain.Tenant) map[string]any {
+	return map[string]any{
+		"id":        t.ID,
+		"slug":      t.Slug,
+		"name":      t.Name,
+		"timezone":  t.Timezone,
+		"createdAt": t.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
+		"updatedAt": t.UpdatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
+	}
+}
+
+// MeToJSON is the /auth/me view: every user key as before, plus the
+// caller's tenant (id, slug, name, timezone) so clients render instants and
+// "today" in the tenant's zone (ADR-0003 / ADR-0023 §6).
+func MeToJSON(u *domain.User, t *domain.Tenant) map[string]any {
+	out := UserToJSON(u)
+	out["tenant"] = map[string]any{
+		"id":       t.ID,
+		"slug":     t.Slug,
+		"name":     t.Name,
+		"timezone": t.Timezone,
+	}
+	return out
+}
+
 func LoginResultToJSON(res *domain.LoginResult) map[string]any {
 	return map[string]any{
 		"mfaRequired": res.MFARequired,

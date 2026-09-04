@@ -41,7 +41,7 @@ WHERE ($1::uuid IS NULL OR ti.workflow_id = $1::uuid)
 const taskInstanceSelect = `
 SELECT ti.id, ti.workflow_id, ti.workflow_task_id, ti.period_code, ti.name, ti.description,
        ti.task_type, ti.status, ti.assignee_id, u.name AS assignee_name,
-       ti.due_date, ti.period_end_date, ti.filing_deadline, ti.approval_required,
+       ti.due_date, ti.period_end_date, ti.filing_deadline, ti.payment_deadline, ti.approval_required,
        ti.approved_by, ti.approved_at, ti.completed_at, ti.submitted_by, ti.submitted_at,
        ti.rejection_reason, ti.order_index, ti.notes, ti.data_template_id, ti.tax_data_status,
        ti.created_at, ti.updated_at,

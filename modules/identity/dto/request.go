@@ -10,6 +10,15 @@ type MfaCodeBody struct {
 	Code string `json:"code" validate:"required,len=6,numeric" example:"123456"`
 }
 
+// --- tenant (account settings, ADR-0003) ---
+
+// UpdateTenantBody renames the caller's tenant and sets its IANA timezone;
+// the zone name is validated against Go's tz database in the use case.
+type UpdateTenantBody struct {
+	Name     string `json:"name"     validate:"required,min=1,max=200" example:"Acme GmbH"`
+	Timezone string `json:"timezone" validate:"required,min=1,max=64"  example:"Europe/London"`
+}
+
 // --- service accounts / API tokens (machine identity) ---
 
 type CreateServiceAccountBody struct {

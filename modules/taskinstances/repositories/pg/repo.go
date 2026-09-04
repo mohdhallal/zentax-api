@@ -27,7 +27,7 @@ func (r *TaskInstanceRepo) Create(ctx context.Context, input domain.CreateTaskIn
 	return r.QueryRow(ctx, r.SQL.Create,
 		input.WorkflowID, input.WorkflowTaskID, input.PeriodCode, input.Name, input.Description,
 		input.TaskType, input.DueDate, input.PeriodEndDate, input.FilingDeadline,
-		input.ApprovalRequired, input.OrderIndex, input.DataTemplateID,
+		input.ApprovalRequired, input.OrderIndex, input.DataTemplateID, input.PaymentDeadline,
 	)
 }
 

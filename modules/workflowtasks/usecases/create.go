@@ -12,7 +12,7 @@ func (uc *UseCases) Create(ctx context.Context, input domain.CreateWorkflowTaskI
 	if err := uc.authorizer.EnsureWorkflow(ctx, input.WorkflowID, authz.WorkflowTaskWrite); err != nil {
 		return nil, err
 	}
-	applyDueDateDefaults(&input.DueDateReference, &input.DueDateOffsetUnit, &input.DueDateOffsetDirection)
+	applyDueDateDefaults(input.TaskType, &input.DueDateReference, &input.DueDateOffsetUnit, &input.DueDateOffsetDirection)
 	wt, err := uc.repo.Create(ctx, input)
 	if err != nil {
 		return nil, err

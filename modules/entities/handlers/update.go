@@ -50,6 +50,9 @@ func (h *UpdateEntityHandler) Execute(
 		TaxResidency:          body.TaxResidency,
 		FiscalCalendarPattern: body.FiscalCalendarPattern,
 		FinancialYearEnd:      body.FinancialYearEnd,
+		FiscalWeekEndDay:      body.FiscalWeekEndDay,
+		FiscalYearEndRule:     body.FiscalYearEndRule,
+		CustomPeriods:         body.CustomPeriods,
 		Status:                body.Status,
 	})
 	if err != nil {

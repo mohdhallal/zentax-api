@@ -11,6 +11,7 @@ func RegisterRoutes(router *routing.Router, uc domain.EntityUseCases) {
 		routing.RegisterRoute(r, handlers.NewCreateEntityHandler(uc))
 		routing.RegisterRoute(r, handlers.NewListEntitiesHandler(uc))
 		routing.RegisterRoute(r, handlers.NewGetEntityByIdHandler(uc))
+		routing.RegisterRoute(r, handlers.NewEntityPeriodsHandler(uc))
 		routing.RegisterRoute(r, handlers.NewUpdateEntityHandler(uc))
 		routing.RegisterRoute(r, handlers.NewDeleteEntityHandler(uc))
 	})

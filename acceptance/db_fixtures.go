@@ -51,6 +51,18 @@ func (s *Suite) InsertTenant(slug, name string) uuid.UUID {
 	return id
 }
 
+// InsertTenantWithTimezone seeds a tenant carrying a specific IANA timezone
+// (ADR-0003) — InsertTenant leaves the column at its UTC default.
+func (s *Suite) InsertTenantWithTimezone(slug, name, timezone string) uuid.UUID {
+	var id uuid.UUID
+	err := s.DB.QueryRowx(
+		`INSERT INTO tenants (slug, name, timezone) VALUES ($1, $2, $3) RETURNING id`,
+		slug, name, timezone,
+	).Scan(&id)
+	s.Require().NoError(err)
+	return id
+}
+
 // InsertInternalAPIKey inserts a hashed key and returns cleartext key+secret
 // suitable for use with WithInternalAuth.
 func (s *Suite) InsertInternalAPIKey(appName string) (key, secret string) {

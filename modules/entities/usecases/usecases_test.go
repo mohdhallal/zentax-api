@@ -32,7 +32,9 @@ func TestEntityCreate_DefaultsFiscalPattern(t *testing.T) {
 
 	in := domain.CreateEntityInput{Name: "Acme GmbH", Country: "Germany"} // pattern omitted
 	want := in
-	want.FiscalCalendarPattern = "standard" // repo must receive the default
+	want.FiscalCalendarPattern = "standard" // repo must receive the defaults
+	want.FiscalWeekEndDay = "saturday"
+	want.FiscalYearEndRule = "nearest"
 
 	entity := sampleEntity()
 	repo.On("Create", ctx, want).Return(entity, nil).Once()
@@ -49,7 +51,10 @@ func TestEntityCreate_PassesThroughPattern(t *testing.T) {
 	repo := new(domain.EntityRepositoryMock)
 	uc := NewUseCases(repo)
 
-	in := domain.CreateEntityInput{Name: "Acme", Country: "Germany", FiscalCalendarPattern: "445"}
+	in := domain.CreateEntityInput{
+		Name: "Acme", Country: "Germany", FiscalCalendarPattern: "445",
+		FiscalWeekEndDay: "sunday", FiscalYearEndRule: "last",
+	}
 	repo.On("Create", ctx, in).Return(sampleEntity(), nil).Once()
 
 	_, err := uc.Create(ctx, in)
@@ -109,6 +114,8 @@ func TestEntityUpdate_DefaultsAndNotFound(t *testing.T) {
 	in := domain.UpdateEntityInput{Name: "Acme", Country: "Germany"} // no pattern, no status
 	want := in
 	want.FiscalCalendarPattern = "standard"
+	want.FiscalWeekEndDay = "saturday"
+	want.FiscalYearEndRule = "nearest"
 	want.Status = "active"
 
 	repo.On("Update", ctx, "missing", want).Return(nil, nil).Once()
@@ -128,6 +135,7 @@ func TestEntityUpdate_Success(t *testing.T) {
 	entity := sampleEntity()
 	in := domain.UpdateEntityInput{
 		Name: "Acme", Country: "Germany", FiscalCalendarPattern: "454", Status: "inactive",
+		FiscalWeekEndDay: "saturday", FiscalYearEndRule: "nearest",
 	}
 	repo.On("Update", ctx, entity.ID, in).Return(entity, nil).Once()
 

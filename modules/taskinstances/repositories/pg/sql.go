@@ -3,10 +3,10 @@ package pg
 import baserepo "github.com/mohamadhallal/zentax-api/shared/repositories"
 
 // taskInstanceColumns is the domain projection — WITHOUT tenant_id (RLS infra).
-// due_date/period_end_date/filing_deadline (DATE) scan into dateonly.Date;
-// tax_data (JSONB) into domain.TaxData.
+// due_date/period_end_date/filing_deadline/payment_deadline (DATE) scan into
+// dateonly.Date; tax_data (JSONB) into domain.TaxData.
 const taskInstanceColumns = `id, workflow_id, workflow_task_id, period_code, name, description, task_type, ` +
-	`status, assignee_id, due_date, period_end_date, filing_deadline, approval_required, approved_by, ` +
+	`status, assignee_id, due_date, period_end_date, filing_deadline, payment_deadline, approval_required, approved_by, ` +
 	`approved_at, completed_at, submitted_by, submitted_at, rejection_reason, order_index, notes, ` +
 	`data_template_id, tax_data, tax_data_status, created_at, updated_at, created_by, updated_by`
 
@@ -27,9 +27,10 @@ var sqlConfig = baserepo.SQLConfig{
 	Create: `
 		INSERT INTO task_instances (
 			workflow_id, workflow_task_id, period_code, name, description, task_type,
-			due_date, period_end_date, filing_deadline, approval_required, order_index, data_template_id
+			due_date, period_end_date, filing_deadline, approval_required, order_index, data_template_id,
+			payment_deadline
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		RETURNING ` + taskInstanceColumns,
 	Update: `
 		UPDATE task_instances

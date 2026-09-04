@@ -107,6 +107,9 @@ func New(cfg *config.Config, mode types.ServerMode) (*App, error) {
 		WithMembers(identitypg.NewMemberRepo(db), identitypg.NewInviteRepo(db)).
 		WithTx(db). // accept-invite opens its own tenant-bound tx (public route)
 		WithAudit(audit.NewRecorder(db))
+	// Account settings (ADR-0003): the tenant registry row, pinned to the
+	// session's tenant; the timezone drives the reports' "today".
+	tenantUC := identityusecases.NewTenantUseCases(identitypg.NewTenantRepo(db), audit.NewRecorder(db))
 	cookieCfg := identityhandlers.CookieConfig{
 		Name:        cfg.Auth.SessionCookieName,
 		Secure:      cfg.Auth.SessionCookieSecure,
@@ -124,7 +127,7 @@ func New(cfg *config.Config, mode types.ServerMode) (*App, error) {
 	router := routing.NewRouter(chiRouter, mode, authValidator, identityUC, cfg.Auth.SessionCookieName, grantRepo, db)
 
 	health.RegisterRoutes(router, mode)
-	identity.RegisterRoutes(router, identityUC, identityUC, identityUC, cookieCfg)
+	identity.RegisterRoutes(router, identityUC, identityUC, identityUC, tenantUC, cookieCfg)
 	entities.RegisterRoutes(router, ctr.EntityUseCases)
 	obligationtypes.RegisterRoutes(router, ctr.ObligationTypeUseCases)
 	entityobligations.RegisterRoutes(router, ctr.EntityObligationUseCases)

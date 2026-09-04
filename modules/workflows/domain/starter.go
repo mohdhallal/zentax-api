@@ -25,11 +25,14 @@ type Starter interface {
 
 // TaskOverride adjusts one planned instance, identified by
 // "<templateId>_<periodCode>". A PeriodEndDate override replaces that instance's
-// period end and its filing deadline / due date are recomputed from it (unless
-// DueDate is also overridden); a DueDate override replaces the due date only.
+// period end and its filing deadline / payment deadline / due date are
+// recomputed from it (unless also overridden); a DueDate override replaces the
+// due date only; a PaymentDeadline override replaces the derived payment
+// deadline (and the due date of a task that references it).
 type TaskOverride struct {
-	DueDate       *dateonly.Date
-	PeriodEndDate *dateonly.Date
+	DueDate         *dateonly.Date
+	PeriodEndDate   *dateonly.Date
+	PaymentDeadline *dateonly.Date
 }
 
 // TaskOverrides maps "<templateId>_<periodCode>" to its override.
@@ -43,15 +46,16 @@ func OverrideKey(templateID, periodCode string) string {
 // PreviewTask is one planned task instance (dates are legal date-only values,
 // ADR-0002).
 type PreviewTask struct {
-	TemplateID     string        `json:"templateId"`
-	PeriodCode     string        `json:"periodCode"`
-	Name           string        `json:"name"`
-	TaskType       string        `json:"taskType"`
-	AssigneeName   *string       `json:"assigneeName"`
-	DueDate        dateonly.Date `json:"dueDate"`
-	PeriodEndDate  dateonly.Date `json:"periodEndDate"`
-	FilingDeadline dateonly.Date `json:"filingDeadline"`
-	OrderIndex     int           `json:"orderIndex"`
+	TemplateID      string        `json:"templateId"`
+	PeriodCode      string        `json:"periodCode"`
+	Name            string        `json:"name"`
+	TaskType        string        `json:"taskType"`
+	AssigneeName    *string       `json:"assigneeName"`
+	DueDate         dateonly.Date `json:"dueDate"`
+	PeriodEndDate   dateonly.Date `json:"periodEndDate"`
+	FilingDeadline  dateonly.Date `json:"filingDeadline"`
+	PaymentDeadline dateonly.Date `json:"paymentDeadline"`
+	OrderIndex      int           `json:"orderIndex"`
 }
 
 // WorkflowPreview summarizes what starting the workflow would create. Tasks are

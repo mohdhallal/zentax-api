@@ -18,32 +18,34 @@ import (
 // values (ADR-0002); instants are UTC (ADR-0003). tenant_id is RLS infra and
 // deliberately absent.
 type TaskInstanceRow struct {
-	ID               string        `db:"id"`
-	WorkflowID       string        `db:"workflow_id"`
-	WorkflowTaskID   string        `db:"workflow_task_id"`
-	PeriodCode       string        `db:"period_code"`
-	Name             string        `db:"name"`
-	Description      *string       `db:"description"`
-	TaskType         string        `db:"task_type"`
-	Status           string        `db:"status"`
-	AssigneeID       *string       `db:"assignee_id"`
-	AssigneeName     *string       `db:"assignee_name"`
-	DueDate          dateonly.Date `db:"due_date"`
-	PeriodEndDate    dateonly.Date `db:"period_end_date"`
-	FilingDeadline   dateonly.Date `db:"filing_deadline"`
-	ApprovalRequired bool          `db:"approval_required"`
-	ApprovedBy       *string       `db:"approved_by"`
-	ApprovedAt       *time.Time    `db:"approved_at"`
-	CompletedAt      *time.Time    `db:"completed_at"`
-	SubmittedBy      *string       `db:"submitted_by"`
-	SubmittedAt      *time.Time    `db:"submitted_at"`
-	RejectionReason  *string       `db:"rejection_reason"`
-	OrderIndex       int           `db:"order_index"`
-	Notes            *string       `db:"notes"`
-	DataTemplateID   *string       `db:"data_template_id"`
-	TaxDataStatus    string        `db:"tax_data_status"`
-	CreatedAt        time.Time     `db:"created_at"`
-	UpdatedAt        time.Time     `db:"updated_at"`
+	ID             string        `db:"id"`
+	WorkflowID     string        `db:"workflow_id"`
+	WorkflowTaskID string        `db:"workflow_task_id"`
+	PeriodCode     string        `db:"period_code"`
+	Name           string        `db:"name"`
+	Description    *string       `db:"description"`
+	TaskType       string        `db:"task_type"`
+	Status         string        `db:"status"`
+	AssigneeID     *string       `db:"assignee_id"`
+	AssigneeName   *string       `db:"assignee_name"`
+	DueDate        dateonly.Date `db:"due_date"`
+	PeriodEndDate  dateonly.Date `db:"period_end_date"`
+	FilingDeadline dateonly.Date `db:"filing_deadline"`
+	// PaymentDeadline (ADR-0023 §5) is NULL on instances generated before it existed.
+	PaymentDeadline  *dateonly.Date `db:"payment_deadline"`
+	ApprovalRequired bool           `db:"approval_required"`
+	ApprovedBy       *string        `db:"approved_by"`
+	ApprovedAt       *time.Time     `db:"approved_at"`
+	CompletedAt      *time.Time     `db:"completed_at"`
+	SubmittedBy      *string        `db:"submitted_by"`
+	SubmittedAt      *time.Time     `db:"submitted_at"`
+	RejectionReason  *string        `db:"rejection_reason"`
+	OrderIndex       int            `db:"order_index"`
+	Notes            *string        `db:"notes"`
+	DataTemplateID   *string        `db:"data_template_id"`
+	TaxDataStatus    string         `db:"tax_data_status"`
+	CreatedAt        time.Time      `db:"created_at"`
+	UpdatedAt        time.Time      `db:"updated_at"`
 
 	WorkflowName       string  `db:"workflow_name"`
 	WorkflowCategory   string  `db:"workflow_category"`

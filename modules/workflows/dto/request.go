@@ -8,8 +8,8 @@ type CreateWorkflowBody struct {
 	WorkflowCategory string             `json:"workflowCategory" validate:"omitempty,oneof=recurring project" example:"recurring"`
 	ProjectType      *string            `json:"projectType"      validate:"omitempty,oneof=dispute audit_verification due_diligence market_expansion advisory restructuring custom"`
 	FinancialYear    *string            `json:"financialYear"    validate:"omitempty,max=9" example:"2025"`
-	Periodicity      *string            `json:"periodicity"      validate:"omitempty,oneof=monthly quarterly bi-annual annual consolidated-annual" example:"monthly"`
-	SelectedPeriods  domain.Periods     `json:"selectedPeriods"  validate:"omitempty,dive,max=10"`
+	Periodicity      *string            `json:"periodicity"      validate:"omitempty,oneof=weekly monthly quarterly bi-annual annual consolidated-annual" example:"monthly"`
+	SelectedPeriods  domain.Periods     `json:"selectedPeriods"  validate:"omitempty,dive,max=16"` // custom period codes may be 16 chars (entities.customPeriods)
 	EntityID         *string            `json:"entityId"         validate:"omitempty,uuid"`
 	ObligationTypeID *string            `json:"obligationTypeId" validate:"omitempty,uuid"`
 	DueDateRule      domain.DueDateRule `json:"dueDateRule"      validate:"omitempty"`
@@ -24,8 +24,8 @@ type UpdateWorkflowBody struct {
 	WorkflowCategory string             `json:"workflowCategory" validate:"omitempty,oneof=recurring project"`
 	ProjectType      *string            `json:"projectType"      validate:"omitempty,oneof=dispute audit_verification due_diligence market_expansion advisory restructuring custom"`
 	FinancialYear    *string            `json:"financialYear"    validate:"omitempty,max=9"`
-	Periodicity      *string            `json:"periodicity"      validate:"omitempty,oneof=monthly quarterly bi-annual annual consolidated-annual"`
-	SelectedPeriods  domain.Periods     `json:"selectedPeriods"  validate:"omitempty,dive,max=10"`
+	Periodicity      *string            `json:"periodicity"      validate:"omitempty,oneof=weekly monthly quarterly bi-annual annual consolidated-annual"`
+	SelectedPeriods  domain.Periods     `json:"selectedPeriods"  validate:"omitempty,dive,max=16"` // custom period codes may be 16 chars (entities.customPeriods)
 	EntityID         *string            `json:"entityId"         validate:"omitempty,uuid"`
 	ObligationTypeID *string            `json:"obligationTypeId" validate:"omitempty,uuid"`
 	DueDateRule      domain.DueDateRule `json:"dueDateRule"      validate:"omitempty"`

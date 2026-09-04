@@ -6,8 +6,8 @@ import (
 	"github.com/mohamadhallal/zentax-api/modules/taskinstances/domain"
 )
 
-// TaskInstanceToJSON renders a task instance. dueDate/periodEndDate/filingDeadline
-// are legal date-only values (ADR-0002) — dateonly.Date marshals to YYYY-MM-DD,
+// TaskInstanceToJSON renders a task instance. dueDate/periodEndDate/filingDeadline/
+// paymentDeadline are legal date-only values (ADR-0002) — dateonly.Date marshals to YYYY-MM-DD,
 // never through a timezone. approvedAt/completedAt/created/updated are UTC
 // instants (ADR-0003).
 func TaskInstanceToJSON(ti *domain.TaskInstance) map[string]any {
@@ -24,6 +24,7 @@ func TaskInstanceToJSON(ti *domain.TaskInstance) map[string]any {
 		"dueDate":          ti.DueDate,
 		"periodEndDate":    ti.PeriodEndDate,
 		"filingDeadline":   ti.FilingDeadline,
+		"paymentDeadline":  ti.PaymentDeadline, // null for rows generated before ADR-0023
 		"approvalRequired": ti.ApprovalRequired,
 		"approvedBy":       ti.ApprovedBy,
 		"approvedAt":       formatInstant(ti.ApprovedAt),

@@ -9,7 +9,7 @@ type CreateWorkflowTaskBody struct {
 	TaskType               string                      `json:"taskType"               validate:"required,oneof=data_request review preparation submission payment approval other"`
 	RoleLabel              *string                     `json:"roleLabel"              validate:"omitempty,max=100"`
 	ApprovalRequired       bool                        `json:"approvalRequired"`
-	DueDateReference       string                      `json:"dueDateReference"       validate:"omitempty,oneof=filing_deadline period_end"`
+	DueDateReference       string                      `json:"dueDateReference"       validate:"omitempty,oneof=filing_deadline period_end payment_deadline"`
 	DueDateOffsetValue     int                         `json:"dueDateOffsetValue"     validate:"min=0,max=365"`
 	DueDateOffsetUnit      string                      `json:"dueDateOffsetUnit"      validate:"omitempty,oneof=days weeks months"`
 	DueDateOffsetDirection string                      `json:"dueDateOffsetDirection" validate:"omitempty,oneof=before after"`
@@ -24,7 +24,7 @@ type UpdateWorkflowTaskBody struct {
 	TaskType               string                      `json:"taskType"               validate:"required,oneof=data_request review preparation submission payment approval other"`
 	RoleLabel              *string                     `json:"roleLabel"              validate:"omitempty,max=100"`
 	ApprovalRequired       bool                        `json:"approvalRequired"`
-	DueDateReference       string                      `json:"dueDateReference"       validate:"omitempty,oneof=filing_deadline period_end"`
+	DueDateReference       string                      `json:"dueDateReference"       validate:"omitempty,oneof=filing_deadline period_end payment_deadline"`
 	DueDateOffsetValue     int                         `json:"dueDateOffsetValue"     validate:"min=0,max=365"`
 	DueDateOffsetUnit      string                      `json:"dueDateOffsetUnit"      validate:"omitempty,oneof=days weeks months"`
 	DueDateOffsetDirection string                      `json:"dueDateOffsetDirection" validate:"omitempty,oneof=before after"`

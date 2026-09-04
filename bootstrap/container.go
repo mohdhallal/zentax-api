@@ -106,7 +106,13 @@ func NewContainer(db database.ExecerPg, opts ...ContainerOption) *Container {
 	// roll back together.
 	auditRec := audit.NewRecorder(db)
 
-	generator := taskinstancesusecases.NewGenerator(taskInstanceRepo, workflowRepo, workflowTaskRepo, entityRepo, authorizer).WithAudit(auditRec)
+	// The generator derives each instance's payment deadline from the entity
+	// obligation linking the workflow's entity and obligation type
+	// (ADR-0023 §5) through the ObligationResolver port, implemented by the
+	// entity-obligations repository.
+	generator := taskinstancesusecases.NewGenerator(taskInstanceRepo, workflowRepo, workflowTaskRepo, entityRepo, authorizer).
+		WithAudit(auditRec).
+		WithObligations(entityObligationRepo)
 
 	return &Container{
 		NexusAccountAPIKeyUseCases: nexusAccountAPIKeyUC,

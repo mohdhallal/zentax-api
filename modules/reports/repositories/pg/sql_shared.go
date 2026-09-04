@@ -12,24 +12,39 @@ import (
 // fixed, code-owned identifiers — no caller-controlled text is ever
 // interpolated; filters travel as bind parameters.
 
+// tenantZone is the IANA zone stored on the tenant registry row of the
+// request's tenant (the `app.tenant_id` GUC the Tx seam binds — the same value
+// RLS isolates on). No caller data is interpolated; the zone comes from the
+// registry, where PUT /tenant validated it (ADR-0003 / ADR-0023 §6).
+const tenantZone = `(SELECT t.timezone FROM tenants t WHERE t.id = current_setting('app.tenant_id', true)::uuid)`
+
+// tenantToday is "today" as the tenant's calendar date. A missing registry row
+// yields NULL, which classifies as not_due (fail closed, never "missed").
+const tenantToday = `(NOW() AT TIME ZONE ` + tenantZone + `)::date`
+
+// tenantCompletedDate is the calendar date, in the tenant's zone, on which the
+// instance was completed — the same notion of "day" the missed rule uses.
+const tenantCompletedDate = `(ti.completed_at AT TIME ZONE ` + tenantZone + `)::date`
+
 // complianceClassTemplate classifies task instance `ti` against a DATE column
 // (%[1]s: ti.filing_deadline or ti.due_date) — ONE definition shared by the
 // heatmap and the compliance-status report (ADR-0021 rule 5):
 //
-//	completed with a completion instant → on_time | late (completed_at's UTC
-//	calendar date vs the deadline, ADR-0002/0003); otherwise missed when the
-//	deadline has passed, else not_due.
+//	completed with a completion instant → on_time | late (completed_at's
+//	calendar date IN THE TENANT'S ZONE (%[3]s) vs the deadline, ADR-0002/0003);
+//	otherwise missed when the deadline has passed in the tenant's day
+//	(%[2]s = tenantToday), else not_due. One definition of "day" throughout.
 //
 // The heatmap reads "overdue" as missed and "completed late" as late.
 const complianceClassTemplate = `CASE
     WHEN ti.status = 'completed' AND ti.completed_at IS NOT NULL THEN
-        CASE WHEN (ti.completed_at AT TIME ZONE 'UTC')::date <= %[1]s THEN 'on_time' ELSE 'late' END
-    WHEN %[1]s < CURRENT_DATE THEN 'missed'
+        CASE WHEN %[3]s <= %[1]s THEN 'on_time' ELSE 'late' END
+    WHEN %[1]s < %[2]s THEN 'missed'
     ELSE 'not_due'
 END`
 
 func complianceClass(deadlineColumn string) string {
-	return fmt.Sprintf(complianceClassTemplate, deadlineColumn)
+	return fmt.Sprintf(complianceClassTemplate, deadlineColumn, tenantToday, tenantCompletedDate)
 }
 
 // participatingWorkflows is the legacy rule for the three compliance /

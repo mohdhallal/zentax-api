@@ -88,13 +88,34 @@ func TestGenerator_ComputesDeadlines(t *testing.T) {
 	instances.AssertExpectations(t)
 }
 
-func TestGenerator_FailsClosedOnUnsupportedPattern(t *testing.T) {
+func TestGenerator_FailsClosedOnCodeOutsideTheCalendar(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	gen, instances, workflows, workflowTasks, entities := newGenerator()
+
+	wf := recurringWorkflow()
+	wf.SelectedPeriods = workflowsdomain.Periods{"M1", "M13"}
+	entity := &entitiesdomain.Entity{ID: "ent-1", FiscalCalendarPattern: "standard", FinancialYearEnd: strp("12-31")}
+	task := workflowtasksdomain.WorkflowTask{ID: "wt-1", WorkflowID: "wf-1", Name: "Prepare", TaskType: "preparation", DueDateReference: "filing_deadline"}
+
+	workflows.On("GetById", ctx, "wf-1").Return(wf, nil).Once()
+	instances.On("CountByWorkflow", ctx, "wf-1").Return(0, nil).Once()
+	entities.On("GetById", ctx, "ent-1").Return(entity, nil).Once()
+	workflowTasks.On("ListByWorkflow", ctx, "wf-1").Return([]workflowtasksdomain.WorkflowTask{task}, nil).Once()
+
+	_, err := gen.StartWorkflow(ctx, "wf-1", nil)
+	assert.IsType(t, &apperrors.ValidationError{}, err)
+	assert.Contains(t, err.Error(), `"M13"`)
+	instances.AssertNotCalled(t, "Create")
+}
+
+func TestGenerator_FailsClosedOnCustomCalendarWithoutPeriods(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	gen, instances, workflows, _, entities := newGenerator()
 
 	wf := recurringWorkflow()
-	entity := &entitiesdomain.Entity{ID: "ent-1", FiscalCalendarPattern: "445", FinancialYearEnd: strp("12-31")}
+	entity := &entitiesdomain.Entity{ID: "ent-1", FiscalCalendarPattern: "custom", FinancialYearEnd: strp("12-31")}
 
 	workflows.On("GetById", ctx, "wf-1").Return(wf, nil).Once()
 	instances.On("CountByWorkflow", ctx, "wf-1").Return(0, nil).Once()
@@ -102,7 +123,7 @@ func TestGenerator_FailsClosedOnUnsupportedPattern(t *testing.T) {
 
 	_, err := gen.StartWorkflow(ctx, "wf-1", nil)
 	assert.IsType(t, &apperrors.ValidationError{}, err)
-	assert.Contains(t, err.Error(), "445")
+	assert.Contains(t, err.Error(), "no periods")
 }
 
 func TestGenerator_RefusesIfAlreadyStarted(t *testing.T) {

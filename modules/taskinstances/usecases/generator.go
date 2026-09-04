@@ -7,18 +7,20 @@ import (
 
 	apperrors "github.com/mohamadhallal/zentax-api/errors"
 	entitiesdomain "github.com/mohamadhallal/zentax-api/modules/entities/domain"
+	entityobligationsdomain "github.com/mohamadhallal/zentax-api/modules/entityobligations/domain"
 	tidomain "github.com/mohamadhallal/zentax-api/modules/taskinstances/domain"
 	workflowsdomain "github.com/mohamadhallal/zentax-api/modules/workflows/domain"
 	workflowtasksdomain "github.com/mohamadhallal/zentax-api/modules/workflowtasks/domain"
 	"github.com/mohamadhallal/zentax-api/platform/audit"
 	"github.com/mohamadhallal/zentax-api/platform/authz"
+	"github.com/mohamadhallal/zentax-api/shared/dateonly"
 	"github.com/mohamadhallal/zentax-api/shared/deadline"
 )
 
 // Generator plans and materializes per-period task instances from a workflow's
 // task templates (GET /workflows/{id}/preview, POST /workflows/{id}/start). It
-// reads across modules (workflow, entity, templates) and writes task instances,
-// all within the request's tenant-scoped transaction.
+// reads across modules (workflow, entity, templates, entity obligation) and
+// writes task instances, all within the request's tenant-scoped transaction.
 //
 // Preview and start share planWorkflow, so what preview shows is exactly what
 // start persists.
@@ -27,6 +29,7 @@ type Generator struct {
 	workflows     workflowsdomain.WorkflowRepository
 	workflowTasks workflowtasksdomain.WorkflowTaskRepository
 	entities      entitiesdomain.EntityRepository
+	obligations   tidomain.ObligationResolver // optional; nil = payment deadline = filing deadline
 	authorizer    *authz.Authorizer
 	audit         *audit.Recorder
 }
@@ -49,6 +52,14 @@ func NewGenerator(
 	if len(authorizer) > 0 {
 		g.authorizer = authorizer[0]
 	}
+	return g
+}
+
+// WithObligations injects the entity-obligation lookup the payment deadline is
+// derived from (ADR-0023 §5). Optional and nil-safe: without it every payment
+// deadline equals the filing deadline.
+func (g *Generator) WithObligations(r tidomain.ObligationResolver) *Generator {
+	g.obligations = r
 	return g
 }
 
@@ -96,15 +107,16 @@ func (g *Generator) PreviewWorkflow(ctx context.Context, workflowID string) (*wo
 	seen := map[string]bool{}
 	for _, inst := range plan.instances {
 		preview.Tasks = append(preview.Tasks, workflowsdomain.PreviewTask{
-			TemplateID:     inst.WorkflowTaskID,
-			PeriodCode:     inst.PeriodCode,
-			Name:           inst.Name,
-			TaskType:       inst.TaskType,
-			AssigneeName:   inst.RoleLabel,
-			DueDate:        inst.DueDate,
-			PeriodEndDate:  inst.PeriodEndDate,
-			FilingDeadline: inst.FilingDeadline,
-			OrderIndex:     inst.OrderIndex,
+			TemplateID:      inst.WorkflowTaskID,
+			PeriodCode:      inst.PeriodCode,
+			Name:            inst.Name,
+			TaskType:        inst.TaskType,
+			AssigneeName:    inst.RoleLabel,
+			DueDate:         inst.DueDate,
+			PeriodEndDate:   inst.PeriodEndDate,
+			FilingDeadline:  inst.FilingDeadline,
+			PaymentDeadline: inst.PaymentDeadline,
+			OrderIndex:      inst.OrderIndex,
 		})
 	}
 	// Distinct non-empty role labels in first-seen template order. Instances
@@ -126,8 +138,8 @@ func (g *Generator) PreviewWorkflow(ctx context.Context, workflowID string) (*wo
 // StartWorkflow generates task instances for a recurring workflow (applying the
 // caller's per-instance overrides) and returns the count created. It is
 // idempotent-guarded (refuses if instances already exist) and fails closed on
-// unsupported fiscal calendars rather than emit an approximate — and therefore
-// wrong — deadline.
+// anything the calendar engine cannot compute rather than emit an approximate
+// — and therefore wrong — deadline.
 func (g *Generator) StartWorkflow(ctx context.Context, workflowID string, overrides workflowsdomain.TaskOverrides) (int, error) {
 	// Starting a workflow is a workflow:write on the workflow's entity subtree.
 	if err := g.authorizer.EnsureWorkflow(ctx, workflowID, authz.WorkflowWrite); err != nil {
@@ -206,11 +218,13 @@ func (g *Generator) loadRecurringWorkflow(ctx context.Context, workflowID string
 }
 
 // planWorkflow is the single planning function behind preview and start. It
-// resolves the entity's fiscal calendar and the task templates, then computes
-// one instance per selected period × template — in selectedPeriods order (not
-// lexicographic), then template orderIndex — with the caller's overrides
-// applied. An override key matching no (template, period) pair is a
-// validation error.
+// resolves the entity's fiscal calendar (ADR-0023 — every pattern, through
+// the same engine GET /entities/{id}/periods uses), the payment rule of the
+// entity obligation and the task templates, then computes one instance per
+// selected period × template — in selectedPeriods order (not lexicographic),
+// then template orderIndex — with the caller's overrides applied. An override
+// key matching no (template, period) pair, or a period code outside the
+// entity's calendar, is a validation error.
 func (g *Generator) planWorkflow(
 	ctx context.Context, wf *workflowsdomain.Workflow, overrides workflowsdomain.TaskOverrides,
 ) (*workflowPlan, error) {
@@ -221,19 +235,13 @@ func (g *Generator) planWorkflow(
 	if entity == nil {
 		return nil, apperrors.NewValidation("workflow entity not found in this tenant")
 	}
-	if !deadline.IsSupportedPattern(entity.FiscalCalendarPattern) {
-		return nil, apperrors.NewValidation(
-			"fiscal calendar pattern '" + entity.FiscalCalendarPattern +
-				"' is not yet supported for deadline computation")
-	}
-
-	startMonth, err := deadline.FiscalYearStartMonth(strDeref(entity.FinancialYearEnd))
-	if err != nil {
-		return nil, apperrors.NewValidation(err.Error())
-	}
 	fyEndYear, err := strconv.Atoi(*wf.FinancialYear)
 	if err != nil {
 		return nil, apperrors.NewValidation("financial year must be a numeric year")
+	}
+	cal, err := entitiesdomain.CalendarFor(entity, fyEndYear)
+	if err != nil {
+		return nil, apperrors.NewValidation(err.Error())
 	}
 
 	tasks, err := g.workflowTasks.ListByWorkflow(ctx, wf.ID)
@@ -266,13 +274,26 @@ func (g *Generator) planWorkflow(
 		}
 	}
 
+	// The payment rule comes from the entity obligation linking the workflow's
+	// entity and obligation type (ADR-0023 §5); none → payment = filing.
+	var rule *entityobligationsdomain.DeadlineRule
+	if g.obligations != nil && wf.ObligationTypeID != nil && *wf.ObligationTypeID != "" {
+		eo, err := g.obligations.FindByEntityAndType(ctx, *wf.EntityID, *wf.ObligationTypeID)
+		if err != nil {
+			return nil, err
+		}
+		if eo != nil {
+			rule = &eo.DeadlineRule
+		}
+	}
+
 	plan := &workflowPlan{
 		workflow:  wf,
 		templates: len(tasks),
 		instances: make([]plannedInstance, 0, len(tasks)*len(wf.SelectedPeriods)),
 	}
 	for _, periodCode := range wf.SelectedPeriods {
-		basePeriodEnd, err := deadline.PeriodEndDate(periodCode, *wf.Periodicity, startMonth, fyEndYear)
+		period, err := cal.Period(periodCode, *wf.Periodicity)
 		if err != nil {
 			return nil, apperrors.NewValidation(err.Error())
 		}
@@ -282,9 +303,9 @@ func (g *Generator) planWorkflow(
 			ov := overrides[workflowsdomain.OverrideKey(task.ID, periodCode)]
 
 			// A period-end override is per instance: it moves that one
-			// instance's period end, and its filing deadline + due date are
-			// recomputed from it via the workflow rule + template offset.
-			periodEnd := basePeriodEnd
+			// instance's period end, and its filing deadline, payment deadline
+			// and due date are recomputed from it via the rules + template offset.
+			periodEnd := period.End
 			if ov.PeriodEndDate != nil {
 				periodEnd = *ov.PeriodEndDate
 			}
@@ -292,10 +313,20 @@ func (g *Generator) planWorkflow(
 				deadline.ApplyOffset(periodEnd, wf.DueDateRule.OffsetValue, wf.DueDateRule.OffsetUnit, wf.DueDateRule.OffsetDirection),
 				wf.DueDateRule.WeekendAdjustment,
 			)
+			payment, err := paymentDeadline(periodEnd, filing, rule, wf.DueDateRule.WeekendAdjustment)
+			if err != nil {
+				return nil, apperrors.NewValidation(err.Error())
+			}
+			if ov.PaymentDeadline != nil {
+				payment = *ov.PaymentDeadline
+			}
 
 			ref := periodEnd
-			if task.DueDateReference == "filing_deadline" {
+			switch task.DueDateReference {
+			case "filing_deadline":
 				ref = filing
+			case "payment_deadline":
+				ref = payment
 			}
 			due := deadline.ApplyOffset(ref, task.DueDateOffsetValue, task.DueDateOffsetUnit, task.DueDateOffsetDirection)
 			if ov.DueDate != nil {
@@ -313,6 +344,7 @@ func (g *Generator) planWorkflow(
 					DueDate:          due,
 					PeriodEndDate:    periodEnd,
 					FilingDeadline:   filing,
+					PaymentDeadline:  payment,
 					ApprovalRequired: task.ApprovalRequired,
 					OrderIndex:       task.OrderIndex,
 					DataTemplateID:   task.DataTemplateID,
@@ -323,6 +355,33 @@ func (g *Generator) planWorkflow(
 	}
 
 	return plan, nil
+}
+
+// paymentDeadline derives the payment deadline of one period (ADR-0023 §5):
+//   - rule.PaymentOffset set → period end + months (month-end clamped) + days,
+//     then weekend adjustment (the rule's own, else the workflow rule's);
+//   - else rule.PaymentFixedDates non-empty → the first MM-DD on/after the
+//     period end (the period end's year, then the next), no weekend adjustment;
+//   - else (or no obligation at all) → the filing deadline.
+func paymentDeadline(
+	periodEnd, filing dateonly.Date, rule *entityobligationsdomain.DeadlineRule, fallbackAdjustment string,
+) (dateonly.Date, error) {
+	if rule == nil {
+		return filing, nil
+	}
+	switch {
+	case rule.PaymentOffset != nil:
+		adjustment := rule.WeekendAdjustment
+		if adjustment == "" {
+			adjustment = fallbackAdjustment
+		}
+		raw := deadline.ApplyMonthDayOffset(periodEnd, rule.PaymentOffset.Months, rule.PaymentOffset.Days)
+		return deadline.ApplyWeekendAdjustment(raw, adjustment), nil
+	case len(rule.PaymentFixedDates) > 0:
+		return deadline.FirstFixedDateOnOrAfter(periodEnd, rule.PaymentFixedDates)
+	default:
+		return filing, nil
+	}
 }
 
 // activatedInput re-submits the workflow unchanged except for status=active
@@ -344,13 +403,6 @@ func activatedInput(wf *workflowsdomain.Workflow) workflowsdomain.UpdateWorkflow
 		TasksSequential:  wf.TasksSequential,
 		Status:           "active",
 	}
-}
-
-func strDeref(s *string) string {
-	if s == nil {
-		return ""
-	}
-	return *s
 }
 
 // WithAudit injects the audit recorder (ADR-0008); nil-safe, chainable.

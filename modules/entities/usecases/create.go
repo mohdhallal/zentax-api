@@ -3,6 +3,7 @@ package usecases
 import (
 	"context"
 
+	apperrors "github.com/mohamadhallal/zentax-api/errors"
 	"github.com/mohamadhallal/zentax-api/modules/entities/domain"
 	"github.com/mohamadhallal/zentax-api/platform/authz"
 )
@@ -13,8 +14,15 @@ func (uc *UseCases) Create(ctx context.Context, input domain.CreateEntityInput) 
 	if err := uc.authorizer.EnsureEntityRef(ctx, input.ParentEntityID, authz.EntityWrite); err != nil {
 		return nil, err
 	}
-	if input.FiscalCalendarPattern == "" {
-		input.FiscalCalendarPattern = "standard"
+	applyFiscalDefaults(&input.FiscalCalendarPattern, &input.FiscalWeekEndDay, &input.FiscalYearEndRule)
+	if msg := domain.ValidateFiscalConfig(domain.FiscalConfig{
+		FiscalCalendarPattern: input.FiscalCalendarPattern,
+		FinancialYearEnd:      input.FinancialYearEnd,
+		FiscalWeekEndDay:      input.FiscalWeekEndDay,
+		FiscalYearEndRule:     input.FiscalYearEndRule,
+		CustomPeriods:         input.CustomPeriods,
+	}); msg != "" {
+		return nil, apperrors.NewValidation(msg)
 	}
 	e, err := uc.repo.Create(ctx, input)
 	if err != nil {
@@ -24,4 +32,19 @@ func (uc *UseCases) Create(ctx context.Context, input domain.CreateEntityInput) 
 		return nil, err
 	}
 	return e, nil
+}
+
+// applyFiscalDefaults fills the calendar defaults an omitted field implies
+// (standard / Saturday / nearest — the DDL defaults, applied here so the
+// repository always writes explicit values).
+func applyFiscalDefaults(pattern, weekEndDay, yearEndRule *string) {
+	if *pattern == "" {
+		*pattern = domain.DefaultFiscalCalendarPattern
+	}
+	if *weekEndDay == "" {
+		*weekEndDay = domain.DefaultFiscalWeekEndDay
+	}
+	if *yearEndRule == "" {
+		*yearEndRule = domain.DefaultFiscalYearEndRule
+	}
 }

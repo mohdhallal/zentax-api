@@ -41,6 +41,25 @@ func (r *EntityObligationRepo) Create(
 	return eo, nil
 }
 
+// FindByEntityAndType returns the obligation linking an entity and an
+// obligation type — the source of the payment rule at workflow start
+// (ADR-0023 §5; the task-instances ObligationResolver port). RLS-scoped, so a
+// foreign pair is simply nil. An active obligation wins over an inactive one;
+// among equals the oldest (first registered) is the match.
+func (r *EntityObligationRepo) FindByEntityAndType(
+	ctx context.Context, entityID, obligationTypeID string,
+) (*domain.EntityObligation, error) {
+	var out []domain.EntityObligation
+	err := r.DB.SelectContext(ctx, &out, findByEntityAndTypeSQL, entityID, obligationTypeID)
+	if err != nil {
+		return nil, err
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return &out[0], nil
+}
+
 func (r *EntityObligationRepo) Update(
 	ctx context.Context, id domain.EntityObligationID, input domain.UpdateEntityObligationInput,
 ) (*domain.EntityObligation, error) {

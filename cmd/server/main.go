@@ -10,6 +10,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	_ "time/tzdata" // embed the IANA zone database: the runtime image is bare alpine (ADR-0003)
 
 	"github.com/mohamadhallal/zentax-api/app"
 	"github.com/mohamadhallal/zentax-api/bootstrap"

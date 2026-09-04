@@ -26,10 +26,38 @@ green on both the main module and `acceptance/`.
   live-Postgres run — see below).
 - **Legal dates (ADR-0002):** `shared/dateonly.Date` — a timezone-agnostic `YYYY-MM-DD`
   type (sql Scanner/Valuer for pg `date`, JSON). Used for all legal-date columns.
-- **Deadline engine:** `shared/deadline` — a Go port of the frontend's tested
-  `fiscal-calendar.ts` + `deadline-utils.ts` (period-end per periodicity, offset with
-  month-end clamping, weekend adjustment). **Standard calendars only; fails closed on
-  non-standard patterns** rather than emit a wrong deadline.
+- **Deadline engine (ADR-0023, 2026-09-05 — every pattern):** `shared/deadline` — pure civil-date
+  arithmetic over `dateonly.Date`, the single authority for periods and deadlines (the generator
+  and `GET /entities/{id}/periods` build the same `Calendar`). `NewCalendar(pattern,
+  financialYearEnd MM-DD, weekEndDay, yearEndRule, customPeriods, fiscalYear)` — the fiscal year
+  is the calendar year it ENDS in — yields `Periods(periodicity)` / `Period(code, periodicity)` /
+  `PeriodEnd` as `{Code, Label, Start, End}`. Rules: **standard** = calendar months from the
+  fiscal start month (annual = the FY-end month's month end, the v1 simplification the ADR
+  records; weekly = seven-day weeks from the FY start, W52 absorbs the remainder and ends on the
+  FY end). **445 / 454 / 544 / 13-period / weekly** = week-based years anchored on
+  `financialYearEnd`: the year end is the `fiscalWeekEndDay` on/before the anchor (`last`) or
+  the one closest to it (`nearest`, a three-day gap resolves backwards), the year runs from the
+  day after the previous year end, and it must span 364 (52 weeks) or 371 (53 weeks) days —
+  anything else is an error; months are `[4,4,5]` / `[4,5,4]` / `[5,4,4]` × 4, `[4]` × 13
+  (`P1..P13`) or `[4,4,5]` × 4 for the weekly pattern, quarters 13 weeks, halves 26, and the
+  53rd week goes to the LAST period (M12 / P13 / Q4 / H2 / Y1 / W53). **custom** = the entity's
+  ordered `customPeriods` are the only codes (monthly / quarterly / bi-annual return the same
+  list), each `MM-DD` placed by the standard year rule (a start after its end straddles the year
+  boundary and moves back a year), annual = Y1 on the FY end, weekly refused. Codes are stable
+  across patterns (`M1..M12` / `P1..P13` / custom, `Q1..Q4`, `H1..H2`, `Y1`, `CY1`,
+  `W1..W52/53`); labels are short and deterministic (`M12 (24 Dec 2023 – 3 Feb 2024)`, custom
+  periods carry their name). Also `ApplyMonthDayOffset` (months clamped, then days) and
+  `FirstFixedDateOnOrAfter` for the payment rules; `ApplyOffset` / `ApplyWeekendAdjustment` /
+  `FiscalYearStartMonth` / `PeriodEndDate` unchanged. `IsSupportedPattern` is true for every
+  pattern — **fail closed moved into the engine** (unknown periodicity, custom without periods,
+  a code outside the pattern, an impossible week year → error → 400). Unit tests: hand-verified
+  tables for NRF fiscal 2023 (Saturday nearest 31 Jan → 29 Jan 2023 – 3 Feb 2024, 53 weeks, all
+  12 months / 4 quarters / W53), the following 52-week year, `last` vs `nearest` on a Sunday
+  anchor (same year end, 53 vs 52 weeks), the nearest boundary (−3 wins, −4 loses), all seven
+  week-end days, 445 / 454 / 544 boundaries on one year, 13-period with the 53rd week in P13,
+  the weekly pattern, standard weekly remainder (common + leap year, April start), the UK
+  April-start year, custom periods (plain, year-straddling, April start), and every fail-closed
+  case.
 - **Object storage seam (ADR-0009 adapter #1 / ADR-0022, 2026-09-04):** `platform/storage` —
   `Storage{Put, Get (ErrNotFound), Delete (idempotent)}` over opaque keys validated by one grammar
   (`[A-Za-z0-9/_.-]`, no leading `/`, no `.`/`..` segment); no cloud-SDK type leaves an adapter.
@@ -50,7 +78,24 @@ green on both the main module and `acceptance/`.
   sidecar fallback; config defaults, overrides, empty-env, fail-closed.
 
 ### Domain modules (all tenant-scoped, hexagonal, full CRUD + acceptance tests)
-1. **entities** — tax-paying orgs (hierarchical, fiscal config).
+1. **entities** — tax-paying orgs (hierarchical, fiscal config). **Fiscal calendars (2026-09-05,
+   ADR-0023):** migration `20260905000019_fiscal_calendar` adds `fiscal_week_end_day` (CHECKed
+   monday…sunday, default `saturday`), `fiscal_year_end_rule` (CHECKed `last` | `nearest`, default
+   `nearest`) and `custom_periods` (JSONB, NULL for every non-custom entity) — the API fields
+   `fiscalWeekEndDay`, `fiscalYearEndRule`, `customPeriods [{code 1..16 unique within the entity,
+   name 1..100, startDate MM-DD, endDate MM-DD}]` (always an array in the view). Cross-field rules
+   in `domain.ValidateFiscalConfig` (create + update, 400 before any write): strict `MM-DD` for
+   `financialYearEnd` and every period date (`04-31` refused, `02-29` accepted and clamped when
+   placed), unique codes, and `custom` requires ≥ 1 period (other patterns may keep a list).
+   `domain.CalendarFor(entity, fiscalYear)` is THE way the generator and the periods endpoint obtain
+   the engine's `Calendar`. **`GET /entities/{id}/periods?periodicity=&financialYear=`**
+   (`entity:read`, swagger-visible) → `[{code, label, startDate, endDate}]` (date-only strings)
+   from that calendar — the single source of period options for the UI; 404 for a foreign /
+   unknown entity, 400 with the engine's message for a combination it cannot compute (weekly under
+   custom, a bad week year). Acceptance (`entities` +1, `fiscal` suite): defaults saturday /
+   nearest / `[]`, POST → GET → PUT round trip of the three fields, every validation 400 (nothing
+   created), the periods endpoint for standard / UK April-start / 445 / 13-period / custom entities,
+   viewer 200, anonymous 401, other tenant 404, query 400s.
 2. **obligation-types** — VAT/CIT/TP/WHT/Custom definitions; `code` unique per tenant (→409).
 3. **entity-obligations** — links entity ↔ obligation type; JSONB deadline rule.
    **Legacy builder + registration details (2026-09-03):** migration
@@ -93,6 +138,39 @@ green on both the main module and `acceptance/`.
    mandatory field present and non-null (400 listing the missing field *names*), and
    `submit-for-approval` requires the same **without** requiring `final`. No template (or a template
    that vanished) = tax data stored as sent, as before. Data templates themselves: **#9 below**.
+   **Every fiscal calendar + the payment deadline (2026-09-05, ADR-0023):** the generator builds the
+   entity's `Calendar` (`entitiesdomain.CalendarFor`) and resolves each selected code through it —
+   445 / 454 / 544 / 13-period / weekly / custom now generate; a code outside the pattern (an `M1`
+   on a 13-period entity, an unlisted custom code, `M13`) is a 400 naming it, before anything is
+   created — the old "pattern not supported" refusal is gone. **`paymentDeadline`** (column
+   `task_instances.payment_deadline DATE`, NULL only on rows generated before the migration →
+   `null` in the view) is derived per instance from the entity obligation linking the workflow's
+   entity and obligation type, read through a nil-safe `ObligationResolver` port
+   (`FindByEntityAndType`, implemented in the entity-obligations pg repo, RLS-scoped, active first
+   then oldest): `paymentOffset` → period end + months (month-end clamped) + days, then weekend
+   adjustment (the rule's own, else the workflow rule's); else `paymentFixedDates` → the first
+   `MM-DD` on/after the period end (its year, then the next), no adjustment; else, or no obligation
+   → equal to the filing deadline. Task templates' `dueDateReference` gains **`payment_deadline`**
+   (a `payment`-type task created without a reference defaults to it), and start's
+   `taskOverrides` gain `paymentDeadline` (a period-end override recomputes filing + payment +
+   due; a payment override replaces the derived value and moves a task referencing it). Emitted
+   on every instance view (list, get, preview rows). `weekly` joins the workflow periodicity
+   vocabulary. Acceptance (`acceptance/modules/fiscal`, 8 tests): 445 monthly FY2024 → 12
+   instances matching the engine table + the same rows from the periods endpoint (+ W53, quarters);
+   13-period quarterly (Q4 = 14 weeks, P1..P13, `M1` → 400); custom trimesters (3 instances, same
+   list for three periodicities, weekly 400, unlisted code 400); weekly under standard (52 rows,
+   W52 ends 31 Dec); payment offset 1 month 10 days next-business-day → 12 May 2025 on M3, the
+   payment task due 3 days before it, preview agrees, override replaces, malformed override 400;
+   fixed payment dates incl. the next-year wrap and no weekend adjustment; no obligation → payment
+   = filing on a UK April-start year + a legacy NULL row renders `null`. Unit tests cover the same
+   rules with mocks (445 through the generator, 13-period refusing M codes, all three payment
+   branches, the workflow-adjustment fallback, both overrides, custom, fail-closed).
+   **Review hardening (2026-09-05, adversarial review of the increment):** custom periods must
+   **tile the year** — every period after the first starts the day after its predecessor ends,
+   which pins its calendar year (a trailing period running into January lands in the next year)
+   and makes a gap or an out-of-order table a 400 naming the period; `selectedPeriods` accept the
+   16-character custom codes the entity may define (was 10); a cleared override date (`""`) means
+   "no override" instead of a 400; `/reports/task-instances` rows carry `paymentDeadline` too.
 
 **Read models (2026-09-03, hand-written SQL over RLS-scoped tables, no writes, no migrations):**
 7. **reports** (`modules/reports`) — `GET /reports/task-instances` (`task:read`, paginated, default
@@ -114,7 +192,7 @@ green on both the main module and `acceptance/`.
    `GET /reports/compliance-heatmap` (`viewMode=period|tax-type`): one `GROUP BY` with `FILTER`
    aggregates → rows / cols / cells (green | amber | red) / summary. `GET /reports/compliance-status`
    (`status=on_time|late|missed|not_due`, `limit` / `offset`): one instance per row classified in
-   SQL against `filing_deadline`, `CURRENT_DATE` and `completed_at`'s UTC date — the same expression
+   SQL against `filing_deadline`, **the tenant's "today"** and `completed_at`'s UTC date — the same expression
    the heatmap uses for overdue / completed-late (one Go const) — with `penaltyInterest` from a
    fixed set of `tax_data` keys, plus an exact `summary` + `totalCount` over the status-filtered
    set. `GET /reports/tax-financial` (`groupBy=entity|country|taxType|period|obligation`, `limit` /
@@ -255,7 +333,7 @@ green on both the main module and `acceptance/`.
 Migrations (sqitch): `tenants`, `entities`, `obligation_types`, `entity_obligations`,
 `workflows`, `workflow_tasks`, `task_instances`, `task_instance_approvals`, `actor_columns`,
 `audit_log`, `service_accounts`, `entity_obligation_details`, `reporting_indexes`, `invite_tokens`,
-`documents`, `data_templates` (+ boilerplate `appschema`,
+`documents`, `data_templates`, `fiscal_calendar`, `tenant_timezone` (+ boilerplate `appschema`,
 `internal_api_keys`, `nexus_accounts_api_keys`).
 
 **Auth / identity (Increments A + B):** first-party email/password + server-side sessions + TOTP MFA
@@ -372,6 +450,37 @@ Commits: `4cdcd4e` scaffold · `2851179` tenancy+entities · `d074780` obligatio
   member:manage): `POST/GET /service-accounts`, `POST /service-accounts/{id}/tokens` (cleartext shown
   once), `POST /tokens/{id}/revoke`. Verified live incl. attribution, revocation, expiry, cross-tenant 404s.
   **Remaining:** OAuth 2.1 client credentials (MCP-aligned, Phase 2 with WorkOS); per-principal rate limits.
+- **Tenant timezone (ADR-0003, 2026-09-05) — DONE.** Migration `20260905000020_tenant_timezone` adds
+  `tenants.timezone VARCHAR(64) NOT NULL DEFAULT 'UTC'` (`CHECK (timezone <> '')`; the registry stays
+  non-partitioned, ADR-0020 exception). Instants stay UTC at rest; the zone is the account's display /
+  scheduling reference (ADR-0003 §2) and, since ADR-0023 §6, what "today" means server-side. **Routes**
+  (`modules/identity`, `Tenant:true`, no id in the path — always the session's own tenant, pinned from
+  `app.GetTenantID(ctx)` because `tenants` is not RLS'd): `GET /tenant` (`member:read`, every role) →
+  `{id, slug, name, timezone, createdAt, updatedAt}`; `PUT /tenant` (`member:manage`, tenant_admin only)
+  body `{name 1..200, timezone}` — the zone must load with Go's `time.LoadLocation` (400 `unknown IANA
+  timezone: <value>`; `Local`, blank and padded names refused; `domain.ValidateTimezone` is the one rule)
+  **and** is probed through Postgres `AT TIME ZONE` on the request tx, so a name only one tz database
+  knows is a 400, never a broken report later. `GET /auth/me` now carries `tenant: {id, slug, name,
+  timezone}` next to every existing key. Audit `tenant.updated {timezone}` (never the name).
+  `cmd/seed-admin --timezone <IANA>` (default `UTC`, same validation) writes it on the tenant INSERT and
+  prints it in the summary. **Reports (ADR-0023 §6):** the compliance classification's "today" is
+  `(NOW() AT TIME ZONE <tenants.timezone of app.tenant_id>)::date` — one Go const `tenantToday`, no
+  caller data, replacing `CURRENT_DATE` — so overdue / missed follow the tenant's calendar day, and
+  (review hardening, same day) the on-time / late test compares `completed_at` on the **same**
+  tenant day (`tenantCompletedDate`): one definition of "day" per tenant. Also from the review:
+  only canonical `Area/Location` names (or `UTC`) are accepted — bare abbreviations such as `CET`
+  / `EST` are fixed offsets to Postgres but DST zones to browsers and Go, so the two sides' "today"
+  would drift — and both binaries embed the IANA database (`time/tzdata`), because the runtime image
+  is bare alpine without `/usr/share/zoneinfo` (`Europe/London` was refused in Docker before).
+  Acceptance: `acceptance/modules/tenant` (me
+  default UTC → viewer GET 200 / every non-admin PUT 403 → admin PUT Europe/London → me + GET reflect
+  → Mars/Olympus / Local / blank / unknown-field 400s → other tenant untouched → audit entry, PII-free;
+  seeded zone on first request) and `reports.TestComplianceStatusUsesTenantDay` (deadline = today's UTC
+  date vs yesterday's under UTC / Pacific/Kiritimati (UTC+14) / Pacific/Pago_Pago (UTC−11), expected
+  from the current UTC hour with Go's tz database — a flip versus UTC is asserted at any hour). Unit
+  tests: zone validation, self-tenant pinning, audit envelope, nil audit no-op; the SQL const carries no
+  `CURRENT_DATE`. **Remaining:** per-user display override (ADR-0003 §4, deferred), digests / reminders
+  taking the zone as input (no notification engine yet).
 - Consequence: the API is authenticated (humans **and machines**) + tenant-isolated + **role- and
   scope-authorized on writes**, with the **preparer→reviewer approval flow + SoD + immutable-approval
   lock** in place and approval human-only. Reads remain tenant-wide (list-scope narrowing is a later
@@ -407,9 +516,16 @@ Commits: `4cdcd4e` scaffold · `2851179` tenancy+entities · `d074780` obligatio
   per-workflow stats under `/reports` are done, 2026-09-03; the compliance aggregates are not).
 
 ### 🟠 Deadline engine
-- **Non-standard fiscal patterns** (445 / 454 / 544 / 13-period / weekly / custom) —
-  currently fail-closed. Port the rest of the frontend fiscal-calendar, reusing its ~129 test vectors.
-- **Payment / additional deadlines** beyond the filing deadline are not yet computed during generation.
+- ~~**Non-standard fiscal patterns** (445 / 454 / 544 / 13-period / weekly / custom) —
+  currently fail-closed.~~ **Done (2026-09-05, ADR-0023)** — every pattern is computed by
+  `shared/deadline` with hand-verified vectors (see Platform / foundation); the frontend's period
+  math is superseded by `GET /entities/{id}/periods`.
+- ~~**Payment / additional deadlines** beyond the filing deadline are not yet computed during
+  generation.~~ **Payment deadline done (2026-09-05)** — `task_instances.payment_deadline` from
+  the entity obligation's `paymentOffset` / `paymentFixedDates` / "same as filing".
+  **Remaining:** `additionalDeadlines` (advance payments etc.) are recorded on the rule but not
+  yet materialized; public holidays (jurisdiction-keyed, ADR-0017 data) on top of the weekend
+  adjustment; `/reports/task-instances` rows do not yet carry `paymentDeadline`.
 
 ### 🟡 Platform / infra (mostly Phase 2 per the ADRs)
 - ~~Object storage behind a `Storage` interface — S3 / filesystem·MinIO (ADR-0009). None wired.~~

@@ -26,6 +26,7 @@ func TaskInstanceRowToJSON(r *domain.TaskInstanceRow) map[string]any {
 		"dueDate":            r.DueDate,
 		"periodEndDate":      r.PeriodEndDate,
 		"filingDeadline":     r.FilingDeadline,
+		"paymentDeadline":    r.PaymentDeadline,
 		"approvalRequired":   r.ApprovalRequired,
 		"approvedBy":         r.ApprovedBy,
 		"approvedAt":         formatInstant(r.ApprovedAt),

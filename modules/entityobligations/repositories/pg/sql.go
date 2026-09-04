@@ -43,3 +43,12 @@ var sqlConfig = baserepo.SQLConfig{
 	Count:    `SELECT COUNT(*)::int AS total FROM entity_obligations`,
 	ListBase: `SELECT ` + entityObligationColumns + ` FROM entity_obligations`,
 }
+
+// findByEntityAndTypeSQL resolves the payment rule for a workflow's (entity,
+// obligation type) pair: active first, then the oldest registration.
+const findByEntityAndTypeSQL = `
+	SELECT ` + entityObligationColumns + `
+	FROM entity_obligations
+	WHERE entity_id = $1 AND obligation_type_id = $2
+	ORDER BY (status = 'active') DESC, created_at ASC
+	LIMIT 1`

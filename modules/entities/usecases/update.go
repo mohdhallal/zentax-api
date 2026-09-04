@@ -12,11 +12,18 @@ func (uc *UseCases) Update(ctx context.Context, id domain.EntityID, input domain
 	if err := uc.authorizer.EnsureEntity(ctx, id, authz.EntityWrite); err != nil {
 		return nil, err
 	}
-	if input.FiscalCalendarPattern == "" {
-		input.FiscalCalendarPattern = "standard"
-	}
+	applyFiscalDefaults(&input.FiscalCalendarPattern, &input.FiscalWeekEndDay, &input.FiscalYearEndRule)
 	if input.Status == "" {
 		input.Status = "active"
+	}
+	if msg := domain.ValidateFiscalConfig(domain.FiscalConfig{
+		FiscalCalendarPattern: input.FiscalCalendarPattern,
+		FinancialYearEnd:      input.FinancialYearEnd,
+		FiscalWeekEndDay:      input.FiscalWeekEndDay,
+		FiscalYearEndRule:     input.FiscalYearEndRule,
+		CustomPeriods:         input.CustomPeriods,
+	}); msg != "" {
+		return nil, apperrors.NewValidation(msg)
 	}
 
 	entity, err := uc.repo.Update(ctx, id, input)

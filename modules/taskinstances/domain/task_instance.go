@@ -10,7 +10,8 @@ type TaskInstanceID = string
 
 // TaskInstance is an actual per-period task generated from a workflow task
 // template when a workflow is started. DueDate / PeriodEndDate / FilingDeadline
-// are legal date-only values (ADR-0002). TenantID is RLS infra, absent here.
+// / PaymentDeadline are legal date-only values (ADR-0002). TenantID is RLS
+// infra, absent here.
 type TaskInstance struct {
 	ID               TaskInstanceID `json:"id"               db:"id"`
 	WorkflowID       string         `json:"workflowId"       db:"workflow_id"`
@@ -24,6 +25,7 @@ type TaskInstance struct {
 	DueDate          dateonly.Date  `json:"dueDate"          db:"due_date"`
 	PeriodEndDate    dateonly.Date  `json:"periodEndDate"    db:"period_end_date"`
 	FilingDeadline   dateonly.Date  `json:"filingDeadline"   db:"filing_deadline"`
+	PaymentDeadline  *dateonly.Date `json:"paymentDeadline"  db:"payment_deadline"` // nil on rows generated before ADR-0023
 	ApprovalRequired bool           `json:"approvalRequired" db:"approval_required"`
 	ApprovedBy       *string        `json:"approvedBy"       db:"approved_by"`
 	ApprovedAt       *time.Time     `json:"approvedAt"       db:"approved_at"`
@@ -53,6 +55,7 @@ type CreateTaskInstanceInput struct {
 	DueDate          dateonly.Date
 	PeriodEndDate    dateonly.Date
 	FilingDeadline   dateonly.Date
+	PaymentDeadline  dateonly.Date // always set by the generator (ADR-0023 §5)
 	ApprovalRequired bool
 	OrderIndex       int
 	DataTemplateID   *string

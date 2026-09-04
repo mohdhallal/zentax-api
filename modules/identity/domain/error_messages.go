@@ -29,4 +29,9 @@ const (
 	MsgScopeEntityNotInTenant = "scopeEntityId is not an entity of this tenant"
 	MsgGrantNotFound          = "grant not found"
 	MsgInviteInvalid          = "invite is invalid or has expired"
+
+	// Tenant settings (ADR-0003). The zone name is echoed so the admin sees
+	// what was refused — it is caller input, not PII.
+	MsgUnknownTimezone = "unknown IANA timezone: "
+	MsgTenantNotFound  = "tenant not found"
 )

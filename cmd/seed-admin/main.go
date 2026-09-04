@@ -3,7 +3,8 @@
 //
 //	APP_ENV=development go run ./cmd/seed-admin \
 //	  --tenant-slug acme --tenant-name "Acme GmbH" \
-//	  --email admin@acme.com --password 's3cret' --name "Group Head of Tax"
+//	  --email admin@acme.com --password 's3cret' --name "Group Head of Tax" \
+//	  --timezone Europe/London
 package main
 
 import (
@@ -12,12 +13,15 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
+	_ "time/tzdata" // embed the IANA zone database: the runtime image is bare alpine (ADR-0003)
 
 	"github.com/mohamadhallal/zentax-api/app"
 	"github.com/mohamadhallal/zentax-api/config"
 	"github.com/mohamadhallal/zentax-api/logger"
 	datatemplatespg "github.com/mohamadhallal/zentax-api/modules/datatemplates/repositories/pg"
 	datatemplatesusecases "github.com/mohamadhallal/zentax-api/modules/datatemplates/usecases"
+	identitydomain "github.com/mohamadhallal/zentax-api/modules/identity/domain"
 	"github.com/mohamadhallal/zentax-api/platform/crypto"
 	"github.com/mohamadhallal/zentax-api/platform/database"
 )
@@ -28,11 +32,16 @@ func main() {
 	email := flag.String("email", "", "admin email")
 	password := flag.String("password", "", "admin password")
 	name := flag.String("name", "Admin", "admin display name")
+	timezone := flag.String("timezone", identitydomain.DefaultTimezone, "tenant IANA timezone (ADR-0003), e.g. Europe/London")
 	flag.Parse()
 
 	if *tenantSlug == "" || *tenantName == "" || *email == "" || *password == "" {
-		fmt.Fprintln(os.Stderr, "usage: seed-admin --tenant-slug S --tenant-name N --email E --password P [--name Name]")
+		fmt.Fprintln(os.Stderr, "usage: seed-admin --tenant-slug S --tenant-name N --email E --password P [--name Name] [--timezone Zone]")
 		os.Exit(1)
+	}
+	// The same rule PUT /tenant applies: a loadable IANA zone, never "Local".
+	if err := identitydomain.ValidateTimezone(*timezone, time.LoadLocation); err != nil {
+		fail("validate --timezone", err)
 	}
 
 	logger.InitBasic()
@@ -57,8 +66,8 @@ func main() {
 	// tenants + users are not RLS-scoped.
 	var tenantID string
 	if err := db.QueryRowxContext(ctx,
-		`INSERT INTO tenants (slug, name) VALUES ($1, $2) RETURNING id`,
-		*tenantSlug, *tenantName).Scan(&tenantID); err != nil {
+		`INSERT INTO tenants (slug, name, timezone) VALUES ($1, $2, $3) RETURNING id`,
+		*tenantSlug, *tenantName, *timezone).Scan(&tenantID); err != nil {
 		fail("create tenant", err)
 	}
 
@@ -93,8 +102,8 @@ func main() {
 		fail("seed predefined data templates", err)
 	}
 
-	fmt.Printf("Seeded tenant %q\n  tenant_id: %s\n  user_id:   %s\n  admin:     %s\n  templates: %d predefined\n",
-		*tenantName, tenantID, userID, *email, seeded)
+	fmt.Printf("Seeded tenant %q\n  tenant_id: %s\n  timezone:  %s\n  user_id:   %s\n  admin:     %s\n  templates: %d predefined\n",
+		*tenantName, tenantID, *timezone, userID, *email, seeded)
 }
 
 func fail(msg string, err error) {

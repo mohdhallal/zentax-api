@@ -32,6 +32,9 @@ func (r *EntityRepo) Create(ctx context.Context, input domain.CreateEntityInput)
 		input.TaxResidency,
 		input.FiscalCalendarPattern,
 		input.FinancialYearEnd,
+		input.FiscalWeekEndDay,
+		input.FiscalYearEndRule,
+		input.CustomPeriods,
 	)
 }
 
@@ -48,5 +51,8 @@ func (r *EntityRepo) Update(
 		input.FiscalCalendarPattern,
 		input.FinancialYearEnd,
 		input.Status,
+		input.FiscalWeekEndDay,
+		input.FiscalYearEndRule,
+		input.CustomPeriods,
 	)
 }

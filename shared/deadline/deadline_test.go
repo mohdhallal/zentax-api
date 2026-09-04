@@ -103,8 +103,8 @@ func TestApplyWeekendAdjustment(t *testing.T) {
 
 func TestIsSupportedPattern(t *testing.T) {
 	t.Parallel()
-	assert.True(t, IsSupportedPattern(""))
-	assert.True(t, IsSupportedPattern("standard"))
-	assert.False(t, IsSupportedPattern("445"))
-	assert.False(t, IsSupportedPattern("13-period"))
+	for _, p := range []string{"", "standard", "445", "454", "544", "13-period", "weekly", "custom"} {
+		assert.True(t, IsSupportedPattern(p), p)
+	}
+	assert.False(t, IsSupportedPattern("lunar"))
 }

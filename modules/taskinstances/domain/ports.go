@@ -4,6 +4,7 @@ import (
 	"context"
 
 	datatemplatesdomain "github.com/mohamadhallal/zentax-api/modules/datatemplates/domain"
+	entityobligationsdomain "github.com/mohamadhallal/zentax-api/modules/entityobligations/domain"
 	sharedtypes "github.com/mohamadhallal/zentax-api/shared/types"
 )
 
@@ -30,6 +31,15 @@ type TaskInstanceRepository interface {
 	SubmitForApproval(ctx context.Context, id TaskInstanceID, submittedBy string) (*TaskInstance, error)
 	Approve(ctx context.Context, id TaskInstanceID, approvedBy string) (*TaskInstance, error)
 	Reject(ctx context.Context, id TaskInstanceID, reason *string) (*TaskInstance, error)
+}
+
+// ObligationResolver finds the entity obligation that links a workflow's
+// entity and obligation type — the source of the payment rule the generator
+// derives paymentDeadline from (ADR-0023 §5). RLS-scoped through the request
+// context; nil when the pair has no obligation (payment = filing). Implemented
+// by the entity-obligations module; optional on the generator (nil = no lookup).
+type ObligationResolver interface {
+	FindByEntityAndType(ctx context.Context, entityID, obligationTypeID string) (*entityobligationsdomain.EntityObligation, error)
 }
 
 // AssigneeChecker answers whether a user id may be assigned a task in the
