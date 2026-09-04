@@ -31,12 +31,26 @@ func (r *WorkflowTaskRepo) Create(ctx context.Context, input domain.CreateWorkfl
 		input.DueDateOffsetDirection, input.OrderIndex, input.DataTemplateID, input.RequiredDocuments,
 	)
 	if err != nil {
-		if database.IsForeignKeyViolation(err) {
-			return nil, apperrors.NewValidation(domain.ErrWorkflowNotFound())
-		}
-		return nil, err
+		return nil, mapFKViolation(err)
 	}
 	return wt, nil
+}
+
+// dataTemplateFK is the composite (tenant_id, data_template_id) constraint
+// (migration 20260904000018) — the only other FK a template row carries.
+const dataTemplateFK = "workflow_tasks_data_template_fk"
+
+// mapFKViolation turns a composite-FK failure into the matching validation
+// error: the workflow or the data template is not in this tenant (FK checks
+// bypass RLS; the composite key is what refuses the cross-tenant reference).
+func mapFKViolation(err error) error {
+	if !database.IsForeignKeyViolation(err) {
+		return err
+	}
+	if database.GetConstraintName(err) == dataTemplateFK {
+		return apperrors.NewValidation(domain.ErrDataTemplateNotFound())
+	}
+	return apperrors.NewValidation(domain.ErrWorkflowNotFound())
 }
 
 func (r *WorkflowTaskRepo) ListByWorkflow(ctx context.Context, workflowID string) ([]domain.WorkflowTask, error) {
@@ -49,11 +63,15 @@ func (r *WorkflowTaskRepo) ListByWorkflow(ctx context.Context, workflowID string
 }
 
 func (r *WorkflowTaskRepo) Update(ctx context.Context, id domain.WorkflowTaskID, input domain.UpdateWorkflowTaskInput) (*domain.WorkflowTask, error) {
-	// workflow_id is fixed at creation, so an update cannot introduce a new FK
-	// violation.
-	return r.QueryRow(ctx, r.SQL.Update,
+	// workflow_id is fixed at creation; data_template_id is the one FK an
+	// update can newly violate.
+	wt, err := r.QueryRow(ctx, r.SQL.Update,
 		id, input.Name, input.Description, input.TaskType, input.RoleLabel,
 		input.ApprovalRequired, input.DueDateReference, input.DueDateOffsetValue, input.DueDateOffsetUnit,
 		input.DueDateOffsetDirection, input.OrderIndex, input.DataTemplateID, input.RequiredDocuments,
 	)
+	if err != nil {
+		return nil, mapFKViolation(err)
+	}
+	return wt, nil
 }

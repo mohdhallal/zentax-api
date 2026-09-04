@@ -39,6 +39,16 @@ const (
 	TaskSubmit  Capability = "task:submit"  // submit a task instance for approval
 	TaskApprove Capability = "task:approve" // approve / reject a submitted task instance
 
+	// Documents hang off a workflow (optionally a task instance): reading is a
+	// plain read; uploading / versioning / deleting is task work (preparers
+	// and up, like task:write). Data templates are compliance-program setup
+	// (managers and admins define them; every role reads them to render tax
+	// data).
+	DocumentRead      Capability = "document:read"
+	DocumentWrite     Capability = "document:write"
+	DataTemplateRead  Capability = "data_template:read"
+	DataTemplateWrite Capability = "data_template:write"
+
 	// MemberRead lists the tenant directory (names, emails, roles). Held by
 	// every role: any member must be able to see who can be assigned a task.
 	MemberRead   Capability = "member:read"
@@ -67,13 +77,15 @@ const (
 var reads = []Capability{
 	EntityRead, ObligationTypeRead, EntityObligationRead,
 	WorkflowRead, WorkflowTaskRead, TaskRead, MemberRead,
+	DocumentRead, DataTemplateRead,
 }
 
 // setupWrites: the "administer the compliance program" writes — defining
-// entities, obligation types, obligations, workflows and their task templates.
+// entities, obligation types, obligations, workflows, their task templates
+// and the data templates tasks collect figures with.
 var setupWrites = []Capability{
 	EntityWrite, ObligationTypeWrite, EntityObligationWrite,
-	WorkflowWrite, WorkflowTaskWrite,
+	WorkflowWrite, WorkflowTaskWrite, DataTemplateWrite,
 }
 
 // roleCapabilities is the role → capability matrix (ADR-0012). It mirrors the
@@ -99,7 +111,7 @@ func buildMatrix() map[Role]map[Capability]bool {
 	// preparer — reads + works task instances (fills tax data, submits for approval).
 	// Deliberately NOT task:approve (separation of duties) and NOT setup writes.
 	add(RolePreparer, reads...)
-	add(RolePreparer, TaskWrite, TaskSubmit)
+	add(RolePreparer, TaskWrite, TaskSubmit, DocumentWrite)
 
 	// reviewer — reads + approves/rejects submitted task instances (the approver
 	// side of SoD). No setup writes, no preparing.
@@ -110,12 +122,12 @@ func buildMatrix() map[Role]map[Capability]bool {
 	// whole task lifecycle including approval. No member management.
 	add(RoleManager, reads...)
 	add(RoleManager, setupWrites...)
-	add(RoleManager, TaskWrite, TaskSubmit, TaskApprove, AuditRead)
+	add(RoleManager, TaskWrite, TaskSubmit, TaskApprove, DocumentWrite, AuditRead)
 
 	// tenant_admin — everything the manager has, plus member management.
 	add(RoleTenantAdmin, reads...)
 	add(RoleTenantAdmin, setupWrites...)
-	add(RoleTenantAdmin, TaskWrite, TaskSubmit, TaskApprove, AuditRead, MemberManage)
+	add(RoleTenantAdmin, TaskWrite, TaskSubmit, TaskApprove, DocumentWrite, AuditRead, MemberManage)
 
 	return m
 }

@@ -39,7 +39,7 @@ type UseCases struct {
 	members domain.MemberRepository
 	invites domain.InviteTokenRepository
 	tx      database.ExecerPgTx // opens a tenant-bound tx for the public accept-invite step
-	audit   *audit.Recorder      // nil = no-op
+	audit   *audit.Recorder     // nil = no-op
 }
 
 // WithMembers injects the member-administration repositories.

@@ -23,6 +23,11 @@ type RouteDefinition struct {
 	// RequireCapability, which runs inside the tenant transaction. Only meaningful
 	// with Tenant: true (it needs the session + tenant + tx).
 	Capability authz.Capability
+	// Stream marks a handler that writes its own (large, binary) response and
+	// returns (nil, nil): the transaction middleware then passes the real
+	// ResponseWriter through instead of buffering the body until commit. Only
+	// for read-only routes — the body is on the wire before the tx ends.
+	Stream bool
 }
 
 type SchemaDefinition struct {

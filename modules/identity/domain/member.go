@@ -38,13 +38,13 @@ func (g *MemberGrant) IsTenantWide() bool { return g.ScopeEntityID == nil }
 
 // Member is the directory view of a user: no auth material, grants embedded.
 type Member struct {
-	ID         string    `db:"id"`
-	TenantID   string    `db:"tenant_id"`
-	Email      string    `db:"email"`
-	Name       string    `db:"name"`
-	Kind       string    `db:"kind"`
-	Status     string    `db:"status"`
-	MFAEnabled bool      `db:"totp_enabled"`
+	ID         string `db:"id"`
+	TenantID   string `db:"tenant_id"`
+	Email      string `db:"email"`
+	Name       string `db:"name"`
+	Kind       string `db:"kind"`
+	Status     string `db:"status"`
+	MFAEnabled bool   `db:"totp_enabled"`
 	// HasPassword: a human that never accepted an invite has none (never
 	// exposed — it only decides whether re-enabling yields active or invited).
 	HasPassword bool      `db:"has_password"`

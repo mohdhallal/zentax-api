@@ -49,6 +49,22 @@ func TestRoleMatrix_SeparationOfDuties(t *testing.T) {
 		{RolePreparer, MemberManage, false},
 		{RoleReviewer, MemberManage, false},
 
+		// documents: every role reads; preparers and up upload/version/delete
+		// (task work, like task:write) — reviewers and viewers never do.
+		{RoleViewer, DocumentRead, true},
+		{RoleViewer, DocumentWrite, false},
+		{RolePreparer, DocumentWrite, true},
+		{RoleReviewer, DocumentWrite, false},
+		{RoleManager, DocumentWrite, true},
+		{RoleTenantAdmin, DocumentWrite, true},
+
+		// data templates are program setup: every role reads, managers/admins write.
+		{RoleViewer, DataTemplateRead, true},
+		{RolePreparer, DataTemplateWrite, false},
+		{RoleReviewer, DataTemplateWrite, false},
+		{RoleManager, DataTemplateWrite, true},
+		{RoleTenantAdmin, DataTemplateWrite, true},
+
 		// audit:read is an oversight capability: reviewer/manager/admin only.
 		{RoleViewer, AuditRead, false},
 		{RolePreparer, AuditRead, false},

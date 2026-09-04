@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http/httptest"
 	"os"
+	"strings"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/jmoiron/sqlx"
@@ -29,6 +30,9 @@ type Suite struct {
 	extApp   *bootstrap.App
 	intApp   *bootstrap.App
 	sessions map[string]string // tenantID -> session token, memoized per test
+	// storageRoot is the per-test filesystem blob store (temp dir), removed
+	// in TearDownTest.
+	storageRoot string
 }
 
 func (s *Suite) SetupSuite() {
@@ -54,6 +58,7 @@ func (s *Suite) TearDownSuite() {
 func (s *Suite) SetupTest() {
 	cfg := acceptconfig.DefaultConfig()
 	cfg.Database.URL = s.dbURL
+	s.storageRoot = cfg.Storage.FS.Root
 
 	var err error
 	s.extApp, err = bootstrap.New(cfg, types.ModeExternal)
@@ -82,6 +87,10 @@ func (s *Suite) TearDownTest() {
 		s.Require().NoError(s.intApp.Close())
 	}
 	s.TruncateTables()
+	if s.storageRoot != "" && strings.HasPrefix(s.storageRoot, os.TempDir()) {
+		_ = os.RemoveAll(s.storageRoot)
+	}
+	s.storageRoot = ""
 	s.External = nil
 	s.Internal = nil
 	s.extApp = nil

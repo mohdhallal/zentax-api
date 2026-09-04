@@ -3,8 +3,18 @@ package domain
 import (
 	"context"
 
+	datatemplatesdomain "github.com/mohamadhallal/zentax-api/modules/datatemplates/domain"
 	sharedtypes "github.com/mohamadhallal/zentax-api/shared/types"
 )
+
+// TemplateResolver loads the data template a task instance's tax data is
+// validated against (ADR-0001: the server, not the form, is the authority on
+// what a valid record is). Tenant-scoped through the request context: another
+// tenant's template id resolves to nil, like a missing one. Implemented by
+// the data-templates module; optional on the use cases (nil = no validation).
+type TemplateResolver interface {
+	ResolveTemplate(ctx context.Context, templateID string) (*datatemplatesdomain.DataTemplate, error)
+}
 
 type TaskInstanceRepository interface {
 	Create(ctx context.Context, input CreateTaskInstanceInput) (*TaskInstance, error)

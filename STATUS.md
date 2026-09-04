@@ -30,6 +30,24 @@ green on both the main module and `acceptance/`.
   `fiscal-calendar.ts` + `deadline-utils.ts` (period-end per periodicity, offset with
   month-end clamping, weekend adjustment). **Standard calendars only; fails closed on
   non-standard patterns** rather than emit a wrong deadline.
+- **Object storage seam (ADR-0009 adapter #1 / ADR-0022, 2026-09-04):** `platform/storage` —
+  `Storage{Put, Get (ErrNotFound), Delete (idempotent)}` over opaque keys validated by one grammar
+  (`[A-Za-z0-9/_.-]`, no leading `/`, no `.`/`..` segment); no cloud-SDK type leaves an adapter.
+  Adapters: **`fs`** (root dir; atomic temp-file + rename, `mkdir -p` per key, 0600 files, content
+  type in a `<key>.meta` JSON sidecar — no xattrs, so it survives every volume driver) and **`s3`**
+  (`aws-sdk-go-v2`; bucket + region, optional endpoint + path-style for MinIO; credentials from the
+  SDK default chain; integration test skipped unless `TEST_S3_ENDPOINT` / `TEST_S3_BUCKET` /
+  `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` are set, `TEST_S3_CREATE_BUCKET=1` creates the
+  bucket). Config `storage {driver fs|s3, maxUploadBytes (25 MiB), fs.root, s3.{bucket, region,
+  endpoint, forcePathStyle}}` in `deployment/config_files/*.json`, env overrides `STORAGE_DRIVER`,
+  `STORAGE_FS_ROOT`, `STORAGE_MAX_UPLOAD_BYTES`, `STORAGE_S3_BUCKET`, `STORAGE_S3_REGION`,
+  `STORAGE_S3_ENDPOINT`, `STORAGE_S3_FORCE_PATH_STYLE` (empty values never override the file —
+  compose passes empty strings); validation fails closed (unknown driver, fs without root, s3
+  without bucket/region), an entirely omitted section defaults to fs `./var/documents`. Wired in
+  `bootstrap.NewStorage` → `NewContainer(db, WithStorage(store, max))`; the compose api container
+  runs `STORAGE_FS_ROOT=/var/lib/zentax/documents` on a volume. Unit tests: fs round trip / not
+  found / idempotent delete / atomic overwrite / short write / key validation incl. traversal /
+  sidecar fallback; config defaults, overrides, empty-env, fail-closed.
 
 ### Domain modules (all tenant-scoped, hexagonal, full CRUD + acceptance tests)
 1. **entities** — tax-paying orgs (hierarchical, fiscal config).
@@ -63,6 +81,18 @@ green on both the main module and `acceptance/`.
    `PUT /task-instances/{id}` accepts an optional date-only `dueDate` override
    (omit = keep) and stamps `completed_at` on `completed` / clears it on reopen;
    approval statuses are never settable through PUT (submit/approve/reject only).
+   **Tax-data authority (2026-09-04, ADR-0001):** an instance inherits `data_template_id` from its
+   workflow task at start (`PUT` may also attach one — `dataTemplateId`, omit = keep; another
+   tenant's id → 400, by the RLS-scoped resolver and again by the composite FK). With a template
+   attached, `taxData` is validated server-side through a nil-safe `TemplateResolver` port
+   (implemented in the data-templates module, like identity's `AssigneeChecker`): unknown key → 400
+   `tax data field "<key>" is not in the template`; numeric must be a JSON number (a numeric string is
+   refused), a whole number when `allowDecimals=false`, within `min`/`max`, ≤ `decimalPlaces`
+   decimals; date = `YYYY-MM-DD`; boolean = bool; text ≤ 10 000 chars; file = a reference string
+   ≤ 500 chars (not resolved); a `null` value clears the key. `taxDataStatus=final` requires every
+   mandatory field present and non-null (400 listing the missing field *names*), and
+   `submit-for-approval` requires the same **without** requiring `final`. No template (or a template
+   that vanished) = tax data stored as sent, as before. Data templates themselves: **#9 below**.
 
 **Read models (2026-09-03, hand-written SQL over RLS-scoped tables, no writes, no migrations):**
 7. **reports** (`modules/reports`) — `GET /reports/task-instances` (`task:read`, paginated, default
@@ -122,9 +152,110 @@ green on both the main module and `acceptance/`.
    Acceptance: full flow lists 6 events newest-first with `actorName` = the seeded user, workflow
    filter picks 4 (not the entity), type/id/action/date-window filters, paging totals, role gate, RLS.
 
+9. **data-templates** (`modules/datatemplates`, 2026-09-04) — reusable typed field sets (the
+   frontend's exact `DataField`: `id` 1..64 unique within the template, `name`, `fieldType`
+   text|numeric|date|boolean|file, `mandatory`, `description?`, `numericValidation?` {min, max
+   (min ≤ max), allowDecimals (default true), decimalPlaces 0..10, formatAsCurrency} — only on
+   numeric fields) stored as a JSONB array (order kept) in `data_templates` (migration
+   `20260904000018`: HASH(tenant_id) × 16, composite PK, `UNIQUE (tenant_id, name)`, CHECKed
+   `template_type` VAT|CIT|TP|WHT|Custom and `category` predefined|custom, actor columns). The same
+   migration turns `workflow_tasks.data_template_id` / `task_instances.data_template_id` into
+   **composite FKs** (`…_data_template_fk`, column-targeted `ON DELETE SET NULL`), closing the last
+   "plain UUID, no FK" gap. Capabilities `data_template:read` (every role) / `data_template:write`
+   (manager, tenant_admin). Routes (all tenant-level — a tenant-wide grant): `GET /data-templates`
+   (`templateType` / `category` filters, not paginated, name-sorted), `GET /{id}`, `POST` (always
+   `category=custom`; a `category` in the body is an unknown field → 400; duplicate name → 409),
+   `PUT /{id}` (replaces name / templateType / description / fields), `DELETE /{id}` (204; referenced
+   by any workflow task or task instance → 409 "template is in use"), and `POST
+   /data-templates/predefined` — idempotently inserts the missing **predefined** templates (VAT Return
+   / Corporate Income Tax / Withholding Tax, ported verbatim from the frontend fixtures with the
+   same field ids, matched by name + category) and returns the predefined list; `cmd/seed-admin` runs
+   the same use case after creating the tenant. Predefined rows are **immutable** (PUT / DELETE →
+   403). Cross-field rules live in `domain.ValidateFields` (one rule set for API + seeding). Audit:
+   `data_template.created {templateType, fields}` / `.updated` / `.deleted` /
+   `.predefined_seeded {inserted}` (resource = the tenant, only when something was inserted).
+   Acceptance (`acceptance/modules/datatemplates`, 3 tests): seed twice → same 3 ids, list/filters,
+   role gate; custom CRUD with every validation error, unknown-field `category`, 409 duplicate,
+   predefined 403s, audit trail; and the tax-data authority flow — template on a workflow task →
+   start → instance carries it → the whole PUT rule matrix + final/submit mandatory checks → in-use
+   409 → other tenant 404 / 400 (+ the FK asserted directly in SQL). Unit tests cover every
+   validation rule, seeding idempotency and the generator's template inheritance.
+   **Review hardening (2026-09-04):** (1) an **in-use** template (referenced by a workflow task or an
+   instance) keeps its existing field ids and types — `PUT` may rename, describe, flag mandatory
+   and add fields, but removing or retyping one → 409 "template is in use: existing fields cannot be
+   removed or change type…" (`domain.FieldsCompatible`), so recorded values are never orphaned or
+   invalidated by a template edit; (2) `PUT /task-instances/{id}` validates tax data only when it
+   **changes** (or a template is attached / `final` requested) — clients replay the stored record on
+   every status / assignee save — and a key the template no longer knows is carried through
+   untouched when the stored record already holds it (a new unknown key is still 400); an emptied
+   typed input (`""` for a date / number / boolean / file) clears the field like `null`; (3)
+   predefined seeding skips a name already taken by a **custom** template (names are unique per
+   tenant across categories) instead of failing the whole seed.
+
+10. **documents** (`modules/documents`, 2026-09-04, ADR-0022) — files attached to a workflow and
+   optionally one of its task instances, behind the **`platform/storage` seam** (below). Model
+   (migration `20260904000017_documents`, HASH(tenant_id) × 16, composite PKs / FKs, RLS forced):
+   `documents` (`category` compliance|project, `document_type` CHECKed against the frontend's
+   `workflowDocumentTypeValues` verbatim — `domain.DocumentTypes`, `label`, `notes`,
+   `current_version`, soft `deleted_at`, actor columns; `task_instance_id` composite FK with
+   column-targeted `ON DELETE SET NULL`) + `document_versions` (immutable rows: opaque
+   `storage_key` = `tenants/<tenant>/documents/<document>/<version>`, `file_name`, `file_size`,
+   `mime_type`, `sha256`, uploader; `UNIQUE (tenant_id, document_id, version)`). Capabilities
+   `document:read` (every role) / `document:write` (preparer, manager, tenant_admin), writes narrowed
+   to the workflow's entity subtree via `Authorizer.EnsureWorkflow`. **Transfer goes through the
+   API** (no presigned URLs): `POST /workflows/{id}/documents` (multipart `file` + `documentType`,
+   `label?`, `notes?`, `taskInstanceId?` — must belong to that workflow, else 400 — `category?`) →
+   201 `DocumentView`; `POST /documents/{id}/versions` (multipart `file`, `label?`) → `current_version
+   + 1` on the request tx (row-locked UPDATE, so concurrent uploads serialize); `GET
+   /workflows/{id}/documents`, `GET /task-instances/{id}/documents` (latest versions, newest first,
+   404 for a foreign id); `GET /documents` (paginated 100 / max 500; `entityId`, `workflowId`,
+   `taskInstanceId`, `documentType`, `year` = `workflows.financial_year`, `search` ILIKE over file
+   name / label / notes with `%`/`_` escaped; `"all"`/empty = no filter; exact totals); `GET
+   /documents/{id}`, `GET /documents/{id}/versions` (desc); **downloads** `GET /documents/{id}/download`
+   (latest) and `GET /documents/{id}/versions/{versionId}/download` stream the blob with the stored
+   MIME type, `Content-Length`, `Content-Disposition: attachment; filename="<ASCII>";
+   filename*=UTF-8''<pct>`, `Cache-Control: private, no-store`, `X-Content-Type-Options: nosniff` —
+   the handler returns `(nil, nil)` (router writes nothing); every 404 (unknown / other tenant /
+   deleted) is a JSON error before the first byte, a blob missing from storage is a logged 500; `PUT
+   /documents/{id}` partial metadata (omitted = unchanged, `""` clears label / notes); `DELETE` = soft
+   delete (204; versions + blobs retained for the ADR-0007 purge, second delete 404). **Upload rules
+   (ADR-0001):** body bounded by `http.MaxBytesReader(maxUploadBytes + 64 KiB)` and the part's declared
+   size → **413 `FILE_TOO_LARGE`** (the `AppError` carries the status directly); declared type
+   (part `Content-Type`, fallback `application/octet-stream`) must be on the allowlist (pdf, png,
+   jpeg, gif, plain, csv, json, xml, zip, the MS Office + OOXML trio, octet-stream) and the first
+   512 bytes are sniffed: a concrete sniff (pdf, png, …) must equal the declared type, a generic
+   one (octet-stream, zip — every OOXML file, text/plain) accepts it → otherwise **415
+   `UNSUPPORTED_MEDIA_TYPE`**; sha256 + size computed while streaming (TeeReader) with a capped
+   reader as defence in depth; file name = base name only, trimmed, ≤255 runes; storage `Put`
+   failure → error before any row, a DB failure after `Put` deletes the blob best-effort.
+   **ADR-0018:** a document attached to an **approved** task instance refuses new versions,
+   metadata changes, deletion — and new attachments — with 409 "documents of an approved task are
+   immutable". Views resolve `workflowName` / `entityId` / `entityName` / `financialYear` via
+   RLS-scoped LEFT JOINs and `uploadedByName` via users pinned to the row's tenant. Audit
+   (PII-free): `document.created {documentType, category, version, fileSize}`, `.version_added
+   {version, fileSize}`, `.updated {documentType, category}`, `.deleted {}`. Acceptance
+   (`acceptance/modules/documents`, 5 tests, fs adapter on a temp dir, 2 MiB test cap): upload → view
+   shape → both lists → byte-identical download + every header → v2 (UTF-8 name → ASCII fallback +
+   RFC 5987) → versions desc / latest / v1 by id → PUT semantics → audit; repository filters + search
+   escaping + paging totals; viewer 403 / preparer 201 / anonymous 401 / other tenant 404 on every id
+   route; 413 / 415 / the 400 matrix; soft delete → 404s + gone from lists + rows retained (SQL) →
+   real submit/approve → 409s → workflow-level doc still editable. Unit tests (mocks for repo,
+   storage, authorizer): version numbering, immutability 409, soft-delete 404, size / MIME rejection,
+   instance-must-belong-to-workflow, blob cleanup on DB failure, file-name sanitising.
+   **Review hardening (2026-09-04, adversarial review of the increment):** (1) downloads are truly
+   **streamed** — `RouteDefinition.Stream` makes the transaction middleware write through
+   (`middlewares.StreamingTransaction`) instead of buffering the body until commit, so N concurrent
+   25 MiB downloads no longer hold N × 25 MiB of heap; a 4xx written before any body still rolls
+   back, and a commit error after a streamed body is never glued onto it (3 middleware tests); (2)
+   the ADR-0018 lock also covers a **pending** instance: once submitted for approval its documents
+   refuse new versions / metadata / deletion / new attachments (409 "…awaiting approval…") until the
+   reviewer decides, mirroring the task-instance freeze (acceptance asserts submit → 409s → approve →
+   409s). Presigned transfer stays the ADR-0022 escape hatch for very large files.
+
 Migrations (sqitch): `tenants`, `entities`, `obligation_types`, `entity_obligations`,
 `workflows`, `workflow_tasks`, `task_instances`, `task_instance_approvals`, `actor_columns`,
-`audit_log`, `service_accounts`, `entity_obligation_details`, `reporting_indexes`, `invite_tokens` (+ boilerplate `appschema`,
+`audit_log`, `service_accounts`, `entity_obligation_details`, `reporting_indexes`, `invite_tokens`,
+`documents`, `data_templates` (+ boilerplate `appschema`,
 `internal_api_keys`, `nexus_accounts_api_keys`).
 
 **Auth / identity (Increments A + B):** first-party email/password + server-side sessions + TOTP MFA
@@ -247,8 +378,8 @@ Commits: `4cdcd4e` scaffold · `2851179` tenancy+entities · `d074780` obligatio
   increment).
 
 ### 🟠 Domain features still to build
-- **Data Templates** module — `workflow_tasks.data_template_id` / `task_instances.data_template_id`
-  are plain nullable UUIDs with **no FK** until this module exists.
+- ~~**Data Templates** module~~ — **done (2026-09-04, see Domain modules #9)**; the
+  `data_template_id` columns are now composite FKs and tax data is validated server-side.
 - **Approvals — DONE (core, ADR-0018/0012).** `POST /task-instances/{id}/{submit-for-approval,approve,reject}`
   drive the lifecycle: a preparer (`task:submit`) submits → `pending_approval` (records `submitted_by`); a
   different reviewer (`task:approve`) approves → `completed` (`approved_by`/`approved_at`/`completed_at`), or
@@ -256,7 +387,9 @@ Commits: `4cdcd4e` scaffold · `2851179` tenancy+entities · `d074780` obligatio
   **immutable lock** (an approved instance rejects in-place edits). Verified live. **Remaining:** the
   versioned *amendment* chain + snapshotting linked document/rule versions (audit is now built —
   waits on documents + rule versioning).
-- **Documents / workflow-documents** — versioned, backed by object storage.
+- ~~**Documents / workflow-documents** — versioned, backed by object storage.~~ **Done (2026-09-04,
+  see Domain modules #10 + the storage seam).** Remaining: the ADR-0007 purge job for soft-deleted
+  documents, per-tenant envelope encryption at the adapter (ADR-0006), frontend wiring.
 - **Audit log — DONE (stream 1 core, ADR-0008).** `platform/audit` + the `audit_log` table: every
   domain mutation (20 use-case sites) appends a **PII-free, actor-by-ID envelope** (action,
   resource, UTC instant, request_id, whitelisted `details` only — status transitions/counts, never
@@ -279,7 +412,9 @@ Commits: `4cdcd4e` scaffold · `2851179` tenancy+entities · `d074780` obligatio
 - **Payment / additional deadlines** beyond the filing deadline are not yet computed during generation.
 
 ### 🟡 Platform / infra (mostly Phase 2 per the ADRs)
-- Object storage behind a `Storage` interface — S3 / filesystem·MinIO (ADR-0009). None wired.
+- ~~Object storage behind a `Storage` interface — S3 / filesystem·MinIO (ADR-0009). None wired.~~
+  **Done (2026-09-04):** `platform/storage` + `fs` / `s3` adapters, wired for documents (see
+  Platform / foundation). Remaining: SSE-KMS / per-tenant envelope keys (ADR-0006), MinIO compose profile.
 - Encryption: KMS envelope + per-tenant keys behind `KeyProvider` (ADR-0006).
 - Observability: OpenTelemetry → Grafana LGTM + PII redaction (ADR-0015; `logger.go` has the TODO).
 - Secrets injection + backup/DR (ADR-0014) — config validates fail-closed, but Secrets Manager wiring is absent.

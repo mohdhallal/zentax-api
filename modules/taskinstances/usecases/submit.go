@@ -11,7 +11,8 @@ import (
 // SubmitForApproval moves a task instance to pending_approval and records the
 // submitter (ADR-0018 attestation). Requires task:submit within the instance's
 // entity scope. Only tasks that require approval, and are not already pending or
-// approved, can be submitted.
+// approved, can be submitted. With a data template attached, every mandatory
+// field must be present (ADR-0001) — the record need not be marked final.
 func (uc *UseCases) SubmitForApproval(ctx context.Context, id domain.TaskInstanceID, actorID string) (*domain.TaskInstance, error) {
 	if err := uc.authorizer.EnsureTaskInstance(ctx, id, authz.TaskSubmit); err != nil {
 		return nil, err
@@ -32,6 +33,16 @@ func (uc *UseCases) SubmitForApproval(ctx context.Context, id domain.TaskInstanc
 	}
 	if ti.IsPendingApproval() {
 		return nil, apperrors.NewConflict(domain.MsgAlreadyPending)
+	}
+
+	tpl, err := uc.resolveTemplate(ctx, nil, ti.DataTemplateID)
+	if err != nil {
+		return nil, err
+	}
+	if tpl != nil {
+		if missing := domain.MissingMandatoryFields(tpl, ti.TaxData); len(missing) > 0 {
+			return nil, apperrors.NewValidation(domain.ErrMissingMandatory(missing))
+		}
 	}
 
 	submitted, err := uc.repo.SubmitForApproval(ctx, id, actorID)

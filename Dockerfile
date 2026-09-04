@@ -16,6 +16,11 @@ COPY --from=build /out/zentax-api /out/seed-admin /usr/local/bin/
 # Config is loaded from deployment/config_files/{APP_ENV}.json relative to the
 # working directory; DATABASE_URL always comes from the environment.
 COPY deployment/config_files ./deployment/config_files
+# Document blobs for the filesystem storage adapter (ADR-0022). Compose mounts a
+# named volume here; the directory must exist and belong to the runtime user so
+# the volume inherits that ownership on first use.
+RUN mkdir -p /var/lib/zentax/documents && chown -R zentax:zentax /var/lib/zentax
+VOLUME ["/var/lib/zentax/documents"]
 USER zentax
 EXPOSE 3000
 HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=5 \

@@ -15,6 +15,11 @@ import (
 )
 
 func writeResponse(w http.ResponseWriter, r *http.Request, response *types.HttpResponse) {
+	// A nil response means the handler wrote the reply itself (streamed
+	// download): nothing to envelope.
+	if response == nil {
+		return
+	}
 	requestId := app.GetRequestId(r.Context())
 	if requestId != "" {
 		w.Header().Set("X-Request-Id", requestId)

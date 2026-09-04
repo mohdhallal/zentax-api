@@ -16,6 +16,8 @@ import (
 	"github.com/mohamadhallal/zentax-api/app"
 	"github.com/mohamadhallal/zentax-api/config"
 	"github.com/mohamadhallal/zentax-api/logger"
+	datatemplatespg "github.com/mohamadhallal/zentax-api/modules/datatemplates/repositories/pg"
+	datatemplatesusecases "github.com/mohamadhallal/zentax-api/modules/datatemplates/usecases"
 	"github.com/mohamadhallal/zentax-api/platform/crypto"
 	"github.com/mohamadhallal/zentax-api/platform/database"
 )
@@ -77,8 +79,22 @@ func main() {
 		fail("create tenant-admin grant", err)
 	}
 
-	fmt.Printf("Seeded tenant %q\n  tenant_id: %s\n  user_id:   %s\n  admin:     %s\n",
-		*tenantName, tenantID, userID, *email)
+	// Predefined data templates (VAT / CIT / WHT): the same idempotent use case
+	// POST /data-templates/predefined runs, on a tenant-bound tx with the admin
+	// as the acting user (created_by). No authorizer / audit here — there is no
+	// request; the seeding is attributed through created_by.
+	seedCtx := app.WithRequester(app.WithTenantID(ctx, tenantID), &app.Requester{Kind: app.RequesterUser, ID: userID})
+	var seeded int
+	if err := db.WithinTransaction(seedCtx, func(txCtx context.Context) error {
+		templates, e := datatemplatesusecases.NewUseCases(datatemplatespg.NewDataTemplateRepo(db)).SeedPredefined(txCtx)
+		seeded = len(templates)
+		return e
+	}); err != nil {
+		fail("seed predefined data templates", err)
+	}
+
+	fmt.Printf("Seeded tenant %q\n  tenant_id: %s\n  user_id:   %s\n  admin:     %s\n  templates: %d predefined\n",
+		*tenantName, tenantID, userID, *email, seeded)
 }
 
 func fail(msg string, err error) {

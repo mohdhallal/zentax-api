@@ -1,6 +1,7 @@
 package bootstrap
 
 import (
+	"context"
 	"time"
 
 	gochi "github.com/go-chi/chi/v5"
@@ -16,6 +17,8 @@ import (
 	"github.com/mohamadhallal/zentax-api/modules/auditlog"
 	authpg "github.com/mohamadhallal/zentax-api/modules/auth/repositories/pg"
 	authuc "github.com/mohamadhallal/zentax-api/modules/auth/usecases"
+	"github.com/mohamadhallal/zentax-api/modules/datatemplates"
+	"github.com/mohamadhallal/zentax-api/modules/documents"
 	"github.com/mohamadhallal/zentax-api/modules/entities"
 	"github.com/mohamadhallal/zentax-api/modules/entityobligations"
 	"github.com/mohamadhallal/zentax-api/modules/health"
@@ -73,7 +76,14 @@ func New(cfg *config.Config, mode types.ServerMode) (*App, error) {
 		metricsRecorder = metricsmock.New()
 	}
 
-	ctr := NewContainer(db)
+	// Document blob store (ADR-0022) — fs or s3 per validated config.
+	store, err := NewStorage(context.Background(), cfg.Storage)
+	if err != nil {
+		_ = dbConn.Close()
+		return nil, err
+	}
+
+	ctr := NewContainer(db, WithStorage(store, cfg.Storage.MaxUploadBytes))
 
 	authValidator := authuc.NewInternalAuth(authpg.NewInternalAPIKeyRepo(db))
 
@@ -121,6 +131,8 @@ func New(cfg *config.Config, mode types.ServerMode) (*App, error) {
 	workflows.RegisterRoutes(router, ctr.WorkflowUseCases, ctr.WorkflowStarter)
 	workflowtasks.RegisterRoutes(router, ctr.WorkflowTaskUseCases)
 	taskinstances.RegisterRoutes(router, ctr.TaskInstanceUseCases)
+	datatemplates.RegisterRoutes(router, ctr.DataTemplateUseCases)
+	documents.RegisterRoutes(router, ctr.DocumentUseCases, cfg.Storage.MaxUploadBytes)
 	reports.RegisterRoutes(router, ctr.ReportsReader)
 	auditlog.RegisterRoutes(router, ctr.AuditLogReader)
 

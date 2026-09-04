@@ -4,6 +4,7 @@ import (
 	"context"
 
 	apperrors "github.com/mohamadhallal/zentax-api/errors"
+	datatemplatesdomain "github.com/mohamadhallal/zentax-api/modules/datatemplates/domain"
 	"github.com/mohamadhallal/zentax-api/modules/taskinstances/domain"
 	"github.com/mohamadhallal/zentax-api/platform/authz"
 )
@@ -46,7 +47,31 @@ func (uc *UseCases) Update(ctx context.Context, id domain.TaskInstanceID, input 
 	}
 
 	if input.TaxDataStatus == "" {
-		input.TaxDataStatus = "draft"
+		input.TaxDataStatus = domain.TaxDataStatusDraft
+	}
+
+	// ADR-0001 tax-data authority: with a template attached (the incoming
+	// dataTemplateId, else the one inherited from the workflow task), the tax
+	// data must conform to it; a final record carries every mandatory field.
+	tpl, err := uc.resolveTemplate(ctx, input.DataTemplateID, current.DataTemplateID)
+	if err != nil {
+		return nil, err
+	}
+	// Only a change is validated: clients replay the stored record on every
+	// save, and a record that predates a template edit must not make the
+	// instance un-editable (status, assignee, notes…). Attaching a template or
+	// asking for a final record always validates.
+	if tpl != nil {
+		requireMandatory := input.TaxDataStatus == domain.TaxDataStatusFinal
+		if requireMandatory || input.DataTemplateID != nil || !domain.TaxDataEqual(input.TaxData, current.TaxData) {
+			cleaned, err := domain.ValidateTaxData(tpl, input.TaxData, current.TaxData, requireMandatory)
+			if err != nil {
+				return nil, apperrors.NewValidation(err.Error())
+			}
+			if input.TaxData != nil {
+				input.TaxData = cleaned
+			}
+		}
 	}
 
 	ti, err := uc.repo.Update(ctx, id, input)
@@ -61,4 +86,34 @@ func (uc *UseCases) Update(ctx context.Context, id domain.TaskInstanceID, input 
 		return nil, err
 	}
 	return ti, nil
+}
+
+// resolveTemplate loads the template that governs the instance after the
+// update: the incoming id wins over the current one. An incoming id that does
+// not resolve in this tenant is a validation error (the composite FK would
+// refuse it anyway). Nil resolver (unit tests) or no template → nil.
+func (uc *UseCases) resolveTemplate(ctx context.Context, incoming, current *string) (*datatemplatesdomain.DataTemplate, error) {
+	if uc.templates == nil {
+		return nil, nil //nolint:nilnil // no resolver wired = no validation
+	}
+	templateID := current
+	if incoming != nil {
+		templateID = incoming
+	}
+	if templateID == nil || *templateID == "" {
+		return nil, nil //nolint:nilnil // no template attached
+	}
+	tpl, err := uc.templates.ResolveTemplate(ctx, *templateID)
+	if err != nil {
+		return nil, err
+	}
+	if tpl == nil {
+		if incoming != nil {
+			return nil, apperrors.NewValidation(domain.MsgDataTemplateNotFound)
+		}
+		// The inherited template vanished (deleted → SET NULL races): nothing to
+		// validate against.
+		return nil, nil //nolint:nilnil // template gone
+	}
+	return tpl, nil
 }

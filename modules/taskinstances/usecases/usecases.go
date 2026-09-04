@@ -11,6 +11,16 @@ type UseCases struct {
 	authorizer *authz.Authorizer
 	audit      *audit.Recorder
 	assignees  domain.AssigneeChecker
+	templates  domain.TemplateResolver
+}
+
+// WithTemplateResolver injects the data-template lookup that tax data is
+// validated against (ADR-0001 server-side authority). Optional and nil-safe —
+// without it, tax data is stored as sent (unit tests); the container always
+// wires one.
+func (uc *UseCases) WithTemplateResolver(r domain.TemplateResolver) *UseCases {
+	uc.templates = r
+	return uc
 }
 
 // WithAssigneeChecker injects the tenant-directory check for assigneeId

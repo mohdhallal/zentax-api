@@ -24,7 +24,10 @@ func NewTestClient(externalURL, internalURL string) *TestClient {
 	return &TestClient{
 		externalURL: externalURL,
 		internalURL: internalURL,
-		http:        &http.Client{Timeout: 10 * time.Second},
+		// Generous: per-test TRUNCATEs across hundreds of partitions make a
+		// shared, fsync-bound compose Postgres pause for tens of seconds when
+		// two suites run side by side; a request must not fail on that.
+		http: &http.Client{Timeout: 90 * time.Second},
 	}
 }
 

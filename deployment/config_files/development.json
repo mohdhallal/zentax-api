@@ -64,5 +64,18 @@
     "sessionCookieSecure": false,
     "sessionIdleTtlMinutes": 480,
     "sessionAbsoluteTtlHours": 720
+  },
+  "storage": {
+    "driver": "fs",
+    "maxUploadBytes": 26214400,
+    "fs": {
+      "root": "./var/documents"
+    },
+    "s3": {
+      "bucket": "",
+      "region": "",
+      "endpoint": "",
+      "forcePathStyle": false
+    }
   }
 }

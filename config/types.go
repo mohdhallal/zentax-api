@@ -18,6 +18,77 @@ type Config struct {
 	Log              *logger.Config         `json:"log"`
 	NexusInternalAPI NexusInternalAPIConfig `json:"nexusInternalApi"`
 	Auth             AuthConfig             `json:"auth"`
+	Storage          StorageConfig          `json:"storage"`
+}
+
+// Storage drivers (ADR-0022): the filesystem adapter (self-host default, tests)
+// and S3 / S3-compatible object storage (SaaS, MinIO).
+const (
+	StorageDriverFS = "fs"
+	StorageDriverS3 = "s3"
+
+	// DefaultMaxUploadBytes caps a single document upload (25 MiB).
+	DefaultMaxUploadBytes int64 = 25 * 1024 * 1024
+	defaultStorageFSRoot        = "./var/documents"
+)
+
+// StorageConfig selects and configures the document blob store (ADR-0009
+// adapter #1 / ADR-0022). Validated fail-closed at startup: the driver must be
+// fs or s3, fs needs a root directory, s3 needs a bucket + region.
+type StorageConfig struct {
+	Driver         string          `json:"driver"`         // fs | s3
+	MaxUploadBytes int64           `json:"maxUploadBytes"` // per-file cap; 0 → DefaultMaxUploadBytes
+	FS             StorageFSConfig `json:"fs"`
+	S3             StorageS3Config `json:"s3"`
+}
+
+type StorageFSConfig struct {
+	Root string `json:"root"`
+}
+
+type StorageS3Config struct {
+	Bucket         string `json:"bucket"`
+	Region         string `json:"region"`
+	Endpoint       string `json:"endpoint"`       // optional: MinIO / S3-compatible
+	ForcePathStyle bool   `json:"forcePathStyle"` // required by most S3-compatible stores
+}
+
+// applyDefaults fills what an omitted `storage` section leaves empty: a config
+// file that says nothing gets the self-host filesystem default (the shipped
+// config files spell it out explicitly). An explicitly wrong driver is still a
+// startup error (validate).
+func (s *StorageConfig) applyDefaults() {
+	if s.Driver == "" {
+		s.Driver = StorageDriverFS
+	}
+	if s.MaxUploadBytes <= 0 {
+		s.MaxUploadBytes = DefaultMaxUploadBytes
+	}
+	if s.Driver == StorageDriverFS && s.FS.Root == "" {
+		s.FS.Root = defaultStorageFSRoot
+	}
+}
+
+func (s StorageConfig) validate() error {
+	switch s.Driver {
+	case StorageDriverFS:
+		if s.FS.Root == "" {
+			return fmt.Errorf("storage.fs.root is required for the fs driver (or set %s)", EnvStorageFSRoot)
+		}
+	case StorageDriverS3:
+		if s.S3.Bucket == "" {
+			return fmt.Errorf("storage.s3.bucket is required for the s3 driver (or set %s)", EnvStorageS3Bucket)
+		}
+		if s.S3.Region == "" {
+			return fmt.Errorf("storage.s3.region is required for the s3 driver (or set %s)", EnvStorageS3Region)
+		}
+	default:
+		return fmt.Errorf("storage.driver must be %q or %q, got %q", StorageDriverFS, StorageDriverS3, s.Driver)
+	}
+	if s.MaxUploadBytes <= 0 {
+		return fmt.Errorf("storage.maxUploadBytes must be positive")
+	}
+	return nil
 }
 
 func (c *Config) IsDevelopment() bool {

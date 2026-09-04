@@ -13,4 +13,6 @@ const (
 	MsgCannotApproveOwn    = "you cannot approve a task instance you submitted (separation of duties)"
 	// assigneeId must be an active human member of the caller's tenant.
 	MsgAssigneeNotMember = "assignee is not an active member of this tenant"
+	// dataTemplateId must resolve within the caller's tenant (RLS + composite FK).
+	MsgDataTemplateNotFound = "data template not found in this tenant"
 )

@@ -122,6 +122,87 @@ func TestTransaction_ResponseBuffered_NotWrittenUntilAfterTx(t *testing.T) {
 	assert.Equal(t, "body", w.Body.String())
 }
 
+// A streaming route (downloads) writes through while the transaction is still
+// open — the body is never held in memory — and a 4xx written before any body
+// still rolls the transaction back.
+func TestStreamingTransaction_WritesThroughDuringTx(t *testing.T) {
+	t.Parallel()
+
+	var bytesOnWireDuringTx int
+	w := httptest.NewRecorder()
+	db := &mockExecerPgTx{
+		withFn: func(ctx context.Context, fn func(context.Context) error) error {
+			err := fn(ctx)
+			bytesOnWireDuringTx = w.Body.Len()
+			return err
+		},
+	}
+	handler := http.HandlerFunc(func(hw http.ResponseWriter, r *http.Request) {
+		hw.Header().Set("Content-Type", "application/pdf")
+		hw.WriteHeader(http.StatusOK)
+		_, _ = hw.Write([]byte("%PDF-1.4 body"))
+		if f, ok := hw.(http.Flusher); ok {
+			f.Flush()
+		}
+	})
+
+	middlewares.StreamingTransaction(db)(handler).
+		ServeHTTP(w, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", http.NoBody))
+
+	assert.Equal(t, len("%PDF-1.4 body"), bytesOnWireDuringTx, "streamed bytes must reach the writer before commit")
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "application/pdf", w.Header().Get("Content-Type"))
+	assert.Equal(t, "%PDF-1.4 body", w.Body.String())
+}
+
+func TestStreamingTransaction_ErrorBeforeBodyRollsBack(t *testing.T) {
+	t.Parallel()
+
+	var rolledBack bool
+	db := &mockExecerPgTx{
+		withFn: func(ctx context.Context, fn func(context.Context) error) error {
+			err := fn(ctx)
+			rolledBack = err != nil
+			return err
+		},
+	}
+	handler := http.HandlerFunc(func(hw http.ResponseWriter, r *http.Request) {
+		hw.WriteHeader(http.StatusNotFound)
+		_, _ = hw.Write([]byte(`{"status":false}`))
+	})
+
+	w := httptest.NewRecorder()
+	middlewares.StreamingTransaction(db)(handler).
+		ServeHTTP(w, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", http.NoBody))
+
+	assert.True(t, rolledBack)
+	assert.Equal(t, http.StatusNotFound, w.Code)
+	assert.Contains(t, w.Body.String(), `{"status":false}`)
+}
+
+func TestStreamingTransaction_CommitErrorAfterBodyIsNotAppended(t *testing.T) {
+	t.Parallel()
+
+	db := &mockExecerPgTx{
+		withFn: func(ctx context.Context, fn func(context.Context) error) error {
+			_ = fn(ctx)
+			return errors.New("commit failed")
+		},
+	}
+	handler := http.HandlerFunc(func(hw http.ResponseWriter, r *http.Request) {
+		hw.WriteHeader(http.StatusOK)
+		_, _ = hw.Write([]byte("bytes"))
+	})
+
+	w := httptest.NewRecorder()
+	middlewares.StreamingTransaction(db)(handler).
+		ServeHTTP(w, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", http.NoBody))
+
+	// The 200 + body were already sent; no JSON error is glued on afterwards.
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "bytes", w.Body.String())
+}
+
 func TestTransaction_TxContextPropagated(t *testing.T) {
 	t.Parallel()
 

@@ -61,12 +61,13 @@ type CreateTaskInstanceInput struct {
 // UpdateTaskInstanceInput is the API-editable subset. Approval/completion
 // timestamps are set by the dedicated submit/approve/reject actions, not here.
 type UpdateTaskInstanceInput struct {
-	Status        string
-	AssigneeID    *string
-	DueDate       *dateonly.Date // nil keeps the current due date
-	Notes         *string
-	TaxData       TaxData
-	TaxDataStatus string
+	Status         string
+	AssigneeID     *string
+	DueDate        *dateonly.Date // nil keeps the current due date
+	Notes          *string
+	DataTemplateID *string // nil keeps the current template
+	TaxData        TaxData
+	TaxDataStatus  string
 }
 
 // Task-instance lifecycle statuses relevant to the approval flow (ADR-0018).

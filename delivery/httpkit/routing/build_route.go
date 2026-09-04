@@ -75,9 +75,14 @@ func buildRoute(route types.Route, router *Router) http.HandlerFunc {
 	}
 
 	// A tenant-scoped route needs a transaction to carry the SET LOCAL
-	// app.tenant_id GUC that drives RLS (ADR-0004), so Tenant implies Tx.
+	// app.tenant_id GUC that drives RLS (ADR-0004), so Tenant implies Tx. A
+	// streaming (download) handler writes through instead of being buffered.
 	if config.Tx || config.Tenant {
-		handler = middlewares.Transaction(router.Db)(handler)
+		if config.Stream {
+			handler = middlewares.StreamingTransaction(router.Db)(handler)
+		} else {
+			handler = middlewares.Transaction(router.Db)(handler)
+		}
 	}
 
 	// RequireAuth must wrap OUTSIDE Transaction so the credential-derived tenant

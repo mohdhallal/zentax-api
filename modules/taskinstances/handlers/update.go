@@ -54,12 +54,13 @@ func (h *UpdateTaskInstanceHandler) Execute(
 	}
 
 	ti, err := h.usecases.Update(r.Context(), params.ID, domain.UpdateTaskInstanceInput{
-		Status:        body.Status,
-		AssigneeID:    body.AssigneeID,
-		DueDate:       dueDate,
-		Notes:         body.Notes,
-		TaxData:       body.TaxData,
-		TaxDataStatus: body.TaxDataStatus,
+		Status:         body.Status,
+		AssigneeID:     body.AssigneeID,
+		DueDate:        dueDate,
+		Notes:          body.Notes,
+		DataTemplateID: body.DataTemplateID,
+		TaxData:        body.TaxData,
+		TaxDataStatus:  body.TaxDataStatus,
 	})
 	if err != nil {
 		return nil, err

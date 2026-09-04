@@ -3,6 +3,7 @@ package pg
 import (
 	"context"
 
+	apperrors "github.com/mohamadhallal/zentax-api/errors"
 	"github.com/mohamadhallal/zentax-api/modules/taskinstances/domain"
 	"github.com/mohamadhallal/zentax-api/platform/database"
 	baserepo "github.com/mohamadhallal/zentax-api/shared/repositories"
@@ -31,9 +32,20 @@ func (r *TaskInstanceRepo) Create(ctx context.Context, input domain.CreateTaskIn
 }
 
 func (r *TaskInstanceRepo) Update(ctx context.Context, id domain.TaskInstanceID, input domain.UpdateTaskInstanceInput) (*domain.TaskInstance, error) {
-	return r.QueryRow(ctx, r.SQL.Update,
+	ti, err := r.QueryRow(ctx, r.SQL.Update,
 		id, input.Status, input.AssigneeID, input.Notes, input.TaxData, input.TaxDataStatus, input.DueDate,
+		input.DataTemplateID,
 	)
+	if err != nil {
+		// The only FK an update can newly violate is the composite
+		// (tenant_id, data_template_id) one — a template of another tenant
+		// (FK checks bypass RLS; the composite key is what refuses it).
+		if database.IsForeignKeyViolation(err) {
+			return nil, apperrors.NewValidation(domain.MsgDataTemplateNotFound)
+		}
+		return nil, err
+	}
+	return ti, nil
 }
 
 func (r *TaskInstanceRepo) CountByWorkflow(ctx context.Context, workflowID string) (int, error) {
