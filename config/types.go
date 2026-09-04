@@ -1,6 +1,7 @@
 package config
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
 
@@ -95,6 +96,18 @@ func (c *Config) IsDevelopment() bool {
 	return c.App.Env == "development"
 }
 
+// IsDeployed reports whether this is a deployed environment (staging or
+// production) — the environments the fail-closed rules of ADR-0014 apply to.
+func (c *Config) IsDeployed() bool {
+	return c.App.Env == EnvStaging || c.App.Env == EnvProduction
+}
+
+const (
+	EnvDevelopment = "development"
+	EnvStaging     = "staging"
+	EnvProduction  = "production"
+)
+
 type AppConfig struct {
 	Env          string `json:"env"`
 	Port         int    `json:"port"`
@@ -125,7 +138,10 @@ type CORSConfig struct {
 	MaxAgeSec        int      `json:"maxAgeSec"`
 }
 
+// SwaggerConfig controls the OpenAPI document + UI at /swagger. Enabled is an
+// explicit opt-in (development + staging ship it, production does not).
 type SwaggerConfig struct {
+	Enabled bool   `json:"enabled"`
 	Title   string `json:"title"`
 	Version string `json:"version"`
 }
@@ -144,9 +160,9 @@ type NexusInternalAPIConfig struct {
 
 // AuthConfig configures first-party auth (ADR-0011).
 type AuthConfig struct {
-	// EncryptionKey is a base64 (std) encoding of a 32-byte AES-256 key used for
-	// field-level secret encryption (TOTP seeds). Interim until ADR-0006 per-tenant
-	// KMS keys; required (and validated) outside development.
+	// EncryptionKey is the AES-256 key used for field-level secret encryption
+	// (TOTP seeds), in one of two forms — see DecodeEncryptionKey. Interim until
+	// ADR-0006 per-tenant KMS keys; required (and validated) outside development.
 	EncryptionKey string `json:"encryptionKey"`
 
 	SessionCookieName       string `json:"sessionCookieName"`
@@ -155,15 +171,39 @@ type AuthConfig struct {
 	SessionAbsoluteTTLHours int    `json:"sessionAbsoluteTtlHours"`
 }
 
-// DecodeEncryptionKey returns the raw 32-byte AES key, or an error if it is
-// missing or the wrong length.
+// EncryptionKeyLen is the AES-256 key size in bytes.
+const EncryptionKeyLen = 32
+
+// MinEncryptionPassphraseLen is the shortest passphrase DecodeEncryptionKey
+// derives a key from. 32 characters of a generated alphanumeric secret is
+// ~190 bits of entropy — comfortably above the 128-bit floor.
+const MinEncryptionPassphraseLen = 32
+
+// DecodeEncryptionKey returns the raw 32-byte AES key. Two forms are accepted:
+//
+//  1. base64 (std) of exactly 32 raw key bytes — the original rule, what
+//     `openssl rand -base64 32` produces;
+//  2. otherwise, a passphrase of at least MinEncryptionPassphraseLen characters,
+//     derived into the key with SHA-256.
+//
+// Form 2 exists because managed secret stores (AWS Secrets Manager's generated
+// secrets, most password managers) hand out alphanumeric strings, not raw key
+// bytes, and operators paste those straight into AUTH_ENCRYPTION_KEY. The
+// derivation is deterministic, so rotation is simply a new passphrase (the
+// old ciphertexts need the old passphrase — a re-encrypt job, as with any key
+// rotation). A short or empty value is an error either way.
 func (a AuthConfig) DecodeEncryptionKey() ([]byte, error) {
-	key, err := base64.StdEncoding.DecodeString(a.EncryptionKey)
-	if err != nil {
-		return nil, fmt.Errorf("auth.encryptionKey is not valid base64: %w", err)
+	if a.EncryptionKey == "" {
+		return nil, fmt.Errorf("auth.encryptionKey is empty")
 	}
-	if len(key) != 32 {
-		return nil, fmt.Errorf("auth.encryptionKey must decode to 32 bytes, got %d", len(key))
+	if key, err := base64.StdEncoding.DecodeString(a.EncryptionKey); err == nil && len(key) == EncryptionKeyLen {
+		return key, nil
 	}
-	return key, nil
+	if len(a.EncryptionKey) < MinEncryptionPassphraseLen {
+		return nil, fmt.Errorf(
+			"auth.encryptionKey must be base64 of exactly %d bytes or a passphrase of at least %d characters (got %d characters)",
+			EncryptionKeyLen, MinEncryptionPassphraseLen, len(a.EncryptionKey))
+	}
+	sum := sha256.Sum256([]byte(a.EncryptionKey))
+	return sum[:], nil
 }

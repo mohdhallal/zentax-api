@@ -126,7 +126,7 @@ func New(cfg *config.Config, mode types.ServerMode) (*App, error) {
 
 	router := routing.NewRouter(chiRouter, mode, authValidator, identityUC, cfg.Auth.SessionCookieName, grantRepo, db)
 
-	health.RegisterRoutes(router, mode)
+	health.RegisterRoutes(router, mode, database.NewPinger(dbConn))
 	identity.RegisterRoutes(router, identityUC, identityUC, identityUC, tenantUC, cookieCfg)
 	entities.RegisterRoutes(router, ctr.EntityUseCases)
 	obligationtypes.RegisterRoutes(router, ctr.ObligationTypeUseCases)
@@ -145,11 +145,15 @@ func New(cfg *config.Config, mode types.ServerMode) (*App, error) {
 		metric.Mount(chiRouter, metricsRecorder.Handler())
 	}
 
-	swagger.Mount(chiRouter, router.Routes(), mode, swagger.Config{
-		Title:             cfg.Swagger.Title,
-		Version:           cfg.Swagger.Version,
-		SessionCookieName: cfg.Auth.SessionCookieName,
-	})
+	// The OpenAPI document + UI is an explicit opt-in (development + staging;
+	// production ships without it — swagger.enabled / SWAGGER_ENABLED).
+	if cfg.Swagger.Enabled {
+		swagger.Mount(chiRouter, router.Routes(), mode, swagger.Config{
+			Title:             cfg.Swagger.Title,
+			Version:           cfg.Swagger.Version,
+			SessionCookieName: cfg.Auth.SessionCookieName,
+		})
+	}
 
 	if cfg.IsDevelopment() {
 		routing.PrintRoutes(chiRouter, mode)

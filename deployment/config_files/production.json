@@ -1,6 +1,6 @@
 {
   "app": {
-    "env": "development",
+    "env": "production",
     "port": 3000,
     "internalPort": 3001
   },
@@ -8,19 +8,17 @@
     "readHeaderTimeoutMs": 10000,
     "writeTimeoutMs": 30000,
     "idleTimeoutMs": 120000,
-    "shutdownTimeoutMs": 10000
+    "shutdownTimeoutMs": 20000
   },
   "database": {
-    "url": "postgres://admin:secretgol@localhost:5432/golang-api?sslmode=disable",
-    "poolMax": 10,
+    "url": "",
+    "poolMax": 20,
     "idleTimeoutMs": 30000,
-    "connectionTimeoutMs": 2000,
+    "connectionTimeoutMs": 5000,
     "connMaxLifetimeMs": 1800000
   },
   "cors": {
-    "allowedOrigins": [
-      "*"
-    ],
+    "allowedOrigins": [],
     "allowedMethods": [
       "GET",
       "POST",
@@ -33,45 +31,47 @@
       "Accept",
       "Authorization",
       "Content-Type",
-      "X-CSRF-Token"
+      "X-CSRF-Token",
+      "X-Request-Id"
     ],
     "exposedHeaders": [
-      "Link"
+      "Link",
+      "X-Request-Id"
     ],
-    "allowCredentials": false,
-    "maxAgeSec": 300
+    "allowCredentials": true,
+    "maxAgeSec": 600
   },
   "swagger": {
-    "enabled": true,
-    "title": "ZenTax API (development)",
+    "enabled": false,
+    "title": "ZenTax API",
     "version": "1.0.0"
   },
   "metrics": {
     "enabled": true,
-    "namespace": "go_api_boilerplate"
+    "namespace": "zentax"
   },
   "log": {
-    "level": "debug",
-    "format": "text"
+    "level": "info",
+    "format": "json"
   },
   "nexusInternalApi": {
-    "baseUrl": "http://localhost:8080",
+    "baseUrl": "",
     "timeoutMs": 5000,
     "defaultRps": 1,
     "defaultKeyType": "DVS"
   },
   "auth": {
-    "encryptionKey": "emVudGF4LWRldi1lbmNyeXB0aW9uLWtleS0zMmJ5dGU=",
+    "encryptionKey": "",
     "sessionCookieName": "zentax_session",
-    "sessionCookieSecure": false,
+    "sessionCookieSecure": true,
     "sessionIdleTtlMinutes": 480,
     "sessionAbsoluteTtlHours": 720
   },
   "storage": {
-    "driver": "fs",
+    "driver": "s3",
     "maxUploadBytes": 26214400,
     "fs": {
-      "root": "./var/documents"
+      "root": "/var/lib/zentax/documents"
     },
     "s3": {
       "bucket": "",

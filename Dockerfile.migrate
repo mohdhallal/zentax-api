@@ -1,0 +1,24 @@
+# zentax-migrate — one-shot schema migration job (ADR-0014 deploy runbook).
+#
+# The same deployment/docker/migrate.sh the Compose stack bind-mounts, baked
+# into an image so ECS (staging / production) can run it as a task before each
+# API rollout: apply migrations/deploy/*.sql idempotently, then (re)provision
+# the non-superuser, non-BYPASSRLS app role the API connects as.
+#
+# Runtime env (libpq + script): PGHOST PGPORT PGUSER PGPASSWORD PGDATABASE
+# PGSSLMODE (set to `require` against RDS) APP_DB_USER APP_DB_PASSWORD.
+#
+#   docker build -f Dockerfile.migrate -t zentax-migrate .
+#   docker run --rm --network zentax_default -e PGHOST=postgres -e PGUSER=postgres \
+#     -e PGPASSWORD=… -e PGDATABASE=zentax -e APP_DB_USER=zentax_app \
+#     -e APP_DB_PASSWORD=… zentax-migrate
+FROM postgres:16-alpine
+
+COPY --chown=postgres:postgres migrations/deploy /migrations/deploy
+COPY --chown=postgres:postgres deployment/docker/migrate.sh /migrate.sh
+
+# The postgres image's unprivileged user (uid 70): the job only needs psql.
+USER postgres
+WORKDIR /migrations
+
+ENTRYPOINT ["sh", "/migrate.sh"]

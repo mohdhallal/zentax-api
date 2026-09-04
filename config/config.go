@@ -1,16 +1,47 @@
 package config
 
 import (
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
+
+	"github.com/mohamadhallal/zentax-api/logger"
 )
 
 const (
 	EnvVarName     = "APP_ENV"
 	EnvDatabaseURL = "DATABASE_URL"
+
+	// Database URL composition (ADR-0014): the SaaS deployment injects the RDS
+	// endpoint and the app role's credentials as separate values (the
+	// Secrets-Manager-generated password is never assembled into a URL by
+	// hand). Used ONLY when DATABASE_URL is not set — DATABASE_URL wins.
+	EnvDBHost     = "DB_HOST"
+	EnvDBPort     = "DB_PORT" // default 5432
+	EnvDBName     = "DB_NAME"
+	EnvDBUser     = "DB_USER"
+	EnvDBPassword = "DB_PASSWORD"
+	EnvDBSSLMode  = "DB_SSLMODE" // default require
+
+	DefaultDBPort    = "5432"
+	DefaultDBSSLMode = "require"
+
+	// Auth / CORS / logging / swagger overrides. An EMPTY value never overrides
+	// the file (same rule as STORAGE_*).
+	EnvAuthEncryptionKey       = "AUTH_ENCRYPTION_KEY"
+	EnvAuthSessionCookieSecure = "AUTH_SESSION_COOKIE_SECURE"
+	EnvCORSAllowedOrigins      = "CORS_ALLOWED_ORIGINS" // comma-separated, trimmed
+	EnvLogFormat               = "LOG_FORMAT"           // json | text
+	EnvLogLevel                = "LOG_LEVEL"            // debug | info | warn | error
+	EnvSwaggerEnabled          = "SWAGGER_ENABLED"
 
 	// Storage overrides (ADR-0022). An EMPTY value never overrides the file:
 	// the compose stack passes empty strings for the unused driver's settings.
@@ -26,6 +57,13 @@ const (
 
 	configDir = "deployment/config_files"
 )
+
+// DevelopmentEncryptionKey is the well-known key shipped in
+// deployment/config_files/development.json (and the acceptance config). A
+// deployed environment must never run with it — validate() compares the
+// decoded bytes, so re-encoding the same key does not slip past the check.
+// A test asserts this constant matches development.json.
+const DevelopmentEncryptionKey = "emVudGF4LWRldi1lbmNyeXB0aW9uLWtleS0zMmJ5dGU="
 
 var cfg *Config
 
@@ -58,16 +96,15 @@ func Load() (*Config, error) {
 // validate fails closed on missing security-critical configuration (ADR-0014).
 func (c *Config) validate() error {
 	if c.Database.URL == "" {
-		return fmt.Errorf("database.url is required (set %s or the config file)", EnvDatabaseURL)
+		return fmt.Errorf("database.url is required (set %s, or %s + %s + %s + %s)",
+			EnvDatabaseURL, EnvDBHost, EnvDBName, EnvDBUser, EnvDBPassword)
 	}
 	if c.App.Port == 0 {
 		return fmt.Errorf("app.port is required")
 	}
-	// Fail closed on missing/invalid auth secrets in deployed environments
-	// (ADR-0014). Development and testing may omit them.
-	if c.App.Env == "production" || c.App.Env == "staging" {
-		if _, err := c.Auth.DecodeEncryptionKey(); err != nil {
-			return fmt.Errorf("invalid auth config: %w", err)
+	if c.IsDeployed() {
+		if err := c.validateDeployed(); err != nil {
+			return err
 		}
 	}
 	c.Storage.applyDefaults()
@@ -77,11 +114,197 @@ func (c *Config) validate() error {
 	return nil
 }
 
+// validateDeployed holds the staging / production fail-closed rules (ADR-0014).
+// Every violation is reported at once — one boot failure lists everything the
+// operator still has to set — and each message names the env var to set.
+func (c *Config) validateDeployed() error {
+	var errs []error
+
+	key, err := c.Auth.DecodeEncryptionKey()
+	switch {
+	case err != nil:
+		errs = append(errs, fmt.Errorf("auth.encryptionKey: %w (set %s to base64 of 32 random bytes or a passphrase of >= %d characters)",
+			err, EnvAuthEncryptionKey, MinEncryptionPassphraseLen))
+	case isDevelopmentKey(key):
+		errs = append(errs, fmt.Errorf("auth.encryptionKey is the development key from development.json — deployed environments need their own (set %s)",
+			EnvAuthEncryptionKey))
+	}
+
+	if !c.Auth.SessionCookieSecure {
+		errs = append(errs, fmt.Errorf("auth.sessionCookieSecure must be true in %s (set %s=true)", c.App.Env, EnvAuthSessionCookieSecure))
+	}
+
+	if sslModeDisabled(c.Database.URL) {
+		errs = append(errs, fmt.Errorf("database.url must not carry sslmode=disable in %s (set %s with sslmode=require or stronger, or %s)",
+			c.App.Env, EnvDatabaseURL, EnvDBSSLMode))
+	}
+
+	// go-chi/cors treats an EMPTY AllowedOrigins list as "*" — so an unset list
+	// is the same hole as a wildcard, and both are refused.
+	if len(c.CORS.AllowedOrigins) == 0 {
+		errs = append(errs, fmt.Errorf("cors.allowedOrigins must list the web origin(s) in %s — an empty list allows every origin (set %s, comma-separated)",
+			c.App.Env, EnvCORSAllowedOrigins))
+	}
+	for _, origin := range c.CORS.AllowedOrigins {
+		if strings.TrimSpace(origin) == "*" {
+			errs = append(errs, fmt.Errorf("cors.allowedOrigins must not contain \"*\" in %s (set %s to the explicit web origin(s))",
+				c.App.Env, EnvCORSAllowedOrigins))
+			break
+		}
+	}
+
+	if c.Log == nil || c.Log.Format != "json" {
+		errs = append(errs, fmt.Errorf("log.format must be json in %s (set %s=json)", c.App.Env, EnvLogFormat))
+	}
+
+	return errors.Join(errs...)
+}
+
+func isDevelopmentKey(key []byte) bool {
+	dev, err := base64.StdEncoding.DecodeString(DevelopmentEncryptionKey)
+	if err != nil {
+		return false
+	}
+	return bytes.Equal(key, dev)
+}
+
+// sslModeDisabled reports whether a postgres URL (or a key=value DSN) turns
+// TLS off. An unparseable URL is left to the driver to reject.
+func sslModeDisabled(dbURL string) bool {
+	if u, err := url.Parse(dbURL); err == nil && u.Scheme != "" {
+		return strings.EqualFold(u.Query().Get("sslmode"), "disable")
+	}
+	for _, kv := range strings.Fields(dbURL) {
+		if k, v, ok := strings.Cut(kv, "="); ok && k == "sslmode" && strings.EqualFold(v, "disable") {
+			return true
+		}
+	}
+	return false
+}
+
 func mergeEnvOverrides(conf *Config) {
-	if val := os.Getenv(EnvDatabaseURL); val != "" {
-		conf.Database.URL = val
+	mergeDatabaseEnvOverrides(&conf.Database)
+	mergeAuthEnvOverrides(&conf.Auth)
+	mergeCORSEnvOverrides(&conf.CORS)
+	mergeLogEnvOverrides(conf)
+	if val := os.Getenv(EnvSwaggerEnabled); val != "" {
+		if b, err := strconv.ParseBool(val); err == nil {
+			conf.Swagger.Enabled = b
+		}
 	}
 	mergeStorageEnvOverrides(&conf.Storage)
+}
+
+// mergeDatabaseEnvOverrides: DATABASE_URL wins; otherwise, when DB_HOST is
+// set, the URL is composed from the DB_* parts. A file-provided URL is kept
+// when neither is present.
+func mergeDatabaseEnvOverrides(d *DatabaseConfig) {
+	if val := os.Getenv(EnvDatabaseURL); val != "" {
+		d.URL = val
+		return
+	}
+	if composed := composeDatabaseURLFromEnv(); composed != "" {
+		d.URL = composed
+	}
+}
+
+// composeDatabaseURLFromEnv builds postgres://user:pass@host:port/name?sslmode=…
+// from DB_HOST / DB_PORT / DB_NAME / DB_USER / DB_PASSWORD / DB_SSLMODE.
+// Returns "" when DB_HOST is unset. User, password and database name are
+// URL-escaped so a generated password with '@', '/', ':', '%' or spaces survives.
+func composeDatabaseURLFromEnv() string {
+	host := os.Getenv(EnvDBHost)
+	if host == "" {
+		return ""
+	}
+	return ComposeDatabaseURL(
+		host,
+		getEnvValNonEmpty(EnvDBPort, DefaultDBPort),
+		os.Getenv(EnvDBName),
+		os.Getenv(EnvDBUser),
+		os.Getenv(EnvDBPassword),
+		getEnvValNonEmpty(EnvDBSSLMode, DefaultDBSSLMode),
+	)
+}
+
+// ComposeDatabaseURL assembles a pgx-parseable postgres URL from its parts,
+// percent-encoding the userinfo and the database name.
+func ComposeDatabaseURL(host, port, name, user, password, sslmode string) string {
+	var sb strings.Builder
+	sb.WriteString("postgres://")
+	if user != "" {
+		sb.WriteString(escapeUserinfo(user))
+		if password != "" {
+			sb.WriteByte(':')
+			sb.WriteString(escapeUserinfo(password))
+		}
+		sb.WriteByte('@')
+	}
+	sb.WriteString(net.JoinHostPort(host, port))
+	sb.WriteByte('/')
+	sb.WriteString(url.PathEscape(name))
+	if sslmode != "" {
+		sb.WriteString("?sslmode=")
+		sb.WriteString(url.QueryEscape(sslmode))
+	}
+	return sb.String()
+}
+
+// escapeUserinfo percent-encodes everything but RFC 3986 unreserved
+// characters, which url.Parse's userinfo decoding round-trips exactly.
+// (url.UserPassword leaves ':' and '@'-adjacent punctuation alone; QueryEscape
+// turns spaces into '+', which userinfo decoding does NOT turn back.)
+func escapeUserinfo(s string) string {
+	return strings.ReplaceAll(url.QueryEscape(s), "+", "%20")
+}
+
+func mergeAuthEnvOverrides(a *AuthConfig) {
+	if val := os.Getenv(EnvAuthEncryptionKey); val != "" {
+		a.EncryptionKey = val
+	}
+	if val := os.Getenv(EnvAuthSessionCookieSecure); val != "" {
+		if b, err := strconv.ParseBool(val); err == nil {
+			a.SessionCookieSecure = b
+		}
+	}
+}
+
+func mergeCORSEnvOverrides(c *CORSConfig) {
+	val := os.Getenv(EnvCORSAllowedOrigins)
+	if val == "" {
+		return
+	}
+	if origins := SplitOrigins(val); len(origins) > 0 {
+		c.AllowedOrigins = origins
+	}
+}
+
+// SplitOrigins parses a comma-separated origin list, trimming whitespace and
+// dropping empty entries.
+func SplitOrigins(val string) []string {
+	var origins []string
+	for _, o := range strings.Split(val, ",") {
+		if o = strings.TrimSpace(o); o != "" {
+			origins = append(origins, o)
+		}
+	}
+	return origins
+}
+
+func mergeLogEnvOverrides(conf *Config) {
+	format, level := os.Getenv(EnvLogFormat), os.Getenv(EnvLogLevel)
+	if format == "" && level == "" {
+		return
+	}
+	if conf.Log == nil {
+		conf.Log = &logger.Config{}
+	}
+	if format != "" {
+		conf.Log.Format = format
+	}
+	if level != "" {
+		conf.Log.Level = level
+	}
 }
 
 // mergeStorageEnvOverrides applies STORAGE_* over the file. Empty values are
@@ -130,4 +353,14 @@ func getEnvVal(env, defaultVal string) string {
 		return defaultVal
 	}
 	return val
+}
+
+// getEnvValNonEmpty is getEnvVal where an empty (but set) value also falls
+// back to the default — deployment manifests routinely pass "" for an unused
+// knob.
+func getEnvValNonEmpty(env, defaultVal string) string {
+	if val := os.Getenv(env); val != "" {
+		return val
+	}
+	return defaultVal
 }

@@ -1,0 +1,187 @@
+# zentax-api — CI gates.
+#
+#   build   : gofmt, go build / vet / test (main module + acceptance module), govulncheck
+#   accept  : the acceptance suites (HTTP -> tenant GUC -> RLS isolation, per module)
+#             against a real Postgres 16, migrated with the SAME runner the Compose
+#             stack and the ECS migrate task use (deployment/docker/migrate.sh), then
+#             executed as a NON-BYPASSRLS role — a superuser connection would
+#             silently defeat RLS and pass every isolation test (STATUS.md runbook).
+#   images  : docker build of the api (+ seed-admin) and migrate images, no push.
+#
+# This repo has no GitHub remote yet: create github.com/mohdhallal/zentax-api and
+# push before this workflow can run. Deployment is driven from the web repo
+# (TaxFlowReports/.github/workflows/deploy.yml), which checks this repo out by ref.
+
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GOTOOLCHAIN: auto
+
+jobs:
+  build:
+    name: build, vet, test, vulncheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache-dependency-path: |
+            go.sum
+            acceptance/go.sum
+
+      - name: gofmt
+        run: |
+          out="$(git ls-files -z '*.go' | xargs -0 gofmt -l)"
+          if [ -n "$out" ]; then
+            echo "::error title=gofmt::the following files are not gofmt-formatted:"
+            echo "$out"
+            exit 1
+          fi
+
+      - name: go build
+        run: go build ./...
+
+      - name: go vet
+        run: |
+          go vet ./...
+          (cd acceptance && go vet ./...)
+
+      - name: go test (unit)
+        run: go test -count=1 ./...
+
+      - name: govulncheck (ADR-0016)
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4 # pinned, ADR-0016: no floating tool versions
+          govulncheck ./...
+
+  acceptance:
+    name: acceptance (RLS isolation) on postgres 16
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: build
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci-superuser
+          POSTGRES_DB: zentax
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d zentax"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      PGHOST: localhost
+      PGPORT: "5432"
+      PGUSER: postgres
+      PGPASSWORD: ci-superuser
+      PGDATABASE: zentax
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache-dependency-path: |
+            go.sum
+            acceptance/go.sum
+
+      # The ubuntu runner ships psql; keep the check explicit so a runner image
+      # change fails loudly instead of with an obscure "command not found".
+      - name: psql available
+        run: psql --version
+
+      # Same runner as Compose + the ECS migrate task: applies
+      # migrations/deploy/*.sql in lexical order, tops up the range partitions
+      # (ADR-0020) and provisions the prod-shaped `zentax_app` role. Exercising it
+      # here is the "CI must run the Compose wiring" rule from ADR-0009.
+      - name: Apply migrations (deployment/docker/migrate.sh)
+        env:
+          APP_DB_USER: zentax_app
+          APP_DB_PASSWORD: ci-app-role
+          MIGRATIONS_DIR: ${{ github.workspace }}/migrations/deploy
+        run: sh deployment/docker/migrate.sh
+
+      # The acceptance role: NON-BYPASSRLS like production, but with the wider
+      # grants the suites need to arrange/reset fixtures (TRUNCATE; no audit_log
+      # append-only revoke, so tests can clean it between cases).
+      - name: Create the acceptance role (NOBYPASSRLS)
+        run: |
+          psql -v ON_ERROR_STOP=1 -q <<'SQL'
+          DO $$
+          BEGIN
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'zentax_test_app') THEN
+              CREATE ROLE zentax_test_app LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
+            END IF;
+          END
+          $$;
+          ALTER ROLE zentax_test_app WITH PASSWORD 'ci-test-role';
+          GRANT USAGE ON SCHEMA public TO zentax_test_app;
+          GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON ALL TABLES IN SCHEMA public TO zentax_test_app;
+          GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO zentax_test_app;
+          REVOKE ALL ON _migrations FROM zentax_test_app;
+          SQL
+          # Belt and braces: fail the job if the role could ever bypass RLS.
+          bypass="$(psql -tA -c "SELECT rolbypassrls OR rolsuper FROM pg_roles WHERE rolname = 'zentax_test_app'")"
+          if [ "$bypass" != "f" ]; then
+            echo "::error::zentax_test_app must be NOSUPERUSER + NOBYPASSRLS (got bypass=$bypass)"
+            exit 1
+          fi
+
+      - name: Acceptance suites
+        working-directory: acceptance
+        env:
+          TEST_DATABASE_URL: postgres://zentax_test_app:ci-test-role@localhost:5432/zentax?sslmode=disable
+        run: go test -count=1 -p 1 -parallel 1 -timeout 30m ./...
+
+  images:
+    name: docker build (api, migrate) — no push
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build api image (zentax-api + seed-admin)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: false
+          load: false
+          platforms: linux/amd64
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,mode=max,scope=api
+
+      - name: Build migrate image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.migrate
+          push: false
+          load: false
+          platforms: linux/amd64
+          cache-from: type=gha,scope=migrate
+          cache-to: type=gha,mode=max,scope=migrate

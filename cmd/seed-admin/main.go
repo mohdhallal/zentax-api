@@ -1,10 +1,15 @@
 // Command seed-admin bootstraps a tenant and its first admin user (ADR-0011).
 // There is no public signup yet, so this is how a first user is provisioned:
 //
-//	APP_ENV=development go run ./cmd/seed-admin \
+//	APP_ENV=development SEED_ADMIN_PASSWORD='correct-horse-battery' go run ./cmd/seed-admin \
 //	  --tenant-slug acme --tenant-name "Acme GmbH" \
-//	  --email admin@acme.com --password 's3cret' --name "Group Head of Tax" \
+//	  --email admin@acme.com --name "Group Head of Tax" \
 //	  --timezone Europe/London
+//
+// The password comes from SEED_ADMIN_PASSWORD (preferred — in deployed
+// environments ECS injects it from Secrets Manager, so it never lands in a
+// task definition or CloudTrail) or from --password for local use. The tool
+// refuses to run when neither is set and never prints the password.
 package main
 
 import (
@@ -30,14 +35,19 @@ func main() {
 	tenantSlug := flag.String("tenant-slug", "", "tenant slug (unique)")
 	tenantName := flag.String("tenant-name", "", "tenant display name")
 	email := flag.String("email", "", "admin email")
-	password := flag.String("password", "", "admin password")
+	passwordFlag := flag.String("password", "", "admin password (local use; in deployed environments prefer the "+passwordEnv+
+		" environment variable — ECS injects it from Secrets Manager, so it never appears in CloudTrail or task definitions)")
 	name := flag.String("name", "Admin", "admin display name")
 	timezone := flag.String("timezone", identitydomain.DefaultTimezone, "tenant IANA timezone (ADR-0003), e.g. Europe/London")
 	flag.Parse()
 
-	if *tenantSlug == "" || *tenantName == "" || *email == "" || *password == "" {
-		fmt.Fprintln(os.Stderr, "usage: seed-admin --tenant-slug S --tenant-name N --email E --password P [--name Name] [--timezone Zone]")
+	if *tenantSlug == "" || *tenantName == "" || *email == "" {
+		fmt.Fprintln(os.Stderr, "usage: "+passwordEnv+"=... seed-admin --tenant-slug S --tenant-name N --email E [--password P] [--name Name] [--timezone Zone]")
 		os.Exit(1)
+	}
+	password, err := resolvePassword(*passwordFlag, os.Getenv)
+	if err != nil {
+		fail("resolve password", err)
 	}
 	// The same rule PUT /tenant applies: a loadable IANA zone, never "Local".
 	if err := identitydomain.ValidateTimezone(*timezone, time.LoadLocation); err != nil {
@@ -58,7 +68,7 @@ func main() {
 	db := database.NewExec(dbConn)
 
 	ctx := context.Background()
-	hash, err := crypto.HashPassword(*password)
+	hash, err := crypto.HashPassword(password)
 	if err != nil {
 		fail("hash password", err)
 	}
@@ -102,8 +112,10 @@ func main() {
 		fail("seed predefined data templates", err)
 	}
 
-	fmt.Printf("Seeded tenant %q\n  tenant_id: %s\n  timezone:  %s\n  user_id:   %s\n  admin:     %s\n  templates: %d predefined\n",
-		*tenantName, tenantID, *timezone, userID, *email, seeded)
+	// Reference ids only (ADR-0015): this line ends up in CI / task logs, so the
+	// admin's e-mail address is deliberately not echoed.
+	fmt.Printf("Seeded tenant %q\n  tenant_id: %s\n  timezone:  %s\n  admin user_id: %s\n  templates: %d predefined\n",
+		*tenantSlug, tenantID, *timezone, userID, seeded)
 }
 
 func fail(msg string, err error) {

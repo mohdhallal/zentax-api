@@ -9,6 +9,9 @@ const (
 	ErrNotFound     AppErrorCode = "NOT_FOUND"
 	ErrConflict     AppErrorCode = "CONFLICT"
 	ErrInternal     AppErrorCode = "INTERNAL"
+	// ErrUnavailable: a dependency the request needs (the database) is not
+	// answering — 503, so load balancers and orchestrators pull the task.
+	ErrUnavailable AppErrorCode = "UNAVAILABLE"
 )
 
 var statusMap = map[AppErrorCode]int{
@@ -18,6 +21,7 @@ var statusMap = map[AppErrorCode]int{
 	ErrNotFound:     404,
 	ErrConflict:     409,
 	ErrInternal:     500,
+	ErrUnavailable:  503,
 }
 
 type NotFoundErr interface {

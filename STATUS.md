@@ -4,7 +4,7 @@
 > lands. The cross-session roadmap lives in `../TaxFlowReports/PROJECT_PLAN.md`;
 > architecture decisions in `../TaxFlowReports/docs/adr/` (ADRs 0001–0019).
 
-**Last updated:** 2026-09-04 · **Toolchain:** Go 1.27 via gvm (`~/.gvm/gos/go1.27`;
+**Last updated:** 2026-09-05 · **Toolchain:** Go 1.27 via gvm (`~/.gvm/gos/go1.27`;
 the system `/usr/local/go` is a stale 1.19). **Gate:** `go build/vet/test ./...`
 green on both the main module and `acceptance/`.
 
@@ -76,6 +76,62 @@ green on both the main module and `acceptance/`.
   runs `STORAGE_FS_ROOT=/var/lib/zentax/documents` on a volume. Unit tests: fs round trip / not
   found / idempotent delete / atomic overwrite / short write / key validation incl. traversal /
   sidecar fallback; config defaults, overrides, empty-env, fail-closed.
+- **Deployment readiness (staging / production, ADR-0014 — 2026-09-05):** the API boots on ECS
+  from a shipped config file + injected environment, and refuses to boot otherwise.
+  - **Config files** `deployment/config_files/{development,staging,production}.json` (the Dockerfile
+    copies the whole directory; `APP_ENV` picks one). `staging` / `production` are production-shaped:
+    `database.url ""`, `auth.encryptionKey ""`, `cors.allowedOrigins []` (all three come from the
+    environment), `auth.sessionCookieSecure true`, `log {json, info}`, `metrics.enabled true`,
+    `storage.driver s3` (bucket + region from `STORAGE_S3_*`; a self-host production sets
+    `STORAGE_DRIVER=fs` + `STORAGE_FS_ROOT`), `swagger.enabled` **true in staging, false in
+    production** (new flag — `development.json` says `true`, an omitted flag means off; `bootstrap`
+    only mounts `/swagger` when it is on).
+  - **Environment variables** (an EMPTY value never overrides the file, like `STORAGE_*`):
+    `DATABASE_URL` — wins when set; otherwise `DB_HOST` + `DB_PORT` (default `5432`) + `DB_NAME` +
+    `DB_USER` + `DB_PASSWORD` + `DB_SSLMODE` (default `require`) compose
+    `postgres://user:pass@host:port/name?sslmode=…` with the user, password and name percent-encoded
+    (a Secrets-Manager-generated password with `@ / : % #` or spaces survives; IPv6 hosts bracketed).
+    `AUTH_ENCRYPTION_KEY` — base64 of exactly 32 bytes, **or** a passphrase of ≥ 32 characters derived
+    into the 32-byte key with SHA-256 (managed secret stores generate alphanumeric strings, not raw
+    key bytes; the derivation is deterministic, so rotation = a new passphrase + re-encrypt).
+    `AUTH_SESSION_COOKIE_SECURE` (true/false), `CORS_ALLOWED_ORIGINS` (comma-separated, trimmed),
+    `LOG_FORMAT` / `LOG_LEVEL`, `SWAGGER_ENABLED`, plus the existing `STORAGE_*`. `cmd/seed-admin`
+    goes through the same `config.Load`, so it accepts the `DB_*` parts and is held to the same rules;
+    its admin password comes from `SEED_ADMIN_PASSWORD` (preferred — ECS injects it from Secrets
+    Manager, so it never appears in a task definition or CloudTrail) or from `--password` for local
+    use, refusing to run when neither is set, holding it to the accept-invite length policy
+    (12–200 chars, `resolvePassword` unit-tested), and never printing it.
+  - **Fail-closed rules** for `APP_ENV=staging|production` (every violation reported in ONE startup
+    error, each naming the variable to set): encryption key present, decodable, and **not the
+    development key** (decoded bytes compared against `config.DevelopmentEncryptionKey`, which a
+    test pins to `development.json`); `sessionCookieSecure` true; `database.url` without
+    `sslmode=disable` (URL or key=value DSN); `cors.allowedOrigins` non-empty **and** without `"*"`
+    (`go-chi/cors` treats an empty list as `*`, so empty is refused too); `log.format json`.
+    Proven live: `APP_ENV=production` with a compose `DATABASE_URL …?sslmode=disable` is refused by
+    the rule; with `sslmode=require` (or the `DB_*` default) config validates and the boot then
+    fails at connect because the compose Postgres has no TLS — validation runs before any I/O.
+  - **Probes:** `GET /health` stays the liveness probe (no dependencies; the Dockerfile
+    `HEALTHCHECK` keeps it). **`GET /health/ready`** is the readiness probe: `SELECT 1` through the
+    pool with a 2 s timeout → `200 {status:true, data:{db:"ok"}}` or `503 {status:false, error:{code:
+    UNAVAILABLE}}` (new `httperr.ErrUnavailable` → 503; the driver error goes to the log, not the
+    body). Same exposure as `/health` (external + internal, unauthenticated).
+  - **`Dockerfile.migrate`** (repo root): `postgres:16-alpine` + `migrations/deploy` +
+    `deployment/docker/migrate.sh`, runs as the image's unprivileged `postgres` user, same env as
+    the compose job (`PGHOST PGPORT PGUSER PGPASSWORD PGDATABASE PGSSLMODE APP_DB_USER
+    APP_DB_PASSWORD`). `migrate.sh` now prints the target, every migration it applies, a
+    `N newly applied / M already applied / K in ledger` summary and the app role's
+    `superuser/bypassrls/login` flags; the app role's password is **re-set on every run** (a role that
+    pre-exists with another password — even as a superuser — is brought to
+    `NOSUPERUSER NOBYPASSRLS` + the current secret; verified against a scratch database on the compose
+    network: 24 files applied, login with the new password, old password refused, second run
+    idempotent). Role name and password travel as psql variables (`:"user"` / `:'pw'` + `format()` +
+    `\gexec`), so a generated password with quotes or `$` cannot break or inject into the SQL.
+  - Unit tests (`config/deploy_test.go`, `modules/health/handlers/ready_test.go`): both key forms,
+    the 32-char boundary, short/empty rejection, dev-key rejection by bytes, every deployed rule +
+    the all-at-once report, development exemption, every env override + the empty-env rule, URL
+    composition (escaping round trip through `url.Parse`, IPv6, defaults, `DATABASE_URL` wins), the
+    shipped files (production-shaped, refuse to boot alone, boot with env), ready 200 / 503 /
+    timeout / no-db.
 
 ### Domain modules (all tenant-scoped, hexagonal, full CRUD + acceptance tests)
 1. **entities** — tax-paying orgs (hierarchical, fiscal config). **Fiscal calendars (2026-09-05,
