@@ -1,8 +1,9 @@
 # zentax-api — Build Status & Remaining Work
 
 > Single source of truth for the state of the ZenTax Go backend. Updated as work
-> lands. The cross-session roadmap lives in `../TaxFlowReports/PROJECT_PLAN.md`;
-> architecture decisions in `../TaxFlowReports/docs/adr/` (ADRs 0001–0019).
+> lands. The cross-session roadmap lives in `../zentax-ui/PROJECT_PLAN.md` (the UI
+> repository, `github.com/mohdhallal/zentax-ui`, formerly `TaxFlowReports`);
+> architecture decisions in `../zentax-ui/docs/adr/` (ADRs 0001–0024).
 
 **Last updated:** 2026-09-05 · **Toolchain:** Go 1.27 via gvm (`~/.gvm/gos/go1.27`;
 the system `/usr/local/go` is a stale 1.19). **Gate:** `go build/vet/test ./...`
@@ -132,6 +133,62 @@ green on both the main module and `acceptance/`.
     composition (escaping round trip through `url.Parse`, IPv6, defaults, `DATABASE_URL` wins), the
     shipped files (production-shaped, refuse to boot alone, boot with env), ready 200 / 503 /
     timeout / no-db.
+- **Infrastructure (`zentax-api/infra`, ADR-0024 decision 8 — 2026-09-05):** this repository owns the
+  **foundations** of each AWS cell as a CDK v2 (TypeScript) app with its own `package.json`; the UI
+  repository (`../zentax-ui/infra`) owns only the web tier and the front door, and the two apps meet
+  on a named CloudFormation export contract — no third repo, no construct shared across apps.
+  - **Stacks:** account-level `ZenTax-GithubOidc` (`CliCredentialsStackSynthesizer`, deployed by the
+    admin identity, never by CI: the `token.actions.githubusercontent.com` provider, **four** deploy
+    roles — `zentax-deploy-<env>-api` trusting `repo:mohdhallal/zentax-api:environment:<env>` (push
+    `zentax/<env>/{api,migrate}`, `ecs:RunTask` on the `zentax-<env>-migrate` / `-seed` task
+    definitions in cluster `zentax-<env>`, update the api service, `iam:PassRole` on
+    `zentax-<env>-{api,migrate,seed}-*` to ECS only, read the api/migrate/seed logs) and
+    `zentax-deploy-<env>-web` trusting `repo:mohdhallal/zentax-ui:environment:<env>` (push
+    `zentax/<env>/web`, update the web service, `PassRole` on `zentax-<env>-web-*`, read the web
+    logs); both may assume the `cdk-hnb659fds-*` bootstrap roles and read stacks — the repositories
+    are constants `DEPLOY_REPOSITORIES` in `lib/github-oidc-stack.ts`; plus the managed policy
+    `ZenTaxCfnExecutionPolicy` for `cdk bootstrap --cloudformation-execution-policies`, exported as
+    `zentax-cfn-execution-policy-arn`). Per environment (`--context env=staging|production`):
+    `ZenTax-<Env>-Network` (VPC, endpoints, flow logs, **every** security group incl. the ALB's and
+    the web tasks' — the Web stack imports and attaches them, immutably), `ZenTax-<Env>-Data` (KMS,
+    RDS Postgres 16, the db-master / app-db / auth-encryption-key / seed-admin secrets, documents
+    bucket, `api` + `migrate` ECR, api/migrate/seed log groups, the `zentax-<env>-alarms` topic + RDS
+    alarms), `ZenTax-<Env>-Cluster` (ECS cluster `zentax-<env>`, Cloud Map `zentax-<env>.local`,
+    migrate + seed task definitions with pinned-revision outputs) and `ZenTax-<Env>-Api`
+    (`lib/api-stack.ts`: the api task definition — env + `ValueFrom` secrets exactly as before —
+    Fargate service on the Cluster stack's cluster with the Network api SG, Cloud Map `api`, CPU
+    autoscaling + circuit breaker, S3/KMS grants, `zentax-<env>-api-running-tasks` alarm). The web
+    ECR repository, the web log group and the origin-verify secret **moved** to the UI's Web stack.
+  - **Exports (`lib/exports.ts`, byte-identical to `../zentax-ui/infra/lib/exports.ts` — a test
+    compares them when the sibling checkout exists; the file is printed in ADR-0024):**
+    `zentax-<env>-` + Network `vpc-id, vpc-cidr, availability-zones, public-subnet-ids,
+    private-subnet-ids, alb-sg-id, web-sg-id, api-sg-id, jobs-sg-id`; Data `alarm-topic-arn,
+    documents-bucket, ecr-api, ecr-migrate`; Cluster `cluster-name, cluster-arn, namespace-name,
+    namespace-id, namespace-arn, migrate-task-family, migrate-task-arn, seed-task-family,
+    seed-task-arn, seed-admin-secret-arn`; Api `api-service-name, api-internal-url
+    (http://api.zentax-<env>.local:3000), api-task-arn`; OIDC `zentax-cfn-execution-policy-arn,
+    zentax-deploy-role-<env>-{api,web}`. The UI's Web stack emits `web-service-name, cloudfront-url,
+    cloudfront-id, alb-dns, ecr-web, web-task-arn`. `CORS_ALLOWED_ORIGINS` is now the optional
+    context key `corsAllowedOrigins` (validated `scheme://host` list, `*` refused; placeholder
+    `https://zentax-<env>.invalid` until the UI deploy publishes `cloudfront-url` — the web tier
+    strips `Origin`, so nothing depends on it; README step 8).
+  - **Pipeline (`.github/workflows/deploy.yml`, OIDC only):** push to `main` → staging; dispatch →
+    staging or production (gated by the GitHub `production` environment's reviewers). Role
+    `zentax-deploy-<env>-api` → build + push api + migrate images tagged with this repo's 12-char sha
+    → `cdk deploy --exclusively Network Data Cluster --context imageTag=<sha>` → migrate task from
+    the pinned `MigrateTaskDefinitionArn` (`scripts/ecs-pin-taskdef.sh` verifies the
+    `zentax-<env>-*` roles + ECR origin, re-registers only if the tag differs; `ecs-run-task.sh`
+    waits, checks the exit code, tails the log — non-zero stops the run before Api changes) →
+    `cdk deploy --exclusively Api` → `ecs wait services-stable` → `seed` job on dispatch input
+    `seed=true` (`SEED_ADMIN_EMAIL` / `SEED_TENANT_SLUG` / `SEED_TENANT_NAME` / `SEED_TIMEZONE`
+    environment secrets as a command override; the password is injected from the
+    `zentax/<env>/seed-admin` secret, never through GitHub). `ci.yml` gained an `infra` job (`npm ci`,
+    `tsc`, `jest`, synth of both cells with `CDK_DEFAULT_ACCOUNT` / `CDK_DEFAULT_REGION` only, no
+    credentials) and a `workflows` job (actionlint, shellcheck, the helper-script tests against a
+    fake `aws`). First deploy of a cell: OIDC → bootstrap `eu-central-1` + `us-east-1` with the
+    policy → Network + Data + Cluster by hand → this pipeline → the UI pipeline (Web + Edge) → seed
+    here. Runbook: `../zentax-ui/docs/ops/environments.md`; costs and the per-resource table:
+    `infra/README.md`.
 
 ### Domain modules (all tenant-scoped, hexagonal, full CRUD + acceptance tests)
 1. **entities** — tax-paying orgs (hierarchical, fiscal config). **Fiscal calendars (2026-09-05,
@@ -619,9 +676,9 @@ Commits: `4cdcd4e` scaffold · `2851179` tenancy+entities · `d074780` obligatio
 - **`zentax-mcp` sidecar — DEFERRED (logged 2026-08-23).** Both readiness blockers are closed
   (machine identity + audit) and the spec now carries `x-required-capability` for tool generation,
   so the sidecar is buildable when picked up — see
-  `../TaxFlowReports/docs/assessments/agentic-ai-mcp-readiness.md` for the design (thin stateless
+  `../zentax-ui/docs/assessments/agentic-ai-mcp-readiness.md` for the design (thin stateless
   translator, tools from the route registry, approval never exposed as a tool).
-- **Strip `server/` from `TaxFlowReports`** — deferred until the Go API + client replace the Express dev server.
+- **Strip `server/` from `zentax-ui`** — deferred until the Go API + client replace the Express dev server.
 
 ---
 

@@ -1,0 +1,419 @@
+# zentax-api — build, deploy foundations, migrate, deploy the api, (seed) —
+# the API half of one AWS cell per environment (ADR-0024).
+#
+#   push to main            -> staging, automatically
+#   workflow_dispatch       -> staging or production (production is gated by the
+#                              GitHub environment `production`: required reviewers
+#                              are configured in the repo settings, see the UI
+#                              repository's docs/ops/environments.md)
+#
+# What this repository deploys: ZenTax-<Env>-Network, -Data, -Cluster (the
+# shared foundations of the cell) and ZenTax-<Env>-Api (the api service). The
+# web tier — ZenTax-<Env>-Web (web service, ALB, CloudFront) and -Edge — is
+# deployed by github.com/mohdhallal/zentax-ui, which reads the foundations
+# through the CloudFormation exports in infra/lib/exports.ts. Deploy order on a
+# fresh cell: this workflow first (it creates the exports), then the UI one.
+#
+# Credentials: OIDC only (ADR-0016). Every job that touches AWS runs inside the
+# GitHub environment, because the deploy role's trust policy matches the claim
+# `repo:mohdhallal/zentax-api:environment:<env>` — a job without `environment:`
+# cannot assume it. The role (zentax-deploy-<env>-api) may push only the api
+# and migrate images, run only the migrate/seed tasks and roll only the api
+# service. No long-lived keys anywhere. The trust is only as strong as the
+# environment's "Deployment branches: main only" rule.
+#
+# Order inside `deploy` (the same on the first and on every later run):
+#   cdk deploy Network + Data + Cluster (--context imageTag=<tag>)
+#     -> run the Cluster stack's migrate task definition (pinned revision ARN,
+#        roles verified, exit code checked — a failure stops the run here)
+#     -> cdk deploy Api (the service rolls to the new tag)
+#     -> wait services-stable
+# There is no "skip migrate on the first deploy" path: the Cluster stack exists
+# before Api does, so the migrate task always exists when it is needed.
+#
+# Stack-output contract (fixed with infra/): the four API-owned stacks export
+# the keys listed under OUTPUT_KEYS below. Change the names here if the CDK app
+# renames an output; nothing else needs to know.
+#
+# Image tag: the 12-character commit sha of this repository, pushed for the api
+# and migrate images, is the tag CDK deploys (the UI repository tags its web
+# image with its own sha; the two are independent).
+
+name: deploy
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment (production requires reviewer approval)
+        type: choice
+        required: true
+        default: staging
+        options: [staging, production]
+      seed:
+        description: Run seed-admin after deploy (first tenant + admin; the password is generated in Secrets Manager, never passed here)
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ github.event_name == 'push' && 'staging' || inputs.environment }}
+  cancel-in-progress: false
+
+env:
+  AWS_ACCOUNT_ID: "160117555326"
+  AWS_REGION: eu-central-1
+  # --- OUTPUT_KEYS: CloudFormation output keys read from the ZenTax-<Env>-* stacks
+  # (space-separated = candidates tried in order; first match wins).
+  OUT_CLUSTER_NAME: ClusterName
+  OUT_API_SERVICE: ApiServiceName
+  # Pinned revision ARNs (Cluster stack). Never the family: a family name
+  # resolves to whatever revision was registered last, by anyone.
+  OUT_MIGRATE_TASKDEF: MigrateTaskDefinitionArn
+  OUT_SEED_TASKDEF: SeedTaskDefinitionArn
+  OUT_SEED_ADMIN_SECRET: SeedAdminSecretArn
+  OUT_PRIVATE_SUBNETS: PrivateSubnetIds
+  OUT_TASK_SG: JobsSecurityGroupId
+  OUT_ECR_API: ApiRepositoryUri
+  OUT_ECR_MIGRATE: MigrateRepositoryUri
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # plan: resolve target environment + inputs (no AWS access)
+  # ---------------------------------------------------------------------------
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      env: ${{ steps.resolve.outputs.env }}
+      env_cap: ${{ steps.resolve.outputs.env_cap }}
+      seed: ${{ steps.resolve.outputs.seed }}
+    steps:
+      - id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          IN_ENVIRONMENT: ${{ inputs.environment }}
+          IN_SEED: ${{ inputs.seed }}
+        run: |
+          if [ "$EVENT_NAME" = "push" ]; then
+            env=staging; seed=false
+          else
+            env="$IN_ENVIRONMENT"; seed="$IN_SEED"
+          fi
+          case "$env" in staging|production) ;; *) echo "::error::unknown environment '$env'"; exit 1;; esac
+          env_cap="$(tr '[:lower:]' '[:upper:]' <<<"${env:0:1}")${env:1}"
+          {
+            echo "env=$env"
+            echo "env_cap=$env_cap"
+            echo "seed=$seed"
+          } >> "$GITHUB_OUTPUT"
+          echo "target: $env (stacks ZenTax-$env_cap-{Network,Data,Cluster,Api}), seed: $seed"
+
+  # ---------------------------------------------------------------------------
+  # (a) build-and-push: api + migrate images -> ECR, tagged with this commit
+  # ---------------------------------------------------------------------------
+  build-and-push:
+    name: build & push images (${{ needs.plan.outputs.env }})
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    environment: ${{ needs.plan.outputs.env }}
+    permissions:
+      id-token: write
+      contents: read
+    outputs:
+      tag: ${{ steps.sha.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve image tag
+        id: sha
+        run: |
+          tag="$(git rev-parse --short=12 HEAD)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "deploy tag: $tag"
+
+      - name: Configure AWS credentials (OIDC -> zentax-deploy-${{ needs.plan.outputs.env }}-api)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/zentax-deploy-${{ needs.plan.outputs.env }}-api
+          role-session-name: gha-build-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+          mask-aws-account-id: false
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          mask-password: true
+
+      # The ECR repositories belong to the cell's Data stack, so they must exist
+      # before the first image push: the first-time checklist in infra/README.md
+      # deploys ZenTax-<Env>-Network + -Data + -Cluster by hand. A missing output
+      # (or an AccessDenied) fails here, loudly.
+      - name: Resolve ECR repositories
+        id: repos
+        env:
+          PREFIX: ZenTax-${{ needs.plan.outputs.env_cap }}-
+        run: |
+          s=.github/workflows/scripts; chmod +x $s/*.sh
+          api="$($s/stack-output.sh "$PREFIX" "$OUT_ECR_API")"
+          migrate="$($s/stack-output.sh "$PREFIX" "$OUT_ECR_MIGRATE")"
+          for uri in "$api" "$migrate"; do
+            name="${uri#*/}"
+            if ! aws ecr describe-repositories --repository-names "$name" >/dev/null; then
+              echo "::error title=ecr::repository '$name' does not exist — deploy the ${PREFIX}Data stack first (infra/README.md, first deployment)"
+              exit 1
+            fi
+          done
+          {
+            echo "api=$api"
+            echo "migrate=$migrate"
+          } >> "$GITHUB_OUTPUT"
+          echo "api=$api migrate=$migrate"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build + push api image (zentax-api + seed-admin)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          platforms: linux/amd64
+          provenance: false
+          tags: ${{ steps.repos.outputs.api }}:${{ steps.sha.outputs.tag }}
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,mode=max,scope=api
+
+      - name: Build + push migrate image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.migrate
+          push: true
+          platforms: linux/amd64
+          provenance: false
+          tags: ${{ steps.repos.outputs.migrate }}:${{ steps.sha.outputs.tag }}
+          cache-from: type=gha,scope=migrate
+          cache-to: type=gha,mode=max,scope=migrate
+
+      - name: Summary
+        run: |
+          {
+            echo "### Images pushed (${{ needs.plan.outputs.env }})"
+            echo "- deploy tag: \`${{ steps.sha.outputs.tag }}\` (api, migrate)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # (b) deploy: foundations -> migrate -> api. The deploy role assumes the CDK
+  #     bootstrap roles (cdk-hnb659fds-*) for CloudFormation / asset publishing.
+  #     Migrations run BEFORE the service moves to the new code (expand/contract,
+  #     ADR-0013) and a failed migration stops the run before Api changes.
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: deploy (${{ needs.plan.outputs.env }})
+    needs: [plan, build-and-push]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    environment: ${{ needs.plan.outputs.env }}
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      PREFIX: ZenTax-${{ needs.plan.outputs.env_cap }}-
+      TARGET_ENV: ${{ needs.plan.outputs.env }}
+      ENV_CAP: ${{ needs.plan.outputs.env_cap }}
+      IMAGE_TAG: ${{ needs.build-and-push.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: CDK environment (account/region from the workflow env)
+        run: |
+          {
+            echo "CDK_DEFAULT_ACCOUNT=${AWS_ACCOUNT_ID}"
+            echo "CDK_DEFAULT_REGION=${AWS_REGION}"
+          } >> "$GITHUB_ENV"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: infra/package-lock.json
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/zentax-deploy-${{ needs.plan.outputs.env }}-api
+          role-session-name: gha-deploy-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+          mask-aws-account-id: false
+
+      - name: Install CDK app
+        working-directory: infra
+        run: npm ci
+
+      # 1/4 — foundations. Cluster carries the migrate + seed task definitions,
+      # already pointing at the new image tag after this step. These stacks also
+      # emit the exports the UI repository's Web stack imports.
+      - name: cdk deploy ${{ needs.plan.outputs.env_cap }} Network + Data + Cluster
+        working-directory: infra
+        run: |
+          npx cdk deploy --exclusively \
+            "ZenTax-${ENV_CAP}-Network" "ZenTax-${ENV_CAP}-Data" "ZenTax-${ENV_CAP}-Cluster" \
+            --context "env=${TARGET_ENV}" \
+            --context "imageTag=${IMAGE_TAG}" \
+            --require-approval never \
+            --progress events \
+            --outputs-file cdk-outputs-foundations.json
+
+      # 2/4 — migrate: the Cluster stack's pinned revision, roles verified, image
+      # tag asserted (a revision is registered only if the tag differs), then
+      # run-task + wait + exit code + log tail. Non-zero exit = the run stops here.
+      - name: Run migrations (task definition from ${{ needs.plan.outputs.env_cap }}-Cluster)
+        run: |
+          s=.github/workflows/scripts; chmod +x $s/*.sh
+          pinned="$($s/stack-output.sh "$PREFIX" "$OUT_MIGRATE_TASKDEF")"
+          taskdef="$($s/ecs-pin-taskdef.sh "$pinned" "$IMAGE_TAG")"
+          CLUSTER="$($s/stack-output.sh "$PREFIX" "$OUT_CLUSTER_NAME")"
+          SUBNETS="$($s/stack-output.sh "$PREFIX" "$OUT_PRIVATE_SUBNETS")"
+          SECURITY_GROUP="$($s/stack-output.sh "$PREFIX" "$OUT_TASK_SG")"
+          export CLUSTER SUBNETS SECURITY_GROUP
+          $s/ecs-run-task.sh "$taskdef"
+          echo "- migrate: \`$taskdef\` exit 0" >> "$GITHUB_STEP_SUMMARY"
+
+      # 3/4 — api: the service rolls to the new tag (circuit breaker rolls a bad
+      # one back). The web tier is untouched: it finds the api by Cloud Map name.
+      - name: cdk deploy ${{ needs.plan.outputs.env_cap }} Api
+        working-directory: infra
+        run: |
+          npx cdk deploy --exclusively "ZenTax-${ENV_CAP}-Api" \
+            --context "env=${TARGET_ENV}" \
+            --context "imageTag=${IMAGE_TAG}" \
+            --require-approval never \
+            --progress events \
+            --outputs-file cdk-outputs-api.json
+          # Outputs are non-secret resource names/ARNs; keep them in the summary.
+          {
+            echo "### cdk deploy (${TARGET_ENV}) — image tag \`${IMAGE_TAG}\`"
+            echo '```json'
+            jq -s 'add' cdk-outputs-foundations.json cdk-outputs-api.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # 4/4 — wait for the rollout.
+      - name: Wait for the api service to stabilise
+        run: |
+          s=.github/workflows/scripts
+          cluster="$($s/stack-output.sh "$PREFIX" "$OUT_CLUSTER_NAME")"
+          api="$($s/stack-output.sh "$PREFIX" "$OUT_API_SERVICE")"
+          # each waiter round is ~10 min (40 x 15 s)
+          for i in 1 2 3; do
+            if aws ecs wait services-stable --cluster "$cluster" --services "$api"; then
+              echo "service stable: $api"; exit 0
+            fi
+            echo "round $i: not stable yet"
+          done
+          echo "::error title=ecs::the api service did not stabilise — check ECS events (rollback: re-run with the previous tag)"
+          aws ecs describe-services --cluster "$cluster" --services "$api" \
+            --query 'services[].{name:serviceName,events:events[:5].message}' --output json
+          exit 1
+
+  # ---------------------------------------------------------------------------
+  # (c) seed: first tenant + admin (only on request). The identity values come
+  #     from the GitHub environment secrets SEED_ADMIN_EMAIL, SEED_TENANT_SLUG,
+  #     SEED_TENANT_NAME, SEED_TIMEZONE (optional) and are passed as a container
+  #     command override. The PASSWORD never passes through GitHub: the Cluster
+  #     stack injects SEED_ADMIN_PASSWORD into the task from the Secrets Manager
+  #     secret zentax/<env>/seed-admin (generated by CDK). The operator reads it
+  #     with `aws secretsmanager get-secret-value --secret-id zentax/<env>/seed-admin`
+  #     and changes it after the first login.
+  # ---------------------------------------------------------------------------
+  seed:
+    name: seed first tenant + admin (${{ needs.plan.outputs.env }})
+    needs: [plan, build-and-push, deploy]
+    if: needs.plan.outputs.seed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: ${{ needs.plan.outputs.env }}
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      PREFIX: ZenTax-${{ needs.plan.outputs.env_cap }}-
+      TARGET_ENV: ${{ needs.plan.outputs.env }}
+      IMAGE_TAG: ${{ needs.build-and-push.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/workflows/scripts
+          sparse-checkout-cone-mode: false
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/zentax-deploy-${{ needs.plan.outputs.env }}-api
+          role-session-name: gha-seed-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+          mask-aws-account-id: false
+      - name: Run seed task
+        env:
+          SEED_ADMIN_EMAIL: ${{ secrets.SEED_ADMIN_EMAIL }}
+          SEED_TENANT_SLUG: ${{ secrets.SEED_TENANT_SLUG }}
+          SEED_TENANT_NAME: ${{ secrets.SEED_TENANT_NAME }}
+          SEED_TIMEZONE: ${{ secrets.SEED_TIMEZONE }}
+        run: |
+          s=.github/workflows/scripts; chmod +x $s/*.sh
+          for v in SEED_ADMIN_EMAIL SEED_TENANT_SLUG SEED_TENANT_NAME; do
+            if [ -z "${!v}" ]; then echo "::error title=seed::environment secret $v is not set"; exit 1; fi
+          done
+          pinned="$($s/stack-output.sh "$PREFIX" "$OUT_SEED_TASKDEF")"
+          taskdef="$($s/ecs-pin-taskdef.sh "$pinned" "$IMAGE_TAG")"
+          CLUSTER="$($s/stack-output.sh "$PREFIX" "$OUT_CLUSTER_NAME")"
+          SUBNETS="$($s/stack-output.sh "$PREFIX" "$OUT_PRIVATE_SUBNETS")"
+          SECURITY_GROUP="$($s/stack-output.sh "$PREFIX" "$OUT_TASK_SG")"
+          export CLUSTER SUBNETS SECURITY_GROUP
+          # seed-admin takes flags, so the seed task definition MUST set
+          # entryPoint ["seed-admin"] — run-task can override only `command` —
+          # and MUST inject SEED_ADMIN_PASSWORD from the zentax/<env>/seed-admin
+          # secret; the workflow never carries a password.
+          cdef="$(aws ecs describe-task-definition --task-definition "$taskdef" \
+            --query 'taskDefinition.containerDefinitions[0]' --output json)"
+          container="$(jq -r '.name' <<<"$cdef")"
+          if ! jq -e '(.entryPoint // []) | any(. == "seed-admin" or endswith("/seed-admin"))' <<<"$cdef" >/dev/null; then
+            echo "::error title=seed::the seed task definition must set entryPoint [seed-admin] (command override carries the flags)"
+            exit 1
+          fi
+          if ! jq -e --arg env "$TARGET_ENV" '
+                (.secrets // []) | any(.name == "SEED_ADMIN_PASSWORD"
+                  and (.valueFrom | test(":secret:zentax/" + $env + "/seed-admin")))' <<<"$cdef" >/dev/null; then
+            echo "::error title=seed::the seed task definition must inject SEED_ADMIN_PASSWORD from the Secrets Manager secret zentax/${TARGET_ENV}/seed-admin"
+            exit 1
+          fi
+          jq -n --arg c "$container" \
+            --arg slug "$SEED_TENANT_SLUG" --arg name "$SEED_TENANT_NAME" \
+            --arg email "$SEED_ADMIN_EMAIL" --arg tz "$SEED_TIMEZONE" '
+            {containerOverrides: [{name: $c,
+              command: (["--tenant-slug", $slug, "--tenant-name", $name, "--email", $email]
+                        + (if $tz == "" then [] else ["--timezone", $tz] end))}]}' > overrides.json
+          $s/ecs-run-task.sh "$taskdef" overrides.json
+          rm -f overrides.json
+          # Summary text only (the secret NAME is deterministic); an error here is
+          # printed but does not fail a seed that already succeeded.
+          secret_id="$($s/stack-output.sh "$PREFIX" "$OUT_SEED_ADMIN_SECRET" || echo "zentax/${TARGET_ENV}/seed-admin")"
+          {
+            echo "### Seeded first tenant + admin (${TARGET_ENV})"
+            echo "The admin password was generated in Secrets Manager and never left AWS. Read it as an operator:"
+            echo '```bash'
+            echo "aws secretsmanager get-secret-value --secret-id '${secret_id}' --query SecretString --output text"
+            echo '```'
+            echo "Sign in, **change the password**, enrol TOTP. Then rotate the secret so the seed value is dead:"
+            echo '```bash'
+            echo "aws secretsmanager put-secret-value --secret-id '${secret_id}' --secret-string \"\$(openssl rand -base64 30)\""
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

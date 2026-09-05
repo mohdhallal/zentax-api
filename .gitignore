@@ -36,3 +36,10 @@ Thumbs.db
 
 tmp/
 acceptance/test-output/
+
+# infra/ (AWS CDK): sources are tracked, build output and deps are not
+infra/node_modules
+infra/cdk.out
+
+infra/cdk.context.json
+infra/cdk-outputs*.json

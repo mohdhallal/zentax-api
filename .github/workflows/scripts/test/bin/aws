@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Fake `aws` CLI for scripts/test/run.sh — serves canned responses from
+# $FAKE_AWS_DIR and records every call in $FAKE_AWS_DIR/calls.log. Never talks
+# to AWS. Supports only the sub-commands the deploy scripts use.
+set -euo pipefail
+: "${FAKE_AWS_DIR:?FAKE_AWS_DIR required}"
+printf '%s\n' "$*" >> "$FAKE_AWS_DIR/calls.log"
+
+service="${1:-}"; op="${2:-}"; shift 2 || true
+arg() { # arg --<name> "$@": value following --<name>
+  local name="$1"; shift
+  while [ $# -gt 1 ]; do
+    if [ "$1" = "$name" ]; then printf '%s' "$2"; return 0; fi
+    shift
+  done
+  return 1
+}
+
+case "$service $op" in
+  "cloudformation describe-stacks")
+    name="$(arg --stack-name "$@" || true)"
+    if [ -z "$name" ]; then
+      echo "fake aws: describe-stacks without --stack-name is not allowed by the deploy scripts" >&2
+      exit 99
+    fi
+    if [ -f "$FAKE_AWS_DIR/stacks/$name.error" ]; then
+      cat "$FAKE_AWS_DIR/stacks/$name.error" >&2; exit 254
+    fi
+    if [ ! -f "$FAKE_AWS_DIR/stacks/$name.json" ]; then
+      echo "An error occurred (ValidationError) when calling the DescribeStacks operation: Stack with id $name does not exist" >&2
+      exit 254
+    fi
+    cat "$FAKE_AWS_DIR/stacks/$name.json";;
+  "ecs describe-task-definition")
+    td="$(arg --task-definition "$@")"
+    file="$FAKE_AWS_DIR/taskdefs/${td##*/}.json"
+    if [ ! -f "$file" ]; then
+      echo "An error occurred (ClientException) when calling the DescribeTaskDefinition operation: Unable to describe task definition." >&2
+      exit 254
+    fi
+    cat "$file";;
+  "ecs register-task-definition")
+    json="$(arg --cli-input-json "$@")"
+    printf '%s' "$json" > "$FAKE_AWS_DIR/registered.json"
+    family="$(jq -r .family <<<"$json")"
+    echo "arn:aws:ecs:eu-central-1:160117555326:task-definition/${family}:99";;
+  *)
+    echo "fake aws: unsupported call: $service $op $*" >&2
+    exit 98;;
+esac

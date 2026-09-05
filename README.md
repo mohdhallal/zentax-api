@@ -47,7 +47,10 @@ Production-ready Go API with **Vertical Slice Architecture**, PostgreSQL, auto-g
 │   ├── config.go              → Config loader (dtconfig)
 │   └── types.go               → Config structs
 ├── deployment/
-│   └── config_files/          → Per-environment JSON configs
+│   └── config_files/          → Per-environment JSON configs (development / staging / production)
+├── infra/                     → AWS CDK: the environment foundations (VPC, RDS, KMS, S3, ECS cluster),
+│                                 the GitHub OIDC deploy roles and the Api stack — see infra/README.md;
+│                                 the web service + front door live in ../zentax-ui/infra (ADR-0024)
 ├── delivery/httpkit/
 │   ├── response.go            → Response helpers (Ok, Created, NoContent)
 │   ├── httperr/               → Error classification + HTTP error responses

@@ -1,0 +1,30 @@
+{
+  "name": "zentax-api-infra",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AWS CDK v2 infrastructure owned by the ZenTax API repository: the shared cell foundations (Network, Data, Cluster), the api service and the GitHub OIDC deploy roles (staging + production).",
+  "bin": {
+    "zentax": "bin/zentax.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "check": "tsc --noEmit",
+    "test": "jest",
+    "cdk": "cdk",
+    "synth:staging": "cdk synth --context env=staging",
+    "synth:production": "cdk synth --context env=production"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.14",
+    "@types/node": "^24.0.0",
+    "aws-cdk": "2.1140.0",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.2.5",
+    "ts-node": "^10.9.2",
+    "typescript": "~5.6.3"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "2.268.0",
+    "constructs": "^10.4.2"
+  }
+}
