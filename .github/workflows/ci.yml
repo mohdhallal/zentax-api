@@ -8,8 +8,9 @@
 #             silently defeat RLS and pass every isolation test (STATUS.md runbook).
 #   images  : docker build of the api (+ seed-admin) and migrate images, no push.
 #   infra   : the CDK app in infra/ — jest stack assertions + a credential-less
-#             synth of both cells (only CDK_DEFAULT_ACCOUNT / CDK_DEFAULT_REGION
-#             are set so the app resolves its env without calling STS).
+#             synth of both cells, staging-eu and production-eu (only
+#             CDK_DEFAULT_ACCOUNT / CDK_DEFAULT_REGION are set so the app
+#             resolves its env without calling STS).
 #   workflows : actionlint + shellcheck + the deploy helper-script tests (fake aws).
 #
 # Deployment lives in deploy.yml (OIDC only, ADR-0016): this repository deploys
@@ -225,11 +226,16 @@ jobs:
       - name: Unit tests (stack assertions, export contract)
         run: npx jest
 
-      - name: Synth staging cell
-        run: npx cdk synth --context env=staging --quiet
-
-      - name: Synth production cell
-        run: npx cdk synth --context env=production --quiet
+      # One synth per cell (each also carries the account-level ZenTax-GithubOidc
+      # and ZenTax-Dns stacks). The Dns stack warns while the Google DNS values
+      # in cdk.json are empty; a warning does not fail synth.
+      - name: Synth both cells (staging-eu, production-eu)
+        run: |
+          for e in staging-eu production-eu; do
+            echo "::group::cdk synth --context env=$e"
+            npx cdk synth --context "env=$e" --quiet
+            echo "::endgroup::"
+          done
 
       - name: No context lookup happened
         run: |
@@ -257,9 +263,10 @@ jobs:
       - name: shellcheck (deploy helper scripts)
         run: shellcheck .github/workflows/scripts/*.sh .github/workflows/scripts/test/run.sh .github/workflows/scripts/test/bin/aws
 
-      # stack-output.sh / ecs-pin-taskdef.sh against a fake `aws` — no
-      # credentials, no network. Proves the by-name stack lookup over the four
-      # API-owned stacks, the AccessDenied-is-fatal rule and the task-role
-      # verification.
+      # env-title.sh / stack-output.sh / ecs-pin-taskdef.sh against a fake
+      # `aws` — no credentials, no network. Proves the cell -> stack-name
+      # derivation (staging-eu -> ZenTax-StagingEu-*), the by-name stack lookup
+      # over the four API-owned stacks, the AccessDenied-is-fatal rule and the
+      # task-role verification.
       - name: deploy script tests
         run: bash .github/workflows/scripts/test/run.sh

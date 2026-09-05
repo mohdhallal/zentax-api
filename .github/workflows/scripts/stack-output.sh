@@ -2,7 +2,8 @@
 # Print the value of a CloudFormation output from one ZenTax cell.
 #
 #   usage: stack-output.sh <StackNamePrefix> <OutputKey> [<FallbackOutputKey>...]
-#   e.g.   stack-output.sh ZenTax-Staging- ClusterName
+#   e.g.   stack-output.sh ZenTax-StagingEu- ClusterName
+#          (prefix = ZenTax-<Title>-, Title from env-title.sh: staging-eu -> StagingEu)
 #
 # The API repository owns exactly four stacks of a cell — <prefix>Network,
 # <prefix>Data, <prefix>Cluster, <prefix>Api — and each is described BY NAME

@@ -3,12 +3,12 @@ import { DATA_EXPORTS, exportName } from '../lib/exports';
 import { ENVS, exportNamesOf, resourcesOfType, synthEnv } from './helpers';
 
 const expected = {
-  staging: {
+  'staging-eu': {
     multiAz: false, deletionProtection: false, backupDays: 7, retention: 30,
     dataDeletionPolicy: 'Delete', dbDeletionPolicy: 'Delete', deleteAutomatedBackups: true,
     allocatedGb: 20, classMemoryGib: 2, ownsRdsOsMetrics: true,
   },
-  production: {
+  'production-eu': {
     multiAz: true, deletionProtection: true, backupDays: 35, retention: 365,
     dataDeletionPolicy: 'Retain', dbDeletionPolicy: 'Snapshot', deleteAutomatedBackups: false,
     allocatedGb: 50, classMemoryGib: 4, ownsRdsOsMetrics: false,
@@ -17,6 +17,7 @@ const expected = {
 
 describe.each(ENVS)('ZenTax-%s-Data', (env) => {
   const want = expected[env];
+  const production = env === 'production-eu';
   const { data } = synthEnv(env);
 
   test('RDS is Postgres 16, KMS-encrypted, with Multi-AZ / deletion protection / backups per environment', () => {
@@ -32,7 +33,8 @@ describe.each(ENVS)('ZenTax-%s-Data', (env) => {
       EnablePerformanceInsights: true,
       EnableCloudwatchLogsExports: ['postgresql'],
       PubliclyAccessible: false,
-      DBInstanceClass: env === 'production' ? 'db.t4g.medium' : 'db.t4g.small',
+      DBInstanceClass: production ? 'db.t4g.medium' : 'db.t4g.small',
+      DBInstanceIdentifier: `zentax-${env}`,
     });
   });
 
@@ -43,7 +45,7 @@ describe.each(ENVS)('ZenTax-%s-Data', (env) => {
       Properties: Match.objectLike({ DeleteAutomatedBackups: want.deleteAutomatedBackups, DeletionProtection: want.deletionProtection }),
     });
     // Production is never plain-deleted: a final snapshot is the worst case.
-    if (env === 'production') {
+    if (production) {
       const [, db] = resourcesOfType(data, 'AWS::RDS::DBInstance')[0];
       expect(db.DeletionPolicy).not.toBe('Delete');
     }

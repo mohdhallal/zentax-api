@@ -43,6 +43,11 @@ const (
 	EnvLogLevel                = "LOG_LEVEL"            // debug | info | warn | error
 	EnvSwaggerEnabled          = "SWAGGER_ENABLED"
 
+	// EnvPublicBaseURL overrides app.publicBaseUrl: the product's public origin
+	// ("https://" + the cell's publicHostname), trimmed, trailing slash
+	// stripped, validated as an absolute http(s) URL at startup.
+	EnvPublicBaseURL = "PUBLIC_BASE_URL"
+
 	// Storage overrides (ADR-0022). An EMPTY value never overrides the file:
 	// the compose stack passes empty strings for the unused driver's settings.
 	EnvStorageDriver           = "STORAGE_DRIVER"
@@ -102,6 +107,10 @@ func (c *Config) validate() error {
 	if c.App.Port == 0 {
 		return fmt.Errorf("app.port is required")
 	}
+	c.App.PublicBaseURL = normalizePublicBaseURL(c.App.PublicBaseURL)
+	if err := validatePublicBaseURL(c.App.PublicBaseURL); err != nil {
+		return err
+	}
 	if c.IsDeployed() {
 		if err := c.validateDeployed(); err != nil {
 			return err
@@ -157,7 +166,51 @@ func (c *Config) validateDeployed() error {
 		errs = append(errs, fmt.Errorf("log.format must be json in %s (set %s=json)", c.App.Env, EnvLogFormat))
 	}
 
+	// The public origin is optional (a cell without its custom domain yet has
+	// none), but when present it must be https: a Secure session cookie (required
+	// above) never travels over http, so an http origin can only be a mistake.
+	if c.App.PublicBaseURL != "" && !strings.HasPrefix(c.App.PublicBaseURL, "https://") {
+		errs = append(errs, fmt.Errorf("app.publicBaseUrl must use https in %s, got %q (set %s to the https public origin)",
+			c.App.Env, c.App.PublicBaseURL, EnvPublicBaseURL))
+	}
+
 	return errors.Join(errs...)
+}
+
+// normalizePublicBaseURL trims whitespace and strips trailing slashes so
+// callers can append "/path" without producing "//path". Empty stays empty.
+func normalizePublicBaseURL(raw string) string {
+	return strings.TrimRight(strings.TrimSpace(raw), "/")
+}
+
+// validatePublicBaseURL accepts "" (not configured) or an absolute http(s)
+// origin, optionally with a path prefix: scheme + host, no userinfo, query or
+// fragment — the parts that would corrupt every link built on top of it.
+func validatePublicBaseURL(value string) error {
+	if value == "" {
+		return nil
+	}
+	fail := func(reason string) error {
+		return fmt.Errorf("app.publicBaseUrl must be an absolute http(s) URL, got %q: %s (set %s, e.g. https://eu.app.zentax.software)",
+			value, reason, EnvPublicBaseURL)
+	}
+	u, err := url.Parse(value)
+	if err != nil {
+		return fail(err.Error())
+	}
+	switch {
+	case u.Scheme != "http" && u.Scheme != "https":
+		return fail("scheme must be http or https")
+	case u.Host == "" || u.Hostname() == "":
+		return fail("host is required")
+	case u.User != nil:
+		return fail("userinfo is not allowed")
+	case u.RawQuery != "" || u.ForceQuery:
+		return fail("query string is not allowed")
+	case u.Fragment != "" || u.RawFragment != "":
+		return fail("fragment is not allowed")
+	}
+	return nil
 }
 
 func isDevelopmentKey(key []byte) bool {
@@ -183,6 +236,7 @@ func sslModeDisabled(dbURL string) bool {
 }
 
 func mergeEnvOverrides(conf *Config) {
+	mergeAppEnvOverrides(&conf.App)
 	mergeDatabaseEnvOverrides(&conf.Database)
 	mergeAuthEnvOverrides(&conf.Auth)
 	mergeCORSEnvOverrides(&conf.CORS)
@@ -193,6 +247,15 @@ func mergeEnvOverrides(conf *Config) {
 		}
 	}
 	mergeStorageEnvOverrides(&conf.Storage)
+}
+
+// mergeAppEnvOverrides applies PUBLIC_BASE_URL over app.publicBaseUrl. An
+// empty (or whitespace-only) value never overrides the file — the ECS task
+// passes "" while the cell has no public hostname yet.
+func mergeAppEnvOverrides(a *AppConfig) {
+	if val := normalizePublicBaseURL(os.Getenv(EnvPublicBaseURL)); val != "" {
+		a.PublicBaseURL = val
+	}
 }
 
 // mergeDatabaseEnvOverrides: DATABASE_URL wins; otherwise, when DB_HOST is

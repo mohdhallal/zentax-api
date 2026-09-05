@@ -1,23 +1,27 @@
 # zentax-api — build, deploy foundations, migrate, deploy the api, (seed) —
-# the API half of one AWS cell per environment (ADR-0024).
+# the API half of one AWS cell (ADR-0024). Cells are keyed by tier + region
+# label: `staging-eu`, `production-eu` (the GitHub environments, the deploy
+# roles and every AWS name carry that cell name; the stack names carry its
+# PascalCase title: ZenTax-StagingEu-*, ZenTax-ProductionEu-*).
 #
-#   push to main            -> staging, automatically
-#   workflow_dispatch       -> staging or production (production is gated by the
-#                              GitHub environment `production`: required reviewers
-#                              are configured in the repo settings, see the UI
-#                              repository's docs/ops/environments.md)
+#   push to main            -> staging-eu, automatically
+#   workflow_dispatch       -> staging-eu or production-eu (production-eu is gated
+#                              by the GitHub environment `production-eu`: required
+#                              reviewers are configured in the repo settings, see
+#                              the UI repository's docs/ops/environments.md)
 #
-# What this repository deploys: ZenTax-<Env>-Network, -Data, -Cluster (the
-# shared foundations of the cell) and ZenTax-<Env>-Api (the api service). The
-# web tier — ZenTax-<Env>-Web (web service, ALB, CloudFront) and -Edge — is
-# deployed by github.com/mohdhallal/zentax-ui, which reads the foundations
-# through the CloudFormation exports in infra/lib/exports.ts. Deploy order on a
-# fresh cell: this workflow first (it creates the exports), then the UI one.
+# What this repository deploys: ZenTax-<Title>-Network, -Data, -Cluster (the
+# shared foundations of the cell) and ZenTax-<Title>-Api (the api service). The
+# web tier — ZenTax-<Title>-Web (web service, ALB) and -Edge (us-east-1:
+# CloudFront, certificate, aliases) — is deployed by
+# github.com/mohdhallal/zentax-ui, which reads the foundations through the
+# CloudFormation exports in infra/lib/exports.ts. Deploy order on a fresh cell:
+# this workflow first (it creates the exports), then the UI one.
 #
 # Credentials: OIDC only (ADR-0016). Every job that touches AWS runs inside the
 # GitHub environment, because the deploy role's trust policy matches the claim
-# `repo:mohdhallal/zentax-api:environment:<env>` — a job without `environment:`
-# cannot assume it. The role (zentax-deploy-<env>-api) may push only the api
+# `repo:mohdhallal/zentax-api:environment:<cell>` — a job without `environment:`
+# cannot assume it. The role (zentax-deploy-<cell>-api) may push only the api
 # and migrate images, run only the migrate/seed tasks and roll only the api
 # service. No long-lived keys anywhere. The trust is only as strong as the
 # environment's "Deployment branches: main only" rule.
@@ -33,7 +37,8 @@
 #
 # Stack-output contract (fixed with infra/): the four API-owned stacks export
 # the keys listed under OUTPUT_KEYS below. Change the names here if the CDK app
-# renames an output; nothing else needs to know.
+# renames an output; nothing else needs to know. The stack-name prefix is
+# derived from the cell name by scripts/env-title.sh (staging-eu -> StagingEu).
 #
 # Image tag: the 12-character commit sha of this repository, pushed for the api
 # and migrate images, is the tag CDK deploys (the UI repository tags its web
@@ -50,11 +55,11 @@ on:
   workflow_dispatch:
     inputs:
       environment:
-        description: Target environment (production requires reviewer approval)
+        description: Target cell (production-eu requires reviewer approval)
         type: choice
         required: true
-        default: staging
-        options: [staging, production]
+        default: staging-eu
+        options: [staging-eu, production-eu]
       seed:
         description: Run seed-admin after deploy (first tenant + admin; the password is generated in Secrets Manager, never passed here)
         type: boolean
@@ -65,13 +70,13 @@ permissions:
   contents: read
 
 concurrency:
-  group: deploy-${{ github.event_name == 'push' && 'staging' || inputs.environment }}
+  group: deploy-${{ github.event_name == 'push' && 'staging-eu' || inputs.environment }}
   cancel-in-progress: false
 
 env:
   AWS_ACCOUNT_ID: "160117555326"
   AWS_REGION: eu-central-1
-  # --- OUTPUT_KEYS: CloudFormation output keys read from the ZenTax-<Env>-* stacks
+  # --- OUTPUT_KEYS: CloudFormation output keys read from the ZenTax-<Title>-* stacks
   # (space-separated = candidates tried in order; first match wins).
   OUT_CLUSTER_NAME: ClusterName
   OUT_API_SERVICE: ApiServiceName
@@ -87,7 +92,9 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # plan: resolve target environment + inputs (no AWS access)
+  # plan: resolve the target cell + inputs (no AWS access). `env` is the cell
+  #       name (GitHub environment, deploy role, --context env); `env_cap` its
+  #       PascalCase title (the ZenTax-<Title>-* stack-name segment).
   # ---------------------------------------------------------------------------
   plan:
     name: plan
@@ -98,6 +105,10 @@ jobs:
       env_cap: ${{ steps.resolve.outputs.env_cap }}
       seed: ${{ steps.resolve.outputs.seed }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/workflows/scripts
+          sparse-checkout-cone-mode: false
       - id: resolve
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -105,18 +116,19 @@ jobs:
           IN_SEED: ${{ inputs.seed }}
         run: |
           if [ "$EVENT_NAME" = "push" ]; then
-            env=staging; seed=false
+            env=staging-eu; seed=false
           else
             env="$IN_ENVIRONMENT"; seed="$IN_SEED"
           fi
-          case "$env" in staging|production) ;; *) echo "::error::unknown environment '$env'"; exit 1;; esac
-          env_cap="$(tr '[:lower:]' '[:upper:]' <<<"${env:0:1}")${env:1}"
+          case "$env" in staging-eu|production-eu) ;; *) echo "::error::unknown cell '$env' (staging-eu | production-eu)"; exit 1;; esac
+          s=.github/workflows/scripts; chmod +x $s/*.sh
+          env_cap="$($s/env-title.sh "$env")"
           {
             echo "env=$env"
             echo "env_cap=$env_cap"
             echo "seed=$seed"
           } >> "$GITHUB_OUTPUT"
-          echo "target: $env (stacks ZenTax-$env_cap-{Network,Data,Cluster,Api}), seed: $seed"
+          echo "target: $env (stacks ZenTax-$env_cap-{Network,Data,Cluster,Api}, role zentax-deploy-$env-api), seed: $seed"
 
   # ---------------------------------------------------------------------------
   # (a) build-and-push: api + migrate images -> ECR, tagged with this commit
@@ -157,7 +169,7 @@ jobs:
 
       # The ECR repositories belong to the cell's Data stack, so they must exist
       # before the first image push: the first-time checklist in infra/README.md
-      # deploys ZenTax-<Env>-Network + -Data + -Cluster by hand. A missing output
+      # deploys ZenTax-<Title>-Network + -Data + -Cluster by hand. A missing output
       # (or an AccessDenied) fails here, loudly.
       - name: Resolve ECR repositories
         id: repos
@@ -332,8 +344,8 @@ jobs:
   #     SEED_TENANT_NAME, SEED_TIMEZONE (optional) and are passed as a container
   #     command override. The PASSWORD never passes through GitHub: the Cluster
   #     stack injects SEED_ADMIN_PASSWORD into the task from the Secrets Manager
-  #     secret zentax/<env>/seed-admin (generated by CDK). The operator reads it
-  #     with `aws secretsmanager get-secret-value --secret-id zentax/<env>/seed-admin`
+  #     secret zentax/<cell>/seed-admin (generated by CDK). The operator reads it
+  #     with `aws secretsmanager get-secret-value --secret-id zentax/<cell>/seed-admin`
   #     and changes it after the first login.
   # ---------------------------------------------------------------------------
   seed:
@@ -380,7 +392,7 @@ jobs:
           export CLUSTER SUBNETS SECURITY_GROUP
           # seed-admin takes flags, so the seed task definition MUST set
           # entryPoint ["seed-admin"] — run-task can override only `command` —
-          # and MUST inject SEED_ADMIN_PASSWORD from the zentax/<env>/seed-admin
+          # and MUST inject SEED_ADMIN_PASSWORD from the zentax/<cell>/seed-admin
           # secret; the workflow never carries a password.
           cdef="$(aws ecs describe-task-definition --task-definition "$taskdef" \
             --query 'taskDefinition.containerDefinitions[0]' --output json)"

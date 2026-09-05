@@ -3,7 +3,7 @@
 > Single source of truth for the state of the ZenTax Go backend. Updated as work
 > lands. The cross-session roadmap lives in `../zentax-ui/PROJECT_PLAN.md` (the UI
 > repository, `github.com/mohdhallal/zentax-ui`, formerly `TaxFlowReports`);
-> architecture decisions in `../zentax-ui/docs/adr/` (ADRs 0001–0024).
+> architecture decisions in `../zentax-ui/docs/adr/` (ADRs 0001–0025).
 
 **Last updated:** 2026-09-05 · **Toolchain:** Go 1.27 via gvm (`~/.gvm/gos/go1.27`;
 the system `/usr/local/go` is a stale 1.19). **Gate:** `go build/vet/test ./...`
@@ -96,7 +96,16 @@ green on both the main module and `acceptance/`.
     into the 32-byte key with SHA-256 (managed secret stores generate alphanumeric strings, not raw
     key bytes; the derivation is deterministic, so rotation = a new passphrase + re-encrypt).
     `AUTH_SESSION_COOKIE_SECURE` (true/false), `CORS_ALLOWED_ORIGINS` (comma-separated, trimmed),
-    `LOG_FORMAT` / `LOG_LEVEL`, `SWAGGER_ENABLED`, plus the existing `STORAGE_*`. `cmd/seed-admin`
+    `LOG_FORMAT` / `LOG_LEVEL`, `SWAGGER_ENABLED`, plus the existing `STORAGE_*`.
+    `PUBLIC_BASE_URL` (2026-09-05) → `app.publicBaseUrl`: the product's public origin — the web
+    tier's hostname (`https://eu.staging.zentax.software`), **not** this API's listener — the base
+    for every absolute link the API hands out of band (the e-mailed invite link, once delivery
+    exists; nothing renders absolute URLs yet). Optional (a cell without its custom domain passes
+    `""`); when set it is trimmed, a trailing slash stripped, and must parse as an absolute http(s)
+    URL without userinfo/query/fragment — **https** in staging/production (a Secure cookie never
+    travels over http). The SaaS task sets it from the cell's `publicHostname`; `development.json`
+    says `http://localhost:5000` (the web tier's `npm run dev` origin). `nexusInternalApi.baseUrl` is
+    unrelated (the boilerplate's outbound API-key-provisioning client). `cmd/seed-admin`
     goes through the same `config.Load`, so it accepts the `DB_*` parts and is held to the same rules;
     its admin password comes from `SEED_ADMIN_PASSWORD` (preferred — ECS injects it from Secrets
     Manager, so it never appears in a task definition or CloudTrail) or from `--password` for local
@@ -148,7 +157,8 @@ green on both the main module and `acceptance/`.
     logs); both may assume the `cdk-hnb659fds-*` bootstrap roles and read stacks — the repositories
     are constants `DEPLOY_REPOSITORIES` in `lib/github-oidc-stack.ts`; plus the managed policy
     `ZenTaxCfnExecutionPolicy` for `cdk bootstrap --cloudformation-execution-policies`, exported as
-    `zentax-cfn-execution-policy-arn`). Per environment (`--context env=staging|production`):
+    `zentax-cfn-execution-policy-arn`). Per environment (`--context env=staging-eu|production-eu`;
+    `<Env>` / `<env>` in this block read `StagingEu` / `staging-eu` since ADR-0025 below):
     `ZenTax-<Env>-Network` (VPC, endpoints, flow logs, **every** security group incl. the ALB's and
     the web tasks' — the Web stack imports and attaches them, immutably), `ZenTax-<Env>-Data` (KMS,
     RDS Postgres 16, the db-master / app-db / auth-encryption-key / seed-admin secrets, documents
@@ -167,8 +177,9 @@ green on both the main module and `acceptance/`.
     namespace-id, namespace-arn, migrate-task-family, migrate-task-arn, seed-task-family,
     seed-task-arn, seed-admin-secret-arn`; Api `api-service-name, api-internal-url
     (http://api.zentax-<env>.local:3000), api-task-arn`; OIDC `zentax-cfn-execution-policy-arn,
-    zentax-deploy-role-<env>-{api,web}`. The UI's Web stack emits `web-service-name, cloudfront-url,
-    cloudfront-id, alb-dns, ecr-web, web-task-arn`. `CORS_ALLOWED_ORIGINS` is now the optional
+    zentax-deploy-role-<env>-{api,web}`. The UI's Web stack emits `web-service-name, alb-dns,
+    ecr-web, web-task-arn`; its Edge stack (us-east-1) `cloudfront-url, cloudfront-id` (nothing
+    imports those two). `CORS_ALLOWED_ORIGINS` is now the optional
     context key `corsAllowedOrigins` (validated `scheme://host` list, `*` refused; placeholder
     `https://zentax-<env>.invalid` until the UI deploy publishes `cloudfront-url` — the web tier
     strips `Origin`, so nothing depends on it; README step 8).
@@ -185,10 +196,63 @@ green on both the main module and `acceptance/`.
     `zentax/<env>/seed-admin` secret, never through GitHub). `ci.yml` gained an `infra` job (`npm ci`,
     `tsc`, `jest`, synth of both cells with `CDK_DEFAULT_ACCOUNT` / `CDK_DEFAULT_REGION` only, no
     credentials) and a `workflows` job (actionlint, shellcheck, the helper-script tests against a
-    fake `aws`). First deploy of a cell: OIDC → bootstrap `eu-central-1` + `us-east-1` with the
-    policy → Network + Data + Cluster by hand → this pipeline → the UI pipeline (Web + Edge) → seed
-    here. Runbook: `../zentax-ui/docs/ops/environments.md`; costs and the per-resource table:
+    fake `aws`). First deploy of a cell: OIDC → bootstrap `eu-central-1` + `us-east-1` with both
+    execution policies → Network + Data + Cluster by hand → this pipeline → the UI pipeline (Web +
+    Edge) → seed here. Runbook: `../zentax-ui/docs/ops/environments.md`; costs and the per-resource table:
     `infra/README.md`.
+- **Custom domain, DNS and regional cell names (ADR-0025 — 2026-09-05):** settled before the first
+  deploy, while every name is still free to change.
+  - **Cells are keyed by tier + region label:** environments are `staging-eu` / `production-eu`
+    (`^(staging|production)-[a-z]{2}$`, explicit `tier` + `regionLabel` context validated against the
+    name); stacks `ZenTax-StagingEu-*` / `ZenTax-ProductionEu-*`, exports `zentax-staging-eu-<key>`
+    through the unchanged `exportName` (`lib/exports.ts` still byte-identical to the UI copy), roles
+    `zentax-deploy-{staging,production}-eu-{api,web}` trusting GitHub environments of the same names,
+    Cloud Map `zentax-staging-eu.local`, ECR `zentax/staging-eu/{api,migrate}`, tags `Environment` +
+    `Tier` + `RegionLabel`. `deploy.yml` / `ci.yml` and the README use the new names.
+  - **`ZenTax-Dns`** (`lib/`, account-level next to `ZenTax-GithubOidc`: `CliCredentialsStackSynthesizer`,
+    admin-deployed, never by the pipeline, `RETAIN`, stack region `eu-central-1`): the `zentax.software`
+    hosted zone — registrar stays Squarespace, name servers switched to the zone's four NS (outputs
+    `HostedZoneId`, `NameServers`) — with today's records as code (Squarespace site `A` × 4 + `CNAME
+    www`, the five Workspace `MX`, DKIM at `google._domainkey` emitted as 255-char chunks and proven
+    on the synthesized template, `google-site-verification`) plus the missing **SPF**
+    (`v=spf1 include:_spf.google.com ~all`, sharing the apex TXT set with the verification value —
+    one TXT set per name) and **DMARC** (`_dmarc`, `p=none`, `rua=mailto:dmarc@zentax.software`).
+    The two panel-truncated values come from top-level `dns.{googleSiteVerification,
+    googleDkimPublicKey}` context; empty = record omitted + a `cdk.Annotations` warning, so CI synth
+    stays green and the runbook pastes both before the first deploy. The HTTPS/SVCB and
+    `_domainconnect` records are intentionally not recreated.
+  - **Per-environment `publicHostname`** (`eu.staging.zentax.software` / `eu.app.zentax.software`;
+    the UI app adds `app.zentax.software` as the entry hostname + the Edge-stack certificate, aliases
+    and 301): `corsAllowedOrigins` defaults to `https://<publicHostname>` (an explicit list still
+    wins, the `.invalid` placeholder only when unset) and the api task receives
+    `PUBLIC_BASE_URL=https://<publicHostname>` (omitted when unset). **Go:** `config` gains the new
+    field `app.publicBaseUrl` (`AppConfig.PublicBaseURL`) with the `PUBLIC_BASE_URL` env override
+    (trimmed, trailing slash stripped, https-only in staging/production, an empty value never
+    overrides — unit-tested, listed in the env table). **Nothing consumes it yet:** invite links are
+    built by the UI from `window.location.origin`; the API-side link (`app.publicBaseUrl` +
+    `/accept-invite?token=`) arrives with e-mail delivery, and the OpenAPI `servers` entry is
+    deliberately *not* wired to it. `nexusInternalApi.baseUrl` is unrelated and untouched.
+  - **Execution policies:** `ZenTaxCfnExecutionPolicy` is **unchanged** (6121 of the 6144-character
+    cap, no `acm:` action). The six ACM actions the Edge stack's custom-domain certificate needs —
+    `acm:{Request,Describe,Delete}Certificate`, `acm:{Add,Remove}TagsToCertificate`,
+    `acm:ListTagsForCertificate` on `*` (certificate ARNs are unknowable in advance) — live only in
+    the second managed policy **`ZenTaxCfnExecutionPolicyEdge`** (`makeCfnExecutionPolicyEdge` in
+    `lib/github-oidc-stack.ts`, exported as `zentax-cfn-execution-policy-edge-arn`); record writes on
+    `hostedzone/*` were already in the first, hosted-zone creation stays out of both (admin-only),
+    and both caps are enforced by the jest test. The bootstrap takes **both ARNs, comma-separated**:
+    `--cloudformation-execution-policies "arn:aws:iam::160117555326:policy/ZenTaxCfnExecutionPolicy,arn:aws:iam::160117555326:policy/ZenTaxCfnExecutionPolicyEdge"`
+    (an account bootstrapped with one policy is fixed by re-running the bootstrap with both — it
+    updates the execution role in place). **Still not deployed** — the Dns deploy and the Squarespace
+    NS change are the first two runbook steps once a non-root identity exists.
+  - **Zone safety + real Google values (2026-09-05):** `ZenTax-Dns` has `terminationProtection: true`
+    and an aspect RETAINs every `AWS::Route53::RecordSet` (DeletionPolicy + UpdateReplacePolicy) next
+    to the RETAINed zone, so a stack delete never empties the delegated zone (jest checks every record
+    set and the flag). The untruncated `googleSiteVerification` token and `googleDkimPublicKey`
+    (`p=`) are now pasted in `infra/cdk.json` (public DNS values, not secrets): synth emits the apex
+    TXT set with the token **and** SPF, `google._domainkey` in 255-char chunks, and no warning; the
+    Dns tests assert only what holds in either state on the committed file, with explicit
+    empty-values / full fixtures, plus one test pinning that the committed values are non-empty and
+    well-formed.
 
 ### Domain modules (all tenant-scoped, hexagonal, full CRUD + acceptance tests)
 1. **entities** — tax-paying orgs (hierarchical, fiscal config). **Fiscal calendars (2026-09-05,
@@ -551,7 +615,9 @@ Commits: `4cdcd4e` scaffold · `2851179` tenancy+entities · `d074780` obligatio
   403), unit +3. **Known limitation (logged):** `users.email` is globally unique, so `POST /members`
   answers 409 for an address registered in *another* tenant — a cross-tenant email-existence oracle
   inherent to v1 identity; ADR-0005's domain-scoped identity is the fix. **Remaining:** e-mail delivery
-  of the invite link (the token is returned to the admin for now), invite expiry configurability,
+  of the invite link (the token is returned to the admin for now; the UI builds the link from its own
+  origin — the API-side link, when it comes, is `app.publicBaseUrl` + `/accept-invite?token=`, see
+  `PUBLIC_BASE_URL` above), invite expiry configurability,
   read-side scope narrowing of the directory, rate limiting on `POST /auth/accept-invite`.
 - **Machine identity — DONE (agentic-AI B1).** Service accounts are `users.kind='service'` rows (grants,
   audit actor_id, and created_by attribution reuse the same rails; synthetic internal email; login rejects

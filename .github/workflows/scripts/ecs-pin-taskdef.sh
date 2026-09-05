@@ -6,13 +6,13 @@
 #
 #   usage: ecs-pin-taskdef.sh <pinned task-definition ARN> <image tag>
 #   env:   AWS_ACCOUNT_ID   account the cell lives in
-#          TARGET_ENV       staging | production
+#          TARGET_ENV       the cell name: staging-eu | production-eu
 #   stdout: the ARN to pass to `ecs run-task`
 #
 # Steps:
 #   1. describe the pinned revision (the ARN carries ":<revision>");
 #   2. VERIFY it: taskRoleArn and executionRoleArn must both be
-#      arn:aws:iam::<account>:role/zentax-<env>-* and every container image must
+#      arn:aws:iam::<account>:role/zentax-<cell>-* and every container image must
 #      come from this account's ECR registry — otherwise fail before run-task;
 #   3. if the image already carries <image tag> (the normal case: the Cluster
 #      stack was just deployed with --context imageTag), print the pinned ARN;

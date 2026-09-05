@@ -2,19 +2,20 @@ import { Match } from 'aws-cdk-lib/assertions';
 import { NETWORK_EXPORTS, exportName } from '../lib/exports';
 import { ENVS, exportNamesOf, resourcesOfType, synthEnv } from './helpers';
 
-const retention = { staging: 30, production: 365 } as const;
+const retention = { 'staging-eu': 30, 'production-eu': 365 } as const;
 
 describe.each(ENVS)('ZenTax-%s-Network', (env) => {
   const { network } = synthEnv(env);
+  const production = env === 'production-eu';
 
   test('flow-log and prefix-list-lookup log groups are explicit, with the environment retention and removal policy', () => {
     network.hasResource('AWS::Logs::LogGroup', {
       Properties: { LogGroupName: `/zentax/${env}/vpc-flow-logs`, RetentionInDays: retention[env] },
-      DeletionPolicy: env === 'production' ? 'Retain' : 'Delete',
+      DeletionPolicy: production ? 'Retain' : 'Delete',
     });
     network.hasResource('AWS::Logs::LogGroup', {
       Properties: { LogGroupName: `/zentax/${env}/cdk/cloudfront-prefix-list-lookup`, RetentionInDays: retention[env] },
-      DeletionPolicy: env === 'production' ? 'Retain' : 'Delete',
+      DeletionPolicy: production ? 'Retain' : 'Delete',
     });
     network.allResourcesProperties('AWS::Logs::LogGroup', { RetentionInDays: retention[env] });
     // The flow log writes to that group, and the lookup Lambda logs to the other.
@@ -24,10 +25,11 @@ describe.each(ENVS)('ZenTax-%s-Network', (env) => {
     expect(JSON.stringify(fn[1].Properties.LoggingConfig.LogGroup)).toContain('CloudFrontPrefixListLogGroup');
   });
 
-  test('VPC spans two AZs with public + private-with-egress subnets and the configured NAT count', () => {
+  test('VPC zentax-<cell> spans two AZs with public + private-with-egress subnets and the configured NAT count', () => {
     network.resourceCountIs('AWS::EC2::VPC', 1);
+    network.hasResourceProperties('AWS::EC2::VPC', { Tags: Match.arrayWith([{ Key: 'Name', Value: `zentax-${env}` }]) });
     network.resourceCountIs('AWS::EC2::Subnet', 4);
-    network.resourceCountIs('AWS::EC2::NatGateway', env === 'production' ? 2 : 1);
+    network.resourceCountIs('AWS::EC2::NatGateway', production ? 2 : 1);
   });
 
   test('gateway endpoint for S3 and interface endpoints for ECR (api + dkr), Secrets Manager and Logs', () => {

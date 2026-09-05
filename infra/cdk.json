@@ -16,21 +16,32 @@
     ]
   },
   "context": {
-    "// split": "This app owns the shared foundations of a cell (ZenTax-<Env>-Network, -Data, -Cluster), the api service (ZenTax-<Env>-Api) and the account-level ZenTax-GithubOidc. The web tier (ZenTax-<Env>-Web, -Edge) is the UI repository's CDK app (zentax-ui/infra); the two meet only through the CloudFormation exports in lib/exports.ts.",
-    "// deploy boundary": "Both environments live in this one account+region, so one CDK bootstrap (one CloudFormation execution role, scoped by ZenTaxCfnExecutionPolicy) deploys both. The GitHub deploy roles are per environment and per repository (zentax-deploy-<env>-api here, zentax-deploy-<env>-web for the UI repository), but the execution role is shared: real per-environment isolation of the deploy path needs one account per environment (README: 'Why staging and production share the deploy boundary today').",
-    "// imageTag": "`cdk deploy --context imageTag=<sha>` (what the pipeline passes) overrides environments.<env>.imageTag.",
+    "// split": "This app owns the shared foundations of a cell (ZenTax-<Title>-Network, -Data, -Cluster), the api service (ZenTax-<Title>-Api) and the account-level ZenTax-GithubOidc + ZenTax-Dns. The web tier (ZenTax-<Title>-Web, -Edge) is the UI repository's CDK app (zentax-ui/infra); the two meet only through the CloudFormation exports in lib/exports.ts.",
+    "// cells": "A cell is keyed by tier + region label: environments.<tier>-<regionLabel> (staging-eu, production-eu; pattern ^(staging|production)-[a-z]{2}$). tier and regionLabel are declared explicitly and must agree with the key. <Title> is the PascalCase name (StagingEu, ProductionEu); every other derived name uses the name itself: zentax-staging-eu (cluster, VPC, RDS), zentax/staging-eu/api (ECR), /zentax/staging-eu/api (logs), zentax/staging-eu/app-db (secrets), zentax-staging-eu.local (Cloud Map), exports zentax-staging-eu-*, deploy roles zentax-deploy-staging-eu-{api,web}, GitHub environments staging-eu / production-eu.",
+    "// deploy boundary": "Both cells live in this one account+region, so one CDK bootstrap (one CloudFormation execution role, scoped by ZenTaxCfnExecutionPolicy + ZenTaxCfnExecutionPolicyEdge) deploys both. The GitHub deploy roles are per cell and per repository (zentax-deploy-<cell>-api here, zentax-deploy-<cell>-web for the UI repository), but the execution role is shared: real per-cell isolation of the deploy path needs one account per cell (README: 'Why staging-eu and production-eu share the deploy boundary today').",
+    "// imageTag": "`cdk deploy --context imageTag=<sha>` (what the pipeline passes) overrides environments.<cell>.imageTag.",
     "// dbBackupDays": "Also the documents bucket's non-current-version expiry: one retention window for a full restore (DB PITR + overwritten/deleted documents), ADR-0007 / ADR-0014.",
-    "// ownsRdsOsMetricsLogGroup": "RDS enhanced monitoring writes to ONE `RDSOSMetrics` log group per account+region; the environment that owns it pre-creates it with its retention. Exactly one environment per account+region may be true, and it must be the environment deployed FIRST (RDS auto-creates the group without retention as soon as the first instance with enhanced monitoring exists, and CloudFormation cannot adopt it): staging today; both once they have separate accounts.",
-    "// alarmEmail": "Optional per environment: an e-mail subscribed to the alarm topic (confirm the subscription mail after the first deploy). The UI app subscribes the same address to its Edge (us-east-1) topic.",
-    "// corsAllowedOrigins": "Optional per environment: the api's CORS_ALLOWED_ORIGINS (comma-separated). The public origin is created by the UI app (the Web stack's zentax-<env>-cloudfront-url export, or the custom domain), so set it here once known and deploy Api. Until then a reserved https://zentax-<env>.invalid placeholder satisfies the api's fail-closed validation — the web tier proxies every browser call and strips Origin, so nothing depends on it.",
-    "// githubRepositories": "No longer read: the deploy roles are one per repository AND environment, and the two repositories (mohdhallal/zentax-api -> zentax-deploy-<env>-api, mohdhallal/zentax-ui -> zentax-deploy-<env>-web) are constants in lib/github-oidc-stack.ts.",
-    "// web-only keys": "webDesiredCount, originVerifyVersion, domainName/certificateArn/hostedZone*, maxUploadBytes belong to zentax-ui/infra/cdk.json; lib/config.ts refuses them here.",
+    "// ownsRdsOsMetricsLogGroup": "RDS enhanced monitoring writes to ONE `RDSOSMetrics` log group per account+region; the cell that owns it pre-creates it with its retention. Exactly one cell per account+region may be true, and it must be the cell deployed FIRST (RDS auto-creates the group without retention as soon as the first instance with enhanced monitoring exists, and CloudFormation cannot adopt it): staging-eu today; both once they have separate accounts.",
+    "// alarmEmail": "Optional per cell: an e-mail subscribed to the alarm topic (confirm the subscription mail after the first deploy). The UI app subscribes the same address to its Edge (us-east-1) topic.",
+    "// publicHostname": "The cell's public hostname (eu.staging.zentax.software / eu.app.zentax.software); the same value sits in zentax-ui/infra/cdk.json, where the Edge stack serves it (ACM certificate, Route 53 aliases, the app.zentax.software entry redirect). Here it only shapes the api: the CORS default becomes https://<publicHostname> and the api task gets PUBLIC_BASE_URL=https://<publicHostname>. Omit it and both fall back to the .invalid placeholder / nothing.",
+    "// corsAllowedOrigins": "Optional per cell: the api's CORS_ALLOWED_ORIGINS (comma-separated). Default https://<publicHostname> when publicHostname is set, else a reserved https://zentax-<cell>.invalid placeholder that satisfies the api's fail-closed validation — the web tier proxies every browser call and strips Origin, so nothing depends on it. Set it explicitly to add the Edge stack's zentax-<cell>-cloudfront-url origin (exported in us-east-1) next to the custom domain.",
+    "// dns": "The account-level ZenTax-Dns stack (admin-deployed, never by the pipeline; termination protection on, the zone and every record set RETAINed): the Route 53 public hosted zone for dns.zoneName and its records — the Squarespace site A/CNAME and Google Workspace MX records copied from the Squarespace DNS panel (snapshot 2026-09-05), SPF, DMARC. googleSiteVerification (the token after google-site-verification=) and googleDkimPublicKey (the p= value of google._domainkey) are the untruncated values from that panel (click each record there to see it), pasted 2026-09-05 — public DNS values, not secrets; the whole record value (google-site-verification=…, v=DKIM1;k=rsa;p=…) is accepted too. Empty = that record is omitted and synth warns (CI stays green) — never deploy in that state.",
+    "// githubRepositories": "No longer read: the deploy roles are one per repository AND cell, and the two repositories (mohdhallal/zentax-api -> zentax-deploy-<cell>-api, mohdhallal/zentax-ui -> zentax-deploy-<cell>-web) are constants in lib/github-oidc-stack.ts.",
+    "// web-only keys": "webDesiredCount, originVerifyVersion, domainName/certificateArn/hostedZone*/entryHostnames, maxUploadBytes belong to zentax-ui/infra/cdk.json; lib/config.ts refuses them here.",
     "account": "160117555326",
     "region": "eu-central-1",
+    "dns": {
+      "zoneName": "zentax.software",
+      "googleSiteVerification": "Mvd7tFkyugCM_XC0dBe5T3WXd3e7UJ8PQJMRKP4Ud6M",
+      "googleDkimPublicKey": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAyiFesUlymYPwNDFNexHtW964Wn90UB5+Aw0i/BHhYraXe6fCz6MDP/jqeSljfykn9ZqwrcNkfc949v7PQb4dekigmMri1GpddVAh7zaYmRs13quFqbyynNDC39TQie34lQrD+e+vJAyzclZ2ZdTxaZ36PbhhO8oaIsDbVffy/03yg4TKOsPrGnY43b0WAPvZDKMFjiOTBuD+R8IPsH+5lHpL+3XSX96W53+HVQl/z9IMtVXbyEubNK7ehvAtwF/mdfo0HQm/kHPEshqvZhmCEhuOJuD1CZw7aZ4tbL/cOu6D91sluiajjOPiOEUNu+4zhaP07fHMKWD67ZTCVxv5FQIDAQAB"
+    },
     "environments": {
-      "staging": {
+      "staging-eu": {
+        "tier": "staging",
+        "regionLabel": "eu",
         "account": "160117555326",
         "region": "eu-central-1",
+        "publicHostname": "eu.staging.zentax.software",
         "cidr": "10.20.0.0/16",
         "dbInstanceClass": "t4g.small",
         "dbMultiAz": false,
@@ -45,9 +56,12 @@
         "cpuArchitecture": "X86_64",
         "ownsRdsOsMetricsLogGroup": true
       },
-      "production": {
+      "production-eu": {
+        "tier": "production",
+        "regionLabel": "eu",
         "account": "160117555326",
         "region": "eu-central-1",
+        "publicHostname": "eu.app.zentax.software",
         "cidr": "10.30.0.0/16",
         "dbInstanceClass": "t4g.medium",
         "dbMultiAz": true,

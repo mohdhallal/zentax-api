@@ -1,7 +1,7 @@
 import * as cdk from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { Construct } from 'constructs';
-import { EnvName, GithubOidcConfig } from './config';
+import { EnvName, envTitle, GithubOidcConfig } from './config';
 import { OIDC_EXPORTS } from './exports';
 
 export interface GithubOidcStackProps extends cdk.StackProps {
@@ -10,7 +10,19 @@ export interface GithubOidcStackProps extends cdk.StackProps {
 
 export const GITHUB_OIDC_HOST = 'token.actions.githubusercontent.com';
 export const CFN_EXECUTION_POLICY_NAME = 'ZenTaxCfnExecutionPolicy';
-const ENVIRONMENTS: EnvName[] = ['staging', 'production'];
+/**
+ * The second execution policy: what only the UI app's Edge stack needs (ACM,
+ * for the custom-domain certificate). It is a separate managed policy because
+ * the first one sits at the 6144-character cap; both go to
+ * `cdk bootstrap --cloudformation-execution-policies`, comma-separated.
+ */
+export const CFN_EXECUTION_POLICY_EDGE_NAME = 'ZenTaxCfnExecutionPolicyEdge';
+/**
+ * Deliberately NOT in lib/exports.ts (which must stay byte-identical in both
+ * repositories): no stack imports this value — only the bootstrap command in
+ * the README reads it.
+ */
+export const CFN_EXECUTION_POLICY_EDGE_EXPORT_NAME = 'zentax-cfn-execution-policy-edge-arn';
 
 /** The two halves of a cell, each deployed by its own repository. */
 export type DeployService = 'api' | 'web';
@@ -28,31 +40,41 @@ export const DEPLOY_REPOSITORIES: Record<DeployService, string> = {
 
 /**
  * ZenTax-GithubOidc: account-level, region-agnostic. The GitHub Actions OIDC
- * provider plus two deploy roles per environment (ADR-0016: no long-lived keys
- * in CI) — `zentax-deploy-<env>-api` for the API repository and
- * `zentax-deploy-<env>-web` for the UI repository. A role only trusts jobs
- * running in the matching GitHub *environment* of its one repository, so
- * production's protection rules gate its roles.
+ * provider plus two deploy roles per cell (ADR-0016: no long-lived keys in
+ * CI) — `zentax-deploy-<cell>-api` for the API repository and
+ * `zentax-deploy-<cell>-web` for the UI repository (`staging-eu`,
+ * `production-eu`: the cells cdk.json declares). A role only trusts jobs
+ * running in the matching GitHub *environment* (named like the cell) of its
+ * one repository, so production-eu's protection rules gate its roles.
  *
- * It also owns `ZenTaxCfnExecutionPolicy`, the policy the CDK bootstrap's
- * CloudFormation execution role gets instead of AdministratorAccess. This
- * stack is deployed by the admin identity with its own credentials (the app
- * gives it the CliCredentialsStackSynthesizer, so it never runs through the
- * scoped execution role and the policy never has to grant power over itself).
+ * It also owns `ZenTaxCfnExecutionPolicy` (+ `ZenTaxCfnExecutionPolicyEdge`),
+ * the policies the CDK bootstrap's CloudFormation execution role gets instead
+ * of AdministratorAccess. This stack is deployed by the admin identity with
+ * its own credentials (the app gives it the CliCredentialsStackSynthesizer,
+ * so it never runs through the scoped execution role and the policies never
+ * have to grant power over themselves).
  */
 export class GithubOidcStack extends cdk.Stack {
   public readonly provider: iam.OidcProviderNative;
   public readonly roles: Record<EnvName, Record<DeployService, iam.Role>>;
   public readonly cfnExecutionPolicy: iam.ManagedPolicy;
+  public readonly cfnExecutionPolicyEdge: iam.ManagedPolicy;
 
   constructor(scope: Construct, id: string, props: GithubOidcStackProps) {
     super(scope, id, props);
+    const ENVIRONMENTS = props.cfg.environments;
 
     this.cfnExecutionPolicy = this.makeCfnExecutionPolicy();
     new cdk.CfnOutput(this, 'CfnExecutionPolicyArn', {
       value: this.cfnExecutionPolicy.managedPolicyArn,
       exportName: OIDC_EXPORTS.cfnExecutionPolicyArn,
-      description: 'Pass to `cdk bootstrap --cloudformation-execution-policies` (replaces AdministratorAccess)',
+      description: 'Pass to `cdk bootstrap --cloudformation-execution-policies` (replaces AdministratorAccess), together with CfnExecutionPolicyEdgeArn',
+    });
+    this.cfnExecutionPolicyEdge = this.makeCfnExecutionPolicyEdge();
+    new cdk.CfnOutput(this, 'CfnExecutionPolicyEdgeArn', {
+      value: this.cfnExecutionPolicyEdge.managedPolicyArn,
+      exportName: CFN_EXECUTION_POLICY_EDGE_EXPORT_NAME,
+      description: 'Second policy for `cdk bootstrap --cloudformation-execution-policies` (comma-separated with CfnExecutionPolicyArn): ACM for the Edge stack',
     });
 
     this.provider = new iam.OidcProviderNative(this, 'GithubProvider', {
@@ -75,7 +97,7 @@ export class GithubOidcStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'ProviderArn', { value: this.provider.oidcProviderArn });
     for (const env of ENVIRONMENTS) {
       for (const service of DEPLOY_SERVICES) {
-        new cdk.CfnOutput(this, `DeployRoleArn${capitalize(env)}${capitalize(service)}`, {
+        new cdk.CfnOutput(this, `DeployRoleArn${envTitle(env)}${capitalize(service)}`, {
           value: this.roles[env][service].roleArn,
           exportName: OIDC_EXPORTS.deployRoleArn(env, service),
           description: `role-to-assume for the GitHub "${env}" environment of ${DEPLOY_REPOSITORIES[service]}`,
@@ -85,7 +107,7 @@ export class GithubOidcStack extends cdk.Stack {
   }
 
   /**
-   * One deploy role = one repository x one environment x one half of the cell.
+   * One deploy role = one repository x one cell x one half of the cell.
    *
    *   api: push zentax/<env>/{api,migrate}; run the migrate + seed tasks (and
    *        register a revision of them with the new image tag); roll the api
@@ -95,12 +117,15 @@ export class GithubOidcStack extends cdk.Stack {
    * Both take the CDK deploy path (assume the bootstrap roles): the
    * CloudFormation execution role is shared per account, so the *template* is
    * where the two halves meet — that is the documented shared boundary (README:
-   * "Why staging and production share the deploy boundary today"; the same
+   * "Why staging-eu and production-eu share the deploy boundary today"; the same
    * holds between the api and web halves until each has its own account).
    */
   private makeDeployRole(env: EnvName, service: DeployService): iam.Role {
     const repository = DEPLOY_REPOSITORIES[service];
-    const role = new iam.Role(this, `DeployRole${capitalize(env)}${capitalize(service)}`, {
+    // Names derive from the cell name: role zentax-deploy-staging-eu-api,
+    // cluster zentax-staging-eu, images zentax/staging-eu/*, task roles
+    // zentax-staging-eu-<component>-*, logs /zentax/staging-eu/<component>.
+    const role = new iam.Role(this, `DeployRole${envTitle(env)}${capitalize(service)}`, {
       roleName: `zentax-deploy-${env}-${service}`,
       description: `GitHub Actions deploy role for ZenTax ${env} ${service} (${repository}, OIDC, no static keys)`,
       maxSessionDuration: cdk.Duration.hours(1),
@@ -234,7 +259,7 @@ export class GithubOidcStack extends cdk.Stack {
    * three name prefixes and `iam:PassRole` to the same, which is also the
    * boundary's known weakness: a template may still create a `zentax-*` role
    * with any policy. Separate accounts per environment close that (README:
-   * "Why staging and production share the deploy boundary today").
+   * "Why staging-eu and production-eu share the deploy boundary today").
    *
    * A missing permission surfaces as an AccessDenied on the resource in the
    * CloudFormation events; extend the statement here and redeploy this stack
@@ -242,7 +267,8 @@ export class GithubOidcStack extends cdk.Stack {
    *
    * Managed policies are capped at 6144 non-whitespace characters, which is
    * why the statements carry no Sids and EC2 uses action patterns (the test
-   * suite checks the size).
+   * suite checks the size) — and why what the Edge stack's custom domain
+   * additionally needs lives in a second policy (makeCfnExecutionPolicyEdge).
    */
   private makeCfnExecutionPolicy(): iam.ManagedPolicy {
     const p = this.partition;
@@ -350,6 +376,32 @@ export class GithubOidcStack extends cdk.Stack {
           effect: iam.Effect.DENY,
           actions: ['iam:*'],
           resources: [`arn:${p}:iam::${a}:role/zentax-deploy-*`, `arn:${p}:iam::${a}:role/cdk-*`],
+        }),
+      ],
+    });
+  }
+
+  /**
+   * What CloudFormation additionally needs for the UI app's Edge stack once a
+   * custom domain is on: the ACM certificate it creates in-stack (DNS
+   * validation into the ZenTax-Dns hosted zone — the Route 53 record calls are
+   * already in the first policy, on `hostedzone/*`). Certificate ARNs are
+   * generated, so the resource is `*`; the action list is explicit — no
+   * import/export/renew. Hosted-zone CREATION is deliberately absent from
+   * both policies: ZenTax-Dns is admin-deployed.
+   */
+  private makeCfnExecutionPolicyEdge(): iam.ManagedPolicy {
+    return new iam.ManagedPolicy(this, 'CfnExecutionPolicyEdge', {
+      managedPolicyName: CFN_EXECUTION_POLICY_EDGE_NAME,
+      description: 'ZenTax: second CloudFormation execution policy for the CDK bootstrap — ACM for the UI app\'s Edge stack (custom-domain certificate)',
+      statements: [
+        new iam.PolicyStatement({
+          sid: 'AcmCertificates',
+          actions: [
+            'acm:RequestCertificate', 'acm:DescribeCertificate', 'acm:DeleteCertificate',
+            'acm:AddTagsToCertificate', 'acm:RemoveTagsFromCertificate', 'acm:ListTagsForCertificate',
+          ],
+          resources: ['*'],
         }),
       ],
     });

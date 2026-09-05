@@ -1,10 +1,10 @@
 import { Match } from 'aws-cdk-lib/assertions';
 import { API_EXPORTS, exportName } from '../lib/exports';
-import { ENVS, exportNamesOf, resourcesOfType, synthEnv, synthEnvWith, taskDefinition } from './helpers';
+import { ENVS, exportNamesOf, PUBLIC_HOSTNAME_OF, resourcesOfType, synthEnv, synthEnvWith, taskDefinition } from './helpers';
 
 const expected = {
-  staging: { desired: 1 },
-  production: { desired: 2 },
+  'staging-eu': { desired: 1 },
+  'production-eu': { desired: 2 },
 } as const;
 
 describe.each(ENVS)('ZenTax-%s-Api', (env) => {
@@ -56,14 +56,25 @@ describe.each(ENVS)('ZenTax-%s-Api', (env) => {
     expect(JSON.stringify(container.Image)).toContain('ApiRepo');
   });
 
-  test('CORS_ALLOWED_ORIGINS is the reserved placeholder by default and the configured public origin(s) when set', () => {
+  test('CORS_ALLOWED_ORIGINS defaults to https://<publicHostname>; the reserved placeholder without a hostname; explicit corsAllowedOrigins wins', () => {
     const byName = (t: import('aws-cdk-lib/assertions').Template) =>
       Object.fromEntries(taskDefinition(t, '-api').Properties.ContainerDefinitions[0].Environment.map((e: any) => [e.Name, e.Value]));
-    expect(byName(api).CORS_ALLOWED_ORIGINS).toBe(`https://zentax-${env}.invalid`);
+    expect(byName(api).CORS_ALLOWED_ORIGINS).toBe(`https://${PUBLIC_HOSTNAME_OF[env]}`);
+    const noHost = synthEnvWith(env, { envOverrides: { publicHostname: '' } });
+    expect(byName(noHost.api).CORS_ALLOWED_ORIGINS).toBe(`https://zentax-${env}.invalid`);
     const set = synthEnvWith(env, { envOverrides: { corsAllowedOrigins: 'https://d1234.cloudfront.net,https://app.example.com' } });
     expect(byName(set.api).CORS_ALLOWED_ORIGINS).toBe('https://d1234.cloudfront.net,https://app.example.com');
     expect(() => synthEnvWith(env, { envOverrides: { corsAllowedOrigins: '*' } })).toThrow(/corsAllowedOrigins/);
     expect(() => synthEnvWith(env, { envOverrides: { corsAllowedOrigins: 'https://a.example/path' } })).toThrow(/corsAllowedOrigins/);
+  });
+
+  test('PUBLIC_BASE_URL is https://<publicHostname> on the api task, and absent when no public hostname is configured', () => {
+    const byName = (t: import('aws-cdk-lib/assertions').Template) =>
+      Object.fromEntries(taskDefinition(t, '-api').Properties.ContainerDefinitions[0].Environment.map((e: any) => [e.Name, e.Value]));
+    expect(byName(api).PUBLIC_BASE_URL).toBe(`https://${PUBLIC_HOSTNAME_OF[env]}`);
+    const noHost = synthEnvWith(env, { envOverrides: { publicHostname: '' } });
+    expect(byName(noHost.api).PUBLIC_BASE_URL).toBeUndefined();
+    expect(Object.keys(byName(noHost.api))).not.toContain('PUBLIC_BASE_URL');
   });
 
   test('only the api task definition and service live here; deployment circuit breaker with rollback and CPU autoscaling to 2x', () => {

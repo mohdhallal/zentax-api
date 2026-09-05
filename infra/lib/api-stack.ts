@@ -24,7 +24,7 @@ export interface ApiStackProps extends cdk.StackProps {
   readonly apiSecurityGroup: ec2.ISecurityGroup;
   /** The ECS cluster (ZenTax-<Env>-Cluster), with its default Cloud Map namespace. */
   readonly cluster: ecs.Cluster;
-  /** The cluster's Cloud Map namespace name, e.g. zentax-staging.local. */
+  /** The cluster's Cloud Map namespace name, e.g. zentax-staging-eu.local. */
   readonly namespaceName: string;
   readonly database: rds.IDatabaseInstance;
   readonly dataKey: kms.IKey;
@@ -43,6 +43,18 @@ export const API_SERVICE_DISCOVERY_NAME = 'api';
 /** `http://api.zentax-<env>.local:3000` — what the web tier's GO_API_URL is. */
 export function apiInternalUrl(namespaceName: string): string {
   return `http://${API_SERVICE_DISCOVERY_NAME}.${namespaceName}:${API_PORT}`;
+}
+
+/**
+ * The product's public origin — `PUBLIC_BASE_URL=https://<publicHostname>`,
+ * the Go config's `app.publicBaseUrl`: the base for the absolute links the api
+ * will hand out. Nothing consumes it yet (the invite link is built by the UI
+ * from its own origin; the api-side link arrives with e-mail delivery). Only
+ * the api service gets it: the seed CLI shares the loader but builds no links,
+ * and the value is omitted entirely when no public hostname is configured.
+ */
+export function apiPublicEnvironment(cfg: EnvConfig): Record<string, string> {
+  return cfg.publicHostname ? { PUBLIC_BASE_URL: `https://${cfg.publicHostname}` } : {};
 }
 
 /**
@@ -98,6 +110,7 @@ export class ApiStack extends cdk.Stack {
         // The public origin (CloudFront / custom domain) is the UI app's; it is
         // configured, not referenced — see EnvConfig.corsAllowedOrigins.
         ...apiStorageEnvironment(cfg, props.documentsBucket, cfg.corsAllowedOrigins),
+        ...apiPublicEnvironment(cfg),
       },
       secrets: apiDbSecrets(props.appDbSecret, props.authEncryptionKeySecret),
       logging: ecs.LogDrivers.awsLogs({ logGroup: props.logGroups.api, streamPrefix: 'api' }),

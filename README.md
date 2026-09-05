@@ -174,6 +174,7 @@ Values are loaded from `deployment/config_files/{APP_ENV}.json` and can be **ove
 | `PORT`                     | External server port                                   | `3000`        |
 | `INTERNAL_PORT`            | Internal server port                                   | `3001`        |
 | `DATABASE_URL`             | PostgreSQL connection string                           | —             |
+| `PUBLIC_BASE_URL`          | Public origin of the product (the web tier's hostname, e.g. `https://eu.app.zentax.software`), base for absolute links the API hands out; absolute http(s) URL, https in staging/production, trailing slash stripped | `app.publicBaseUrl` (dev: `http://localhost:5000`) |
 | `PG_POOL_MAX`              | Max pool connections                                   | `10`          |
 | `PG_IDLE_TIMEOUT_MS`       | Idle connection timeout                                | `30000`       |
 | `PG_CONNECTION_TIMEOUT_MS` | Connection timeout                                     | `2000`        |

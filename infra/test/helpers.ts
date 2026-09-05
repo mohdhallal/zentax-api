@@ -2,8 +2,9 @@ import * as cdk from 'aws-cdk-lib';
 import { Template } from 'aws-cdk-lib/assertions';
 import * as fs from 'fs';
 import * as path from 'path';
-import { EnvName } from '../lib/config';
-import { addEnvironment, addGithubOidc, EnvironmentStacks } from '../lib/zentax-app';
+import { EnvName, Tier } from '../lib/config';
+import { DnsStack } from '../lib/dns-stack';
+import { addDns, addEnvironment, addGithubOidc, EnvironmentStacks } from '../lib/zentax-app';
 
 /** The real cdk.json context, so the tests exercise the committed configuration. */
 export function cdkJsonContext(): Record<string, unknown> {
@@ -65,6 +66,31 @@ export function synthOidc(): Template {
   return oidcTemplate;
 }
 
+export interface SynthesizedDns {
+  readonly stack: DnsStack;
+  readonly template: Template;
+}
+
+let dnsSynth: SynthesizedDns | undefined;
+/**
+ * ZenTax-Dns from the committed cdk.json — the two Google values as pasted
+ * there (assert only what holds whatever their state; a test that needs a
+ * specific state uses synthDnsWith).
+ */
+export function synthDns(): SynthesizedDns {
+  if (!dnsSynth) dnsSynth = synthDnsWith({});
+  return dnsSynth;
+}
+
+/** ZenTax-Dns with `context.dns` patched (uncached). */
+export function synthDnsWith(dnsOverrides: Record<string, unknown>): SynthesizedDns {
+  const context = cdkJsonContext();
+  const dns = { ...(context.dns as Record<string, unknown>), ...dnsOverrides };
+  const app = new cdk.App({ context: { ...context, dns } });
+  const stack = addDns(app);
+  return { stack, template: Template.fromStack(stack) };
+}
+
 /** All resources of the given types as [logicalId, resource] pairs. */
 export function resourcesOfType(template: Template, ...types: string[]): Array<[string, any]> {
   const json = template.toJSON();
@@ -91,4 +117,13 @@ export function exportNamesOf(template: Template): string[] {
   return Object.values(outputs).map((o) => o.Export?.Name).filter((n): n is string => typeof n === 'string');
 }
 
-export const ENVS: EnvName[] = ['staging', 'production'];
+/** The two cells cdk.json declares — keyed tier + region label. */
+export const ENVS = ['staging-eu', 'production-eu'] as const satisfies readonly EnvName[];
+export type TestEnv = (typeof ENVS)[number];
+export const TIER_OF: Record<TestEnv, Tier> = { 'staging-eu': 'staging', 'production-eu': 'production' };
+/** The PascalCase stack-name segment of each cell. */
+export const TITLE_OF: Record<TestEnv, string> = { 'staging-eu': 'StagingEu', 'production-eu': 'ProductionEu' };
+export const PUBLIC_HOSTNAME_OF: Record<TestEnv, string> = { 'staging-eu': 'eu.staging.zentax.software', 'production-eu': 'eu.app.zentax.software' };
+export function otherEnv(env: TestEnv): TestEnv {
+  return env === 'staging-eu' ? 'production-eu' : 'staging-eu';
+}

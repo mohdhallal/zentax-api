@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as contract from './contract';
 import * as exportsModule from '../lib/exports';
+import { ENVS } from './helpers';
 
 /** lib/exports.ts (shared verbatim with zentax-ui/infra) says exactly what ADR-0024 says. */
 describe('lib/exports.ts (the shared export contract)', () => {
@@ -17,18 +18,20 @@ describe('lib/exports.ts (the shared export contract)', () => {
     expect(new Set(exportsModule.EXPORT_KEYS).size).toBe(exportsModule.EXPORT_KEYS.length);
   });
 
-  test('exportName renders zentax-<env>-<key>; the OIDC names are account-level', () => {
-    expect(exportsModule.exportName('staging', 'vpc-id')).toBe('zentax-staging-vpc-id');
-    expect(exportsModule.exportName('production', 'api-internal-url')).toBe('zentax-production-api-internal-url');
+  test('exportName renders zentax-<cell>-<key> for the tier+region-label cell names; the OIDC names are account-level', () => {
+    expect(exportsModule.exportName('staging-eu', 'vpc-id')).toBe('zentax-staging-eu-vpc-id');
+    expect(exportsModule.exportName('production-eu', 'api-internal-url')).toBe('zentax-production-eu-api-internal-url');
     for (const key of exportsModule.EXPORT_KEYS) {
-      for (const env of ['staging', 'production']) {
+      for (const env of ENVS) {
         expect(exportsModule.exportName(env, key)).toBe(contract.exportName(env, key));
         expect(exportsModule.exportName(env, key)).toMatch(/^[A-Za-z0-9-]+$/); // valid CloudFormation export name
       }
     }
     expect(exportsModule.OIDC_EXPORTS.cfnExecutionPolicyArn).toBe('zentax-cfn-execution-policy-arn');
-    expect(exportsModule.OIDC_EXPORTS.deployRoleArn('staging', 'api')).toBe('zentax-deploy-role-staging-api');
-    expect(exportsModule.OIDC_EXPORTS.deployRoleArn('production', 'web')).toBe('zentax-deploy-role-production-web');
+    expect(exportsModule.OIDC_EXPORTS.deployRoleArn('staging-eu', 'api')).toBe('zentax-deploy-role-staging-eu-api');
+    expect(exportsModule.OIDC_EXPORTS.deployRoleArn('production-eu', 'web')).toBe('zentax-deploy-role-production-eu-web');
+    // The Edge execution-policy export is NOT part of the shared file (nothing imports it).
+    expect(JSON.stringify(exportsModule.OIDC_EXPORTS)).not.toContain('edge');
   });
 
   test('the file is byte-identical to the UI app\'s copy when that checkout is present next to this one', () => {

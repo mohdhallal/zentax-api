@@ -45,6 +45,9 @@ describe.each(ENVS)('ZenTax-%s-Cluster', (env) => {
     );
     const byName = Object.fromEntries(seed.Environment.map((e: any) => [e.Name, e.Value]));
     expect(byName.CORS_ALLOWED_ORIGINS).toBe('https://seed.invalid');
+    expect(byName.APP_ENV).toBe(env);
+    // The seed CLI builds no links: PUBLIC_BASE_URL is the api service's alone.
+    expect(envNames).not.toContain('PUBLIC_BASE_URL');
     expect(byName.STORAGE_DRIVER).toBe('s3');
     expect(byName.STORAGE_S3_REGION).toBe('eu-central-1');
     expect(JSON.stringify(byName.STORAGE_S3_BUCKET)).toContain('DocumentsBucket');

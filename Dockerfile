@@ -17,7 +17,8 @@ COPY --from=build /out/zentax-api /out/seed-admin /usr/local/bin/
 # working directory (development | staging | production — the whole directory
 # is copied). Secrets never live in the files: DATABASE_URL (or DB_HOST /
 # DB_PORT / DB_NAME / DB_USER / DB_PASSWORD / DB_SSLMODE), AUTH_ENCRYPTION_KEY,
-# CORS_ALLOWED_ORIGINS come from the environment (ADR-0014).
+# CORS_ALLOWED_ORIGINS come from the environment (ADR-0014), as does the
+# deployment's public origin, PUBLIC_BASE_URL.
 COPY deployment/config_files ./deployment/config_files
 # Document blobs for the filesystem storage adapter (ADR-0022). Compose mounts a
 # named volume here; the directory must exist and belong to the runtime user so

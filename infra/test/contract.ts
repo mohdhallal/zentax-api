@@ -22,10 +22,16 @@ export const ENV_EXPORTS_BY_STACK = {
   Api: API_EXPORTS,
 } as const;
 
+/**
+ * Account-level exports of ZenTax-GithubOidc. The Edge execution-policy ARN
+ * is exported for the bootstrap command only and is deliberately absent from
+ * the shared lib/exports.ts (no stack imports it).
+ */
 export const OIDC_EXPORT_NAMES = [
   'zentax-cfn-execution-policy-arn',
-  'zentax-deploy-role-staging-api', 'zentax-deploy-role-staging-web',
-  'zentax-deploy-role-production-api', 'zentax-deploy-role-production-web',
+  'zentax-cfn-execution-policy-edge-arn',
+  'zentax-deploy-role-staging-eu-api', 'zentax-deploy-role-staging-eu-web',
+  'zentax-deploy-role-production-eu-api', 'zentax-deploy-role-production-eu-web',
 ] as const;
 
 export function exportName(env: string, key: string): string {

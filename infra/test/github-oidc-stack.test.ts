@@ -1,13 +1,19 @@
 import { Match } from 'aws-cdk-lib/assertions';
-import { CFN_EXECUTION_POLICY_NAME, DEPLOY_REPOSITORIES } from '../lib/github-oidc-stack';
-import { OIDC_EXPORT_NAMES } from './contract';
 import * as cdk from 'aws-cdk-lib';
+import {
+  CFN_EXECUTION_POLICY_EDGE_EXPORT_NAME, CFN_EXECUTION_POLICY_EDGE_NAME, CFN_EXECUTION_POLICY_NAME, DEPLOY_REPOSITORIES,
+} from '../lib/github-oidc-stack';
 import { addGithubOidc } from '../lib/zentax-app';
-import { cdkJsonContext, exportNamesOf, resourcesOfType, synthOidc } from './helpers';
+import { OIDC_EXPORT_NAMES } from './contract';
+import { cdkJsonContext, exportNamesOf, otherEnv, resourcesOfType, synthOidc, TestEnv, TITLE_OF } from './helpers';
 
 const ROLES = [
-  ['staging', 'api'], ['staging', 'web'], ['production', 'api'], ['production', 'web'],
+  ['staging-eu', 'api'], ['staging-eu', 'web'], ['production-eu', 'api'], ['production-eu', 'web'],
 ] as const;
+
+const cap = (s: string) => `${s[0].toUpperCase()}${s.slice(1)}`;
+const actionsOf = (s: any): string[] => (Array.isArray(s.Action) ? s.Action : [s.Action]);
+const resourcesOf = (s: any): string[] => (Array.isArray(s.Resource) ? s.Resource : [s.Resource]);
 
 describe('ZenTax-GithubOidc', () => {
   const template = synthOidc();
@@ -33,6 +39,26 @@ describe('ZenTax-GithubOidc', () => {
     expect(() => addGithubOidc(app)).toThrow(/githubRepositories/);
   });
 
+  test('the cells come from cdk.json: two roles per declared cell, named zentax-deploy-<cell>-{api,web}; a legacy "staging" key fails synth', () => {
+    const names = resourcesOfType(template, 'AWS::IAM::Role').map(([, r]) => r.Properties.RoleName).sort();
+    expect(names).toEqual([
+      'zentax-deploy-production-eu-api', 'zentax-deploy-production-eu-web',
+      'zentax-deploy-staging-eu-api', 'zentax-deploy-staging-eu-web',
+    ]);
+    const context = cdkJsonContext();
+    const environments = context.environments as Record<string, unknown>;
+    // A third cell (only its key matters to this stack) adds two roles.
+    const withUs = new cdk.App({ context: { ...context, environments: { ...environments, 'staging-us': {} } } });
+    const t = cdk.assertions.Template.fromStack(addGithubOidc(withUs));
+    t.resourceCountIs('AWS::IAM::Role', 6);
+    t.hasResourceProperties('AWS::IAM::Role', { RoleName: 'zentax-deploy-staging-us-api' });
+    t.hasResourceProperties('AWS::IAM::Role', { RoleName: 'zentax-deploy-staging-us-web' });
+    t.hasOutput('DeployRoleArnStagingUsApi', { Export: { Name: 'zentax-deploy-role-staging-us-api' } });
+    // The old tier-only names are not cells any more.
+    const legacy = new cdk.App({ context: { ...context, environments: { ...environments, staging: {} } } });
+    expect(() => addGithubOidc(legacy)).toThrow(/environments\.staging: cell names are/);
+  });
+
   test.each(ROLES)('zentax-deploy-%s-%s trusts only the matching GitHub environment of its one repository', (env, service) => {
     template.hasResourceProperties('AWS::IAM::Role', {
       RoleName: `zentax-deploy-${env}-${service}`,
@@ -52,24 +78,26 @@ describe('ZenTax-GithubOidc', () => {
         ],
       },
     });
-    // The subject never uses a wildcard (no ref:* / * that would admit any branch), and never the other repository.
+    // The subject never uses a wildcard (no ref:* / * that would admit any branch), and never the other repository / cell.
     const [, role] = resourcesOfType(template, 'AWS::IAM::Role').find(
       ([, r]) => r.Properties.RoleName === `zentax-deploy-${env}-${service}`,
     )!;
     const trust = JSON.stringify(role.Properties.AssumeRolePolicyDocument);
     expect(trust).not.toContain('*');
     expect(trust).not.toContain(DEPLOY_REPOSITORIES[service === 'api' ? 'web' : 'api']);
-    expect(trust).not.toContain(env === 'staging' ? 'environment:production' : 'environment:staging');
+    expect(trust).not.toContain(`environment:${otherEnv(env)}`);
+    // Never the bare tier either (the GitHub environments are named like the cells).
+    expect(trust).not.toMatch(/environment:(staging|production)"/);
     expect(role.Properties.AssumeRolePolicyDocument.Statement[0].Condition.StringLike).toBeUndefined();
   });
 
-  test.each(ROLES)('zentax-deploy-%s-%s permissions are scoped to its environment AND its half of the cell', (env, service) => {
+  test.each(ROLES)('zentax-deploy-%s-%s permissions are scoped to its cell AND its half of the cell', (env, service) => {
     const policies = resourcesOfType(template, 'AWS::IAM::Policy');
-    const policy = policies.find(([id]) => id.toLowerCase().startsWith(`deployrole${env}${service}`));
+    const policy = policies.find(([id]) => id.toLowerCase().startsWith(`deployrole${TITLE_OF[env].toLowerCase()}${service}`));
     expect(policy).toBeDefined();
     const statements = policy![1].Properties.PolicyDocument.Statement as any[];
     const text = JSON.stringify(statements);
-    const other = env === 'staging' ? 'production' : 'staging';
+    const other = otherEnv(env);
     expect(text).not.toContain(`zentax/${other}`);
     expect(text).not.toContain(`zentax-${other}`);
     expect(text).toContain('cdk-hnb659fds-deploy-role-');
@@ -147,19 +175,21 @@ describe('ZenTax-GithubOidc', () => {
     expect(assume.Action).toEqual(['sts:AssumeRole', 'sts:TagSession']);
     for (const r of assume.Resource) expect(JSON.stringify(r)).toMatch(/:role\/cdk-hnb659fds-(deploy|file-publishing|image-publishing|lookup)-role-/);
     expect(assume.Resource).toHaveLength(4);
-    // The deploy roles never get the execution policy or AdministratorAccess themselves.
+    // The deploy roles never get the execution policies or AdministratorAccess themselves.
     expect(JSON.stringify(resourcesOfType(template, 'AWS::IAM::Role'))).not.toContain('ManagedPolicyArns');
   });
 
-  test('exports the execution-policy ARN and the four deploy-role ARNs under the contract names', () => {
+  test('exports the two execution-policy ARNs and the four deploy-role ARNs under the contract names', () => {
     const names = exportNamesOf(template);
     expect(names.sort()).toEqual([...OIDC_EXPORT_NAMES].sort());
     template.hasOutput('CfnExecutionPolicyArn', { Export: { Name: 'zentax-cfn-execution-policy-arn' } });
+    template.hasOutput('CfnExecutionPolicyEdgeArn', { Export: { Name: CFN_EXECUTION_POLICY_EDGE_EXPORT_NAME } });
+    expect(CFN_EXECUTION_POLICY_EDGE_EXPORT_NAME).toBe('zentax-cfn-execution-policy-edge-arn');
     for (const [env, service] of ROLES) {
-      const id = `DeployRoleArn${env[0].toUpperCase()}${env.slice(1)}${service[0].toUpperCase()}${service.slice(1)}`;
+      const id = `DeployRoleArn${TITLE_OF[env]}${cap(service)}`;
       template.hasOutput(id, {
         Export: { Name: `zentax-deploy-role-${env}-${service}` },
-        Value: { 'Fn::GetAtt': [Match.stringLikeRegexp(`^DeployRole${env[0].toUpperCase()}${env.slice(1)}${service[0].toUpperCase()}${service.slice(1)}`), 'Arn'] },
+        Value: { 'Fn::GetAtt': [Match.stringLikeRegexp(`^DeployRole${TITLE_OF[env]}${cap(service)}`), 'Arn'] },
       });
     }
   });
@@ -170,11 +200,9 @@ describe('ZenTax-GithubOidc', () => {
     )!;
     const statements = policy.Properties.PolicyDocument.Statement as any[];
     const text = JSON.stringify(statements);
-    const actionsOf = (s: any): string[] => (Array.isArray(s.Action) ? s.Action : [s.Action]);
-    const resourcesOf = (s: any): string[] => (Array.isArray(s.Resource) ? s.Resource : [s.Resource]);
 
     test('exists, is exported, and is not AdministratorAccess (no "*" action, no iam:*)', () => {
-      template.resourceCountIs('AWS::IAM::ManagedPolicy', 1);
+      template.resourceCountIs('AWS::IAM::ManagedPolicy', 2);
       template.hasOutput('CfnExecutionPolicyArn', { Export: { Name: 'zentax-cfn-execution-policy-arn' } });
       expect(JSON.stringify(template.toJSON())).not.toMatch(/policy\/AdministratorAccess/);
       for (const s of statements) {
@@ -194,11 +222,28 @@ describe('ZenTax-GithubOidc', () => {
       expect(rendered.length).toBeLessThanOrEqual(6144);
     });
 
-    test('still covers what the UI app\'s Web/Edge stacks create (ELB, CloudFront, S3, secrets, Route 53) — one execution policy for both apps', () => {
+    test('still covers what the UI app\'s Web/Edge stacks create (ELB, CloudFront, S3, secrets, Route 53 records) — one execution role for both apps', () => {
       expect(text).toContain('cloudfront:*');
       expect(text).toContain('elasticloadbalancing:*');
       expect(text).toContain(':secret:zentax/*');
-      expect(text).toContain('route53:ChangeResourceRecordSets');
+      // The Edge stack's alias records + the ACM DNS-validation records go into the ZenTax-Dns zone.
+      const route53 = statements.find((s) => actionsOf(s).includes('route53:ChangeResourceRecordSets'))!;
+      expect(actionsOf(route53).sort()).toEqual(['route53:ChangeResourceRecordSets', 'route53:GetHostedZone', 'route53:ListResourceRecordSets']);
+      for (const r of resourcesOf(route53)) expect(JSON.stringify(r)).toMatch(/:route53:::hostedzone\/\*"/);
+      expect(text).toContain('route53:GetChange');
+      // ACM lives in the second policy (this one is at the size cap); hosted-zone creation in neither.
+      expect(text).not.toContain('acm:');
+      expect(text).not.toContain('route53:CreateHostedZone');
+      // The Web stack replicates zentax/<cell>/origin-verify to us-east-1 (the
+      // Edge stack's CloudFront origin resolves it by name there). The grant is
+      // secretsmanager:* on the zentax/* secrets in EVERY region, so
+      // ReplicateSecretToRegions / RemoveRegionsFromReplication need nothing extra.
+      const secrets = statements.filter((s) => actionsOf(s).some((a) => a.startsWith('secretsmanager:')));
+      expect(secrets).toHaveLength(1);
+      expect(actionsOf(secrets[0])).toEqual(['secretsmanager:*']);
+      const secretArns = resourcesOf(secrets[0]).map((r) => JSON.stringify(r));
+      expect(secretArns).toHaveLength(1);
+      expect(secretArns[0]).toMatch(/:secretsmanager:\*:160117555326:secret:zentax\/\*"/);
     });
 
     test('IAM role management and PassRole are restricted to zentax-* / ZenTax-* / cdk-* role names', () => {
@@ -248,6 +293,44 @@ describe('ZenTax-GithubOidc', () => {
       expect(actionsOf(ec2)).not.toContain('ec2:*');
       expect(JSON.stringify(actionsOf(ec2))).not.toMatch(/RunInstances|Volume|Image|Snapshot/);
     });
+
+    test('the cell-name change keeps every ZenTax glob valid: zentax-staging-eu-* / zentax/staging-eu/* fall under zentax-* / zentax/*', () => {
+      // A glob that had been hard-wired to the old tier-only names would silently stop matching.
+      expect(text).not.toMatch(/zentax-(staging|production)\b/);
+      expect(text).not.toMatch(/zentax\/(staging|production)\b/);
+    });
+  });
+
+  describe(`${CFN_EXECUTION_POLICY_EDGE_NAME} (second execution policy: ACM for the UI app's Edge stack)`, () => {
+    const [, policy] = resourcesOfType(template, 'AWS::IAM::ManagedPolicy').find(
+      ([, r]) => r.Properties.ManagedPolicyName === CFN_EXECUTION_POLICY_EDGE_NAME,
+    )!;
+    const statements = policy.Properties.PolicyDocument.Statement as any[];
+
+    test('grants exactly the six ACM certificate actions on "*" (certificate ARNs are generated), nothing else', () => {
+      expect(statements).toHaveLength(1);
+      const [acm] = statements;
+      expect(acm.Effect).toBe('Allow');
+      expect(acm.Resource).toBe('*');
+      expect(actionsOf(acm).sort()).toEqual([
+        'acm:AddTagsToCertificate', 'acm:DeleteCertificate', 'acm:DescribeCertificate',
+        'acm:ListTagsForCertificate', 'acm:RemoveTagsFromCertificate', 'acm:RequestCertificate',
+      ]);
+      const text = JSON.stringify(policy);
+      expect(text).not.toMatch(/acm:(Import|Export|Renew|Resend|Update|Put|\*)/);
+      expect(text).not.toContain('iam:');
+      expect(text).not.toContain('route53:');
+      expect(text).not.toContain('CreateHostedZone');
+    });
+
+    test('fits the 6144 non-whitespace character limit and is exported for the bootstrap command', () => {
+      const rendered = JSON.stringify(policy.Properties.PolicyDocument).replace(/\s/g, '');
+      expect(rendered.length).toBeLessThanOrEqual(6144);
+      template.hasOutput('CfnExecutionPolicyEdgeArn', {
+        Export: { Name: 'zentax-cfn-execution-policy-edge-arn' },
+        Value: { Ref: Match.stringLikeRegexp('^CfnExecutionPolicyEdge') },
+      });
+    });
   });
 });
 
@@ -256,8 +339,10 @@ describe('ZenTax-GithubOidc', () => {
 // deploy roles' or the bootstrap roles' policies or trust.
 describe('ZenTaxCfnExecutionPolicy denies mutating the deploy and bootstrap roles', () => {
   const template = synthOidc();
-  test('carries a Deny iam:* on role/zentax-deploy-* and role/cdk-*', () => {
-    const [, policy] = resourcesOfType(template, 'AWS::IAM::ManagedPolicy')[0];
+  test('carries a Deny iam:* on role/zentax-deploy-* and role/cdk-* (which covers zentax-deploy-staging-eu-api etc.)', () => {
+    const [, policy] = resourcesOfType(template, 'AWS::IAM::ManagedPolicy').find(
+      ([, r]) => r.Properties.ManagedPolicyName === CFN_EXECUTION_POLICY_NAME,
+    )!;
     const statements = policy.Properties.PolicyDocument.Statement as Array<Record<string, unknown>>;
     const deny = statements.find((s) => s.Effect === 'Deny');
     expect(deny).toBeDefined();
@@ -265,5 +350,8 @@ describe('ZenTaxCfnExecutionPolicy denies mutating the deploy and bootstrap role
     expect(text).toContain('iam:*');
     expect(text).toContain(':role/zentax-deploy-*');
     expect(text).toContain(':role/cdk-*');
+    for (const [env, service] of ROLES as ReadonlyArray<readonly [TestEnv, string]>) {
+      expect(`zentax-deploy-${env}-${service}`.startsWith('zentax-deploy-')).toBe(true);
+    }
   });
 });

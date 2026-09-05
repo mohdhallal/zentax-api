@@ -112,6 +112,16 @@ type AppConfig struct {
 	Env          string `json:"env"`
 	Port         int    `json:"port"`
 	InternalPort int    `json:"internalPort"`
+
+	// PublicBaseURL is the origin users reach the product at — the web tier's
+	// public hostname (https://eu.staging.zentax.software), NOT this API's own
+	// listener, which sits behind the web tier's /api proxy. It is the base for
+	// every absolute link the API hands out of band (an e-mailed invite link is
+	// the first planned consumer). Optional; when set it must be an absolute
+	// http(s) URL (https in deployed environments), stored without a trailing
+	// slash. The SaaS task sets it via PUBLIC_BASE_URL from the cell's
+	// publicHostname; empty means "not configured".
+	PublicBaseURL string `json:"publicBaseUrl"`
 }
 
 type ServerConfig struct {

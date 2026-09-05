@@ -224,7 +224,7 @@ func TestDeployed_LogFormatMustBeJSON(t *testing.T) {
 func TestDeployed_AllViolationsReportedAtOnce(t *testing.T) {
 	t.Parallel()
 	c := &Config{
-		App:      AppConfig{Env: EnvProduction, Port: 3000},
+		App:      AppConfig{Env: EnvProduction, Port: 3000, PublicBaseURL: "http://eu.app.zentax.software"},
 		Database: DatabaseConfig{URL: "postgres://x?sslmode=disable"},
 		CORS:     CORSConfig{AllowedOrigins: []string{"*"}},
 		Log:      &logger.Config{Format: "text"},
@@ -233,7 +233,7 @@ func TestDeployed_AllViolationsReportedAtOnce(t *testing.T) {
 	err := c.validate()
 	require.Error(t, err)
 	for _, want := range []string{
-		EnvAuthEncryptionKey, EnvAuthSessionCookieSecure, EnvDatabaseURL, EnvCORSAllowedOrigins, EnvLogFormat,
+		EnvAuthEncryptionKey, EnvAuthSessionCookieSecure, EnvDatabaseURL, EnvCORSAllowedOrigins, EnvLogFormat, EnvPublicBaseURL,
 	} {
 		assert.Contains(t, err.Error(), want)
 	}
@@ -274,8 +274,10 @@ func TestEnvOverrides_EmptyValuesNeverOverride(t *testing.T) {
 	t.Setenv(EnvSwaggerEnabled, "")
 	t.Setenv(EnvDatabaseURL, "")
 	t.Setenv(EnvDBHost, "")
+	t.Setenv(EnvPublicBaseURL, "")
 
 	c := &Config{
+		App:      AppConfig{PublicBaseURL: "https://keep.example"},
 		Database: DatabaseConfig{URL: "keep"},
 		CORS:     CORSConfig{AllowedOrigins: []string{"https://keep.example"}},
 		Auth:     AuthConfig{EncryptionKey: "keep", SessionCookieSecure: true},
@@ -284,6 +286,7 @@ func TestEnvOverrides_EmptyValuesNeverOverride(t *testing.T) {
 	}
 	mergeEnvOverrides(c)
 
+	assert.Equal(t, "https://keep.example", c.App.PublicBaseURL)
 	assert.Equal(t, "keep", c.Database.URL)
 	assert.Equal(t, []string{"https://keep.example"}, c.CORS.AllowedOrigins)
 	assert.Equal(t, "keep", c.Auth.EncryptionKey)
@@ -400,6 +403,7 @@ func TestShippedDeployedConfigFilesAreProductionShaped(t *testing.T) {
 		assert.Empty(t, c.Auth.EncryptionKey, "%s: encryption key comes from the environment", env)
 		assert.True(t, c.Auth.SessionCookieSecure, env)
 		assert.Empty(t, c.CORS.AllowedOrigins, "%s: origins come from the environment", env)
+		assert.Empty(t, c.App.PublicBaseURL, "%s: the public origin comes from the environment (PUBLIC_BASE_URL)", env)
 		require.NotNil(t, c.Log, env)
 		assert.Equal(t, "json", c.Log.Format, env)
 		assert.Equal(t, "info", c.Log.Level, env)
@@ -424,6 +428,7 @@ func TestShippedDeployedConfigFiles_BootWithEnv(t *testing.T) {
 	t.Setenv(EnvCORSAllowedOrigins, "https://d123.cloudfront.net")
 	t.Setenv(EnvStorageS3Bucket, "zentax-documents-staging")
 	t.Setenv(EnvStorageS3Region, "eu-central-1")
+	t.Setenv(EnvPublicBaseURL, "https://eu.staging.zentax.software/")
 
 	for _, env := range []string{EnvStaging, EnvProduction} {
 		raw, err := os.ReadFile(filepath.Join("..", configDir, env+".json"))
@@ -434,5 +439,30 @@ func TestShippedDeployedConfigFiles_BootWithEnv(t *testing.T) {
 		require.NoError(t, c.validate(), env)
 		assert.Equal(t, "postgres://zentax_app:generated@db.internal:5432/zentax?sslmode=require", c.Database.URL)
 		assert.Equal(t, StorageDriverS3, c.Storage.Driver)
+		assert.Equal(t, "https://eu.staging.zentax.software", c.App.PublicBaseURL)
+	}
+}
+
+func TestShippedDeployedConfigFiles_BootWithoutPublicBaseURL(t *testing.T) {
+	// A cell without its custom domain yet: the task passes PUBLIC_BASE_URL=""
+	// and the API must still boot (the public origin is optional).
+	t.Setenv(EnvDBHost, "db.internal")
+	t.Setenv(EnvDBName, "zentax")
+	t.Setenv(EnvDBUser, "zentax_app")
+	t.Setenv(EnvDBPassword, "generated")
+	t.Setenv(EnvAuthEncryptionKey, "Xk9pQ2mL7vB4nR8tW1yZ5aC3eF6hJ0uIabcdefgh")
+	t.Setenv(EnvCORSAllowedOrigins, "https://zentax-staging-eu.invalid")
+	t.Setenv(EnvStorageS3Bucket, "zentax-documents-staging")
+	t.Setenv(EnvStorageS3Region, "eu-central-1")
+	t.Setenv(EnvPublicBaseURL, "")
+
+	for _, env := range []string{EnvStaging, EnvProduction} {
+		raw, err := os.ReadFile(filepath.Join("..", configDir, env+".json"))
+		require.NoError(t, err)
+		c := &Config{}
+		require.NoError(t, json.Unmarshal(raw, c))
+		mergeEnvOverrides(c)
+		require.NoError(t, c.validate(), env)
+		assert.Empty(t, c.App.PublicBaseURL, env)
 	}
 }
