@@ -93,7 +93,7 @@ func TestTransaction_DBError_NotRollback_Returns500(t *testing.T) {
 	assert.Contains(t, w.Body.String(), `"status":false`)
 }
 
-func TestTransaction_ResponseBuffered_NotWrittenUntilAfterTx(t *testing.T) {
+func TestTransaction_ResponseBuffered_NotWrittenUntilTheTransactionIsOver(t *testing.T) {
 	t.Parallel()
 
 	var realWriterSeenDuringTx bool

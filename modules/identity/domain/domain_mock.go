@@ -28,8 +28,11 @@ func (m *UserRepositoryMock) Create(ctx context.Context, input CreateUserInput) 
 	return userOrNil(args.Get(0)), args.Error(1)
 }
 
-func (m *UserRepositoryMock) RecordFailedLogin(ctx context.Context, id string, attempts int, lockedUntil *time.Time) error {
-	return m.Called(ctx, id, attempts, lockedUntil).Error(0)
+func (m *UserRepositoryMock) ConsumeLoginAttempt(
+	ctx context.Context, id string, lockThreshold int, now, lockUntil time.Time,
+) (bool, error) {
+	args := m.Called(ctx, id, lockThreshold, now, lockUntil)
+	return args.Bool(0), args.Error(1)
 }
 
 func (m *UserRepositoryMock) ResetFailedLogin(ctx context.Context, id string) error {

@@ -2,9 +2,18 @@ package domain
 
 // Auth error messages. Credential errors are deliberately generic to avoid user
 // enumeration.
+//
+// There is deliberately NO "account locked" message. One existed and was
+// retired: /auth/login answered it as soon as the submitted password matched a
+// locked account's stored hash, which made the lockout a password oracle — an
+// attacker who had just spent five requests locking an address could then read
+// the correct password off the responses while the lock refused nothing. A
+// locked account now answers MsgInvalidCredentials like every other failure
+// (the policy is stated in modules/identity/usecases/login.go). Do not
+// reintroduce a message that distinguishes it; tell the owner out of band
+// instead (lockout notification e-mail / self-service unlock).
 const (
 	MsgInvalidCredentials = "invalid email or password"
-	MsgAccountLocked      = "account temporarily locked after too many failed attempts"
 	MsgSessionInvalid     = "session is invalid or expired"
 	MsgMFARequired        = "multi-factor authentication required"
 	MsgInvalidMFACode     = "invalid authentication code"

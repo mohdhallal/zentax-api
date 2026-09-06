@@ -14,6 +14,13 @@ type ctxKey string
 
 const ctxTxKey ctxKey = "db_tx"
 
+// txFromContext returns the ambient request transaction, if any. A context
+// carrying an explicit nil counts as "none".
+func txFromContext(ctx context.Context) (*sqlx.Tx, bool) {
+	tx, ok := ctx.Value(ctxTxKey).(*sqlx.Tx)
+	return tx, ok && tx != nil
+}
+
 type Exec struct {
 	db *sqlx.DB
 }
@@ -23,7 +30,7 @@ func NewExec(db *sqlx.DB) *Exec {
 }
 
 func (e *Exec) fromContext(ctx context.Context) ExecerPg {
-	if tx, ok := ctx.Value(ctxTxKey).(*sqlx.Tx); ok {
+	if tx, ok := txFromContext(ctx); ok {
 		return tx
 	}
 	return e.db
@@ -54,7 +61,7 @@ func (e *Exec) Rebind(query string) string {
 }
 
 func (e *Exec) WithinTransaction(ctx context.Context, fn func(ctx context.Context) error) error {
-	if _, ok := ctx.Value(ctxTxKey).(*sqlx.Tx); ok {
+	if _, ok := txFromContext(ctx); ok {
 		return fn(ctx)
 	}
 

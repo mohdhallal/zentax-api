@@ -15,10 +15,14 @@
 //     as several users at once: Login returns a *Session (a Client bound to
 //     that token) and Client.WithSession makes a shallow copy bound to any
 //     token. A Client is safe for concurrent use.
-//   - No Origin header. The API's CSRF check (delivery/httpkit/middlewares/
-//     session.go) rejects a mutation whose Origin host differs from the request
-//     host; non-browser clients that omit Origin are allowed. This client never
-//     sets an Origin header, on any request.
+//   - No Origin header. The API's CSRF check is CrossOriginGuard
+//     (delivery/httpkit/middlewares/csrf.go): it rejects a mutation whose Origin
+//     host differs from the request host. It is wired in the route builder
+//     around EVERY state-changing route of the external router — the public
+//     /auth mutations, login and logout included, not only the
+//     session-authenticated ones — so every POST/PUT/PATCH/DELETE this client
+//     makes is subject to it. Non-browser clients that omit Origin are allowed,
+//     and this client never sets an Origin header, on any request.
 package apiclient
 
 import (

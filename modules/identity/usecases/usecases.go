@@ -18,13 +18,17 @@ type Settings struct {
 	TOTPIssuer         string
 }
 
-const (
-	maxFailedAttempts = 5
-	lockoutDuration   = 15 * time.Minute
-)
-
-// dummyHash is verified against when a user is not found, so login timing does
-// not reveal whether an email exists. Computed once at load.
+// dummyHash is the timing equalizer: it is verified on every login path that
+// must NOT verify the stored credential — an unknown address, a disabled member,
+// an invited one with no password yet, a service account, and (the case that is
+// easy to get wrong) an account whose lockout window is still live. Verifying a
+// locked account's real hash makes the lock a password oracle; skipping the
+// verification entirely forks the timing and enumerates the address. So exactly
+// one hash is always checked, and this is the one checked whenever the answer
+// must not depend on the result.
+//
+// Computed once at load, with the same parameters as a real hash. The lockout
+// and enumeration policy it serves is stated in login.go.
 var dummyHash, _ = crypto.HashPassword("timing-equalizer-not-a-real-password")
 
 type UseCases struct {
@@ -34,11 +38,16 @@ type UseCases struct {
 	grants   domain.GrantWriter
 	settings Settings
 	now      func() time.Time
+	// verifyPassword is crypto.VerifyPassword, injectable like now: the login
+	// path's whole enumeration defence is that it is called exactly once on
+	// every outcome, which is a property about WORK done and can only be
+	// asserted by counting the calls (a wall-clock assertion would be flaky).
+	verifyPassword func(password, encoded string) (bool, error)
 
 	// Member administration (optional wiring; nil-safe for the auth-only tests).
 	members domain.MemberRepository
 	invites domain.InviteTokenRepository
-	tx      database.ExecerPgTx // opens a tenant-bound tx for the public accept-invite step
+	tx      database.ExecerPgTx // the public /auth routes open their own transactions
 	audit   *audit.Recorder     // nil = no-op
 }
 
@@ -49,12 +58,24 @@ func (uc *UseCases) WithMembers(members domain.MemberRepository, invites domain.
 	return uc
 }
 
-// WithTx injects the transaction seam used by AcceptInvite, which runs on a
-// public route (no session, no tenant) and must open its own transaction bound
-// to the tenant taken from the token row.
+// WithTx injects the transaction seam the public /auth routes need. They carry
+// no ambient request transaction, so each opens its own where it needs one:
+// AcceptInvite (no session, no tenant — its transaction is bound to the tenant
+// taken from the token row), and Login, whose route deliberately declares no
+// transaction so that the attempt-budget statement can commit before the ~70ms
+// password verification instead of holding a row lock across it.
 func (uc *UseCases) WithTx(tx database.ExecerPgTx) *UseCases {
 	uc.tx = tx
 	return uc
+}
+
+// withinTx runs fn on the injected Tx seam; without one (unit tests) it runs
+// fn directly on the given context.
+func (uc *UseCases) withinTx(ctx context.Context, fn func(ctx context.Context) error) error {
+	if uc.tx == nil {
+		return fn(ctx)
+	}
+	return uc.tx.WithinTransaction(ctx, fn)
 }
 
 // WithAudit injects the audit recorder (ADR-0008). Nil-safe.
@@ -74,7 +95,8 @@ func NewUseCases(
 		settings.TOTPIssuer = "ZenTax"
 	}
 	return &UseCases{
-		users: users, sessions: sessions, tokens: tokens, grants: grants,
+		verifyPassword: crypto.VerifyPassword,
+		users:          users, sessions: sessions, tokens: tokens, grants: grants,
 		settings: settings, now: time.Now,
 	}
 }

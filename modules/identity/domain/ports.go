@@ -12,8 +12,36 @@ type UserRepository interface {
 	// ListByKind returns a tenant's users of one kind (users is not RLS'd, so
 	// the tenant is scoped explicitly).
 	ListByKind(ctx context.Context, tenantID, kind string) ([]User, error)
-	// RecordFailedLogin sets the failed-attempt counter and optional lock time.
-	RecordFailedLogin(ctx context.Context, id string, attempts int, lockedUntil *time.Time) error
+	// ConsumeLoginAttempt spends one attempt from the account's lockout budget
+	// and reports whether this attempt was inside it. It applies the whole
+	// policy atomically, in a single statement evaluated under the row lock that
+	// both updates the row and returns the decision — never
+	// read-then-decide-then-write, which is what let concurrency widen the
+	// budget:
+	//
+	//   - a LIVE lock changes nothing at all — counter, stamp and updated_at —
+	//     and reports NOT allowed, so a lock can never be extended by the
+	//     attempts it is refusing;
+	//   - an EXPIRED lock is cleared first, so this attempt starts a fresh
+	//     window at 1 and IS allowed — an elapsed window clears the debt;
+	//   - otherwise the counter increments, saturating at lockThreshold, the
+	//     attempt that REACHES lockThreshold stamps locked_until with lockUntil,
+	//     and the attempt is allowed. The threshold-th attempt is the one that
+	//     arms the lock, not the first one refused by it.
+	//
+	// "now" is the caller's clock — the one that also produced lockUntil — so
+	// expiry is judged against the clock that wrote the stamp.
+	//
+	// Callers MUST consume BEFORE verifying a password, and MUST NOT hold a
+	// transaction open across that verification: the whole point is a short
+	// statement that commits before ~70ms of argon2, so simultaneous attempts
+	// serialise on the row for a millisecond instead of queueing behind each
+	// other's hashing — and so that no answer can outrun the attempt it spent.
+	ConsumeLoginAttempt(
+		ctx context.Context, id string, lockThreshold int, now, lockUntil time.Time,
+	) (allowed bool, err error)
+	// ResetFailedLogin clears the counter AND any lock (including one whose
+	// window has already elapsed): a successful login leaves no residue.
 	ResetFailedLogin(ctx context.Context, id string) error
 	SetTOTP(ctx context.Context, id string, secretEnc *string, enabled bool) error
 }

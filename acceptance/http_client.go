@@ -85,6 +85,12 @@ func (b *RequestBuilder) WithBearer(token string) *RequestBuilder {
 	return b.withHeader("Authorization", "Bearer "+token)
 }
 
+// WithOrigin sets the Origin header a browser sends, for exercising the
+// cross-origin (CSRF) guard. Suite.External.URL is this server's own origin.
+func (b *RequestBuilder) WithOrigin(origin string) *RequestBuilder {
+	return b.withHeader("Origin", origin)
+}
+
 func (b *RequestBuilder) do(t *testing.T, method, path string, body any) *TestResponse {
 	t.Helper()
 	var bodyReader io.Reader

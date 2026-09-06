@@ -93,6 +93,23 @@ func buildRoute(route types.Route, router *Router) http.HandlerFunc {
 		handler = middlewares.RequireAuth(router.SessionAuth, router.SessionCookieName)(handler)
 	}
 
+	// CSRF (ADR-0011): every route of the EXTERNAL router is origin-checked here
+	// — the guard decides which requests that actually means (state-changing
+	// methods that are not bearer-authenticated). Wiring it at the builder
+	// rather than inside RequireAuth is the whole point: RequireAuth runs only
+	// for routes that declare a tenant, which left the public /auth mutations —
+	// logout included, a cookie-authenticated state change — unguarded. It wraps
+	// OUTSIDE RequireAuth, so a cross-origin mutation is refused before any
+	// credential is read.
+	//
+	// The internal router is deliberately excluded: it is not browser-reachable
+	// and authenticates with per-call Basic credentials rather than an ambient
+	// cookie, so the check could only reject legitimate server-to-server callers
+	// that happen to send an Origin.
+	if router.Mode == types.ModeExternal {
+		handler = middlewares.CrossOriginGuard()(handler)
+	}
+
 	if mp, ok := route.(types.RouteMiddlewareDefinition); ok {
 		for i := len(mp.DefineMiddlewares()) - 1; i >= 0; i-- {
 			handler = mp.DefineMiddlewares()[i](handler)

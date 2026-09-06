@@ -66,6 +66,14 @@ func (w *txResponseWriter) flush() {
 
 // Transaction runs the handler inside a database transaction (the RLS tenant
 // GUC is bound at that seam, ADR-0004), rolling back on any 4xx/5xx status.
+//
+// A route that must write something on a path answering 4xx — or that must
+// commit a write BEFORE doing slow work the answer depends on — cannot use this
+// seam at all: the write would be rolled back with the status, and a second
+// connection borrowed to escape that deadlocks the pool. Such a route declares
+// no transaction and its use case owns them, sequentially, so one request still
+// holds at most one pooled connection at any instant. /auth/login is the case
+// (see identity/handlers.LoginHandler.DefineRoute).
 func Transaction(db database.ExecerPgTx) types.Middleware {
 	return transaction(db, false)
 }

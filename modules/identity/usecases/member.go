@@ -430,12 +430,3 @@ func (uc *UseCases) AcceptInvite(ctx context.Context, input domain.AcceptInviteI
 	}
 	return &domain.AcceptInviteResult{Email: user.Email}, nil
 }
-
-// withinTx runs fn on the injected Tx seam; without one (unit tests) it runs
-// fn directly on the given context.
-func (uc *UseCases) withinTx(ctx context.Context, fn func(ctx context.Context) error) error {
-	if uc.tx == nil {
-		return fn(ctx)
-	}
-	return uc.tx.WithinTransaction(ctx, fn)
-}

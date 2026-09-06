@@ -5,7 +5,7 @@
 > repository, `github.com/mohdhallal/zentax-ui`, formerly `TaxFlowReports`);
 > architecture decisions in `../zentax-ui/docs/adr/` (ADRs 0001–0025).
 
-**Last updated:** 2026-09-05 · **Toolchain:** Go 1.27 via gvm (`~/.gvm/gos/go1.27`;
+**Last updated:** 2026-09-06 · **Toolchain:** Go 1.27 via gvm (`~/.gvm/gos/go1.27`;
 the system `/usr/local/go` is a stale 1.19). **Gate:** `go build/vet/test ./...`
 green on both the main module and `acceptance/`.
 
@@ -609,6 +609,175 @@ Commits: `4cdcd4e` scaffold · `2851179` tenancy+entities · `d074780` obligatio
   (enroll/enable/verify). The tenant now comes from the authenticated **session** (`RequireSession`);
   the interim `X-Tenant-ID` header is **gone**. First user via **`cmd/seed-admin`**. `modules/identity`
   + `platform/crypto`; auth endpoints under `/auth/*`.
+  - **Failed-login lockout — the attempt budget (rewritten 2026-09-06, round 4).** The policy is
+    stated once in `modules/identity/usecases/login.go`; this section is the operator's copy and the
+    **only** place timing figures are recorded (they are re-measured whenever the path changes, so a
+    number in a code comment is a number that will go stale).
+    - **What it bounds: 5 verifications of the stored hash per account *between successes*, per 15
+      minutes, independent of concurrency.** An attempt is **charged before the password is
+      verified**, so a thousand simultaneous requests buy the same five verifications a thousand
+      serial ones do. The counter is per account, not per IP. *"Between successes" is the exact
+      bound:* a success resets the counter, so somebody who knows the password refills the budget
+      every time they use it, and a burst of correct passwords mints more than five sessions. The
+      budget exists to bound **guessing**, and does; it is not an absolute cap on verifications per
+      window.
+    - **A live lock is never extended.** While the window is running the charge changes nothing —
+      counter, `locked_until` and `updated_at` alike — so the requests being refused cannot lengthen
+      the refusal.
+    - **An elapsed window clears the debt.** The next attempt after it starts a **fresh count at 1** —
+      re-locking costs a full 5 attempts again, not 1. A successful login clears the counter *and* any
+      stale `locked_until`.
+    - **Every attempt costs budget, successes included.** Nothing is known about the password at the
+      moment of the charge — that is precisely why the bound holds — so a successful login also spends
+      one, and then clears the counter. **The visible cost:** more than 5 *simultaneous* logins by the
+      same account get the generic refusal for the surplus even with the right password. They succeed
+      on retry (the first success resets the budget). Serial logins never accumulate.
+    - **What it does NOT bound.**
+      - **DoS on a known address.** An attacker who knows an address holds it out indefinitely by
+        paying a fresh threshold of attempts per window — 3 windows for 15 requests. *That figure is
+        derived from the policy (5 × 3), not measured;* a previous edit of this file recorded it as
+        "measured", which it never was. What the two rules above buy is that the DoS costs 5 requests
+        per 15 minutes instead of 1, and that guessing cannot extend a window it is already inside.
+      - **Spraying.** One guess each against ten thousand addresses never touches a budget. Nothing
+        here sees it.
+      - Both need **per-principal / per-IP rate limiting** — see *Not covered* below, which points
+        back here.
+    - **The lock is never announced, to anybody.** Every failure — unknown address, disabled member,
+      invited member with no password yet, service account, wrong password, a charge that could not be
+      made, **and the CORRECT password once the budget is spent** — answers the identical generic
+      `invalid email or password`, with the same status and the same headers. Past the budget the
+      stored hash is **not verified at all**; the dummy equalizer is.
+      - *Why the correct password gets nothing either:* answering "account locked" as soon as the
+        submitted password matched made the lockout a **password oracle**. An attacker who had just
+        spent 5 requests locking an address could then guess against it and read the right password
+        straight off the responses, at full speed — the lock refused no verification, so it throttled
+        nothing and scored everything. Confirmed by measurement against the real router.
+      - **Known cost, accepted deliberately:** a legitimate user who is locked out is told only
+        `invalid email or password` and has to wait out the 15 minutes with no explanation. That is
+        the price of not leaking, and it is a real support burden.
+      - **Future work that removes the cost** (not implemented, deliberately out of scope here): a
+        **lockout notification e-mail** to the account's own address, and/or **self-service unlock**
+        via a mailed link. Both tell the owner out of band, where an attacker who does not control
+        the mailbox learns nothing.
+    - **Identical work on every path, structurally.** Every path performs **exactly one argon2
+      verification** (~70ms), against the stored hash only when the account is login-capable **and**
+      the attempt was inside its budget, and against a fixed dummy otherwise. Two things make that
+      structural rather than incidental:
+      - a **stored hash that cannot be decoded** used to return in ~2.4ms, because
+        `crypto.VerifyPassword` decodes before it hashes — a corrupt or legacy-format row was
+        identifiable by timing alone even though it answered the same 401. The decode failure now
+        **falls back to verifying the dummy**, so it pays the same cost; it is logged loudly and still
+        answers the generic 401;
+      - the charge runs for **every login-capable address, locked or not** — where before it
+        separated locked from unlocked as well. Login-capable means registered **and** active **and**
+        human **and** holding a password, so a disabled member, an invited member with no password
+        yet, a service account and an unknown address all pay none: the residual (a few ms against
+        the ~70ms floor) separates **a live, password-holding account** from everything else, not
+        "registered" from "unknown".
+    - **A lockout leaves a server-side trace.** The response is deliberately indistinguishable, so a
+      refused-because-locked attempt is logged at **Warn** with the user id and the request id
+      (`identity: login refused — the account's attempt budget is spent…`). Without it neither an
+      operator chasing "I cannot sign in" nor an auditor asking whether the control ever fires has
+      anything to look at. It goes to the log only, never to the caller.
+    - **The success path runs on an uncancellable context.** The attempt that reaches the threshold
+      stamps the lock *before* anything is known about the password, so a client that hangs up
+      between the charge and the reset would otherwise leave the account locked for the full window
+      despite having presented the correct password.
+    - **Measured 2026-09-06 (round 4, after the rewrite; 3-sample medians, real router, loaded dev
+      machine — treat ±2ms as noise):** locked-wrong **73.5ms**, locked-**RIGHT** **73.6ms**,
+      unlocked-registered **70.3ms**, locked-mixed-case **70.7ms**, disabled **68.4ms**, invited
+      **68.5ms**, service **68.2ms**, unknown **69.6ms**. Spread 68.2–73.6ms on a ~70ms floor. The
+      registered/unknown residual is the one charge `UPDATE`. (Superseded: round 3's 69.2–70.9ms, and
+      before all of it, a locked address answering in **2.4ms** against an unknown one's 69ms — a
+      ~28x oracle plus a distinguishing message, mintable against any address for 5 requests.)
+    - **`MsgAccountLocked` is retired.** It is unreachable from `/auth/login` by construction and the
+      constant is deleted; `modules/identity/domain/error_messages.go` carries a note saying why, so
+      it does not come back.
+
+    **How it is implemented, and what round 4 changed.** The charge is one statement —
+    `UPDATE users … FROM (SELECT … FOR UPDATE) … RETURNING NOT base.live_lock` — that updates the row
+    **and returns the decision**, evaluated under the row lock. Concurrent attempts serialise on it
+    for about a millisecond; an expired lock is erased before the increment (that is the fresh
+    window); a live lock is passed through untouched; the threshold-th attempt is still *allowed* and
+    is the one that arms the lock.
+    Rounds 1–3 instead read the row at the top of the request, decided `locked` from that snapshot,
+    and counted the attempt afterwards (as an after-transaction effect). **Every request that started
+    before the threshold increment committed therefore read an unlocked account and verified the
+    STORED hash**, so the lockout throttled only *serial* guessing: a single concurrent burst bought
+    one real verification per thread. Measured against the real router at PoolMax=5, a burst of 40
+    wrong passwords with 5 correct guesses released into it logged **1, 3 and 5 of the 5 guesses
+    straight in** across three runs (and an all-correct burst of 40 minted 40 sessions against a
+    budget of 5); after the rewrite, **0 sessions**, counter exactly 5, account locked, over 4 runs.
+    Charging before verifying also removes two older defects by construction: the attempt cannot be
+    rolled back with the 401 it accompanies, and a client that hangs up mid-request cannot suppress
+    it (if the cancellation lands early enough to break the charge, the attempt is **refused**, not
+    admitted — the charge **fails closed**, since a database hiccup must not turn the budget off; the
+    failure is logged and answered as the same generic 401, because surfacing a 500 that only
+    registered addresses can trigger is the enumeration oracle from the other side).
+    **`/auth/login` no longer declares `Tx`.** The use case owns its transactions and takes them
+    **sequentially**: the lookup, the charge (one statement, autocommit — its own short transaction),
+    then ~70ms of argon2 **holding no connection at all**, then on success a single transaction for
+    the counter reset + session insert. The route needed nothing else from the transaction seam — it
+    is public, so there is no tenant/user GUC to bind, and login writes no audit entry. This keeps the
+    invariant that broke the API in round 1: **one request holds at most one pooled connection at any
+    instant**. Holding the request transaction open across the verification would have held a row lock
+    for the length of an argon2 hash; borrowing a second connection deadlocked at PoolMax (a burst of
+    5 took 5.1s and recorded 1 of 5).
+    **`platform/database.AfterTx` is deleted**, with its tests, its `Transaction`-middleware and
+    `WithinTransaction` wiring, and the now-unused `database.Detach` it was built on. The failed-login
+    counter was its only caller; charging before the answer removed the need for it, and an
+    unexercised seam in the transaction path is worse than no seam.
+    Covered by use-case unit tests (`TestLogin_AttemptIsChargedBeforeThePasswordIsVerified` pins the
+    order at the seam; `TestLogin_EveryFailure_SameAnswerAndSameWork` walks every refusal shape and
+    asserts *which* hashes reached the verification seam, undecodable-hash fallback included;
+    `TestLogin_Locked_*` are the password-oracle regressions; `TestLogin_ChargeFails_*` pins fail-
+    closed) and live-HTTP acceptance tests (`TestFailedLoginLockout`;
+    `TestLoginBudget_ConcurrencyCannotWidenIt` — the round-4 regression, 45 concurrent requests;
+    `TestFailedLoginLockout_Concurrent` — 4/5/7 concurrent wrong passwords at PoolMax=5 take
+    **91/107/143ms** and record 4/5/5, re-measured 2026-09-06; and
+    `TestLoginFailures_Indistinguishable`, which compares status, body bytes *and* headers across
+    eight refusal shapes including the right password on a locked account).
+    **Also settled 2026-09-06:** a **padded e-mail address** reaches the use case and resolves to the
+    same account. The mechanism is not what this file previously implied: `validate:"email"` *does*
+    reject a padded address, but never sees one, because the route builder `TrimSpace`s every string
+    in the body **before** validating (`routing.sanitize`). `Login`'s own `strings.TrimSpace` is
+    therefore the use case's guarantee for callers that do not come through HTTP, not a duplicate of a
+    validator rule — it stays. **Not** added to the DTO: there is no trim struct tag, it would take
+    custom unmarshalling to add one, and it would be a third copy of a rule the sanitizer already
+    applies to every body string.
+    **Not covered, separate increments:** per-IP / **per-principal rate limiting** — the missing piece
+    for *both* gaps named under "What it does NOT bound" above (holding a known address out, and
+    spraying across accounts), and the only thing that makes "an attacker cannot hold a known address
+    out" true; `POST /auth/mfa/verify` is **unthrottled** (no counter, no budget — an attacker
+    holding a password can brute-force the 6-digit TOTP code); and the **argon2 verification itself
+    is unmetered** — every login pays 64 MiB and ~70ms *by design*, refusals for addresses that do
+    not exist included, and nothing caps how many run at once. Measured against the real router: 200
+    concurrent logins for a nonexistent address peaked at ~5 GiB of heap with every request taking
+    4.6–5.8s, and 400 took 10.7s. That is a memory-exhaustion lever available to any unauthenticated
+    source, and no budget can bound it because it is spent before any account is identified. It needs
+    a semaphore (a small multiple of `GOMAXPROCS`) around the verification with a bounded queue and a
+    **uniform** shed answer — uniform because a shed response that varies by address is the
+    enumeration oracle again.
+  - **Cross-origin (CSRF) rule (widened 2026-09-06).** Every **state-changing** request
+    (POST/PUT/PATCH/DELETE) on the **external** router is origin-checked by `CrossOriginGuard`,
+    wired once in the **route builder** (`buildRoute`) so no future route can forget it: a request
+    with **no `Origin`** is allowed (server-to-server clients, curl, and the Express adapter, which
+    strips the header), one whose `Origin` host **matches the request host** is allowed, and anything
+    else is refused **403 `cross-origin request rejected`** — before any credential is read. The rule
+    covers **every external state-changing route, the public `/auth` mutations included**: `login`,
+    `logout` and `accept-invite` are checked exactly like a tenant route. A
+    **`Authorization: Bearer ztx_…`** request is exempt on purpose: an API token is not ambient
+    authority (a browser never attaches it for a foreign page), so CSRF cannot be mounted with one
+    and service-account/agent clients keep working from another origin. **GET/HEAD/OPTIONS** are
+    untouched. The **internal** router is excluded (not browser-reachable, per-call Basic credentials
+    rather than a cookie). Until now the check lived inside `RequireAuth`, which the builder wires
+    only for routes declaring a tenant — so the public `/auth` mutations were unguarded, and a page on
+    any origin could POST `/auth/logout` with the victim's cookie and genuinely destroy their session,
+    or POST `/auth/login` to fixate one. Defence in depth alongside the `SameSite=Strict` session
+    cookie; a configurable origin allowlist can replace the host comparison when the browser app is
+    served from a different host than the API. Documented for API consumers in
+    `shared/apiclient/client.go`. Covered by a middleware decision-table unit test, route-builder
+    wiring tests, and a live-HTTP acceptance test (`TestCrossOriginAuthMutationsRejected`).
 - **Capability enforcement — DONE (Increment B-1, ADR-0012).** A capability model + role→capability
   matrix (`platform/authz`) and a `RequireCapability` middleware — which runs *inside* the tenant tx so
   its read of the RLS'd `user_grants` sees the session tenant — gate every domain route via a declarative
@@ -702,7 +871,12 @@ Commits: `4cdcd4e` scaffold · `2851179` tenancy+entities · `d074780` obligatio
   and machines cannot hold `member:manage` implicitly (no self-replication). Admin surface (gated by
   member:manage): `POST/GET /service-accounts`, `POST /service-accounts/{id}/tokens` (cleartext shown
   once), `POST /tokens/{id}/revoke`. Verified live incl. attribution, revocation, expiry, cross-tenant 404s.
-  **Remaining:** OAuth 2.1 client credentials (MCP-aligned, Phase 2 with WorkOS); per-principal rate limits.
+  **Remaining:** OAuth 2.1 client credentials (MCP-aligned, Phase 2 with WorkOS); **per-principal rate
+  limits** — also the missing piece for the two gaps the failed-login attempt budget explicitly does
+  not close (an attacker holding a known address locked out at a threshold of requests per window, and
+  **spraying** one guess each across many addresses, which never touches a budget at all — see
+  "What it does NOT bound" under the failed-login lockout above), and the throttle
+  `POST /auth/mfa/verify` still lacks entirely.
 - **Tenant timezone (ADR-0003, 2026-09-05) — DONE.** Migration `20260905000020_tenant_timezone` adds
   `tenants.timezone VARCHAR(64) NOT NULL DEFAULT 'UTC'` (`CHECK (timezone <> '')`; the registry stays
   non-partitioned, ADR-0020 exception). Instants stay UTC at rest; the zone is the account's display /
