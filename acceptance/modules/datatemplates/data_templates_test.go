@@ -171,12 +171,14 @@ func (s *DataTemplatesSuite) TestPredefinedSeedingAndListing() {
 		s.Require().Equal(first[i].ID, second[i].ID, "seeding must be idempotent")
 	}
 
-	// Ported verbatim: VAT field ids + currency validation, CIT rate is not a currency.
+	// Field ids are the canonical tax-data keys; VAT currency validation, CIT rate is not a currency.
 	vat := first[1]
 	s.Require().Equal("VAT", vat.TemplateType)
 	s.Require().Equal("Standard VAT/GST return figures", *vat.Description)
 	s.Require().Len(vat.Fields, 4)
-	s.Require().Equal("f-vat-sales", vat.Fields[0].ID)
+	s.Require().Equal("salesTotal", vat.Fields[0].ID)
+	s.Require().Equal([]string{"salesTotal", "outputVat", "inputVat", "netVat"},
+		[]string{vat.Fields[0].ID, vat.Fields[1].ID, vat.Fields[2].ID, vat.Fields[3].ID})
 	s.Require().Equal("Total Sales (net)", vat.Fields[0].Name)
 	s.Require().True(vat.Fields[0].Mandatory)
 	s.Require().NotNil(vat.Fields[0].NumericValidation)
@@ -186,8 +188,10 @@ func (s *DataTemplatesSuite) TestPredefinedSeedingAndListing() {
 	s.Require().Nil(vat.Fields[0].NumericValidation.Min)
 	s.Require().False(vat.Fields[3].Mandatory)
 	cit := first[0]
-	s.Require().Equal("f-cit-rate", cit.Fields[3].ID)
+	s.Require().Equal("taxRate", cit.Fields[3].ID)
+	s.Require().Equal("taxLiability", cit.Fields[4].ID)
 	s.Require().False(cit.Fields[3].NumericValidation.FormatAsCurrency)
+	s.Require().Equal("whtAmount", first[2].Fields[2].ID)
 
 	// List + filters (name-sorted, unpaginated).
 	all := s.list(tenant, "")

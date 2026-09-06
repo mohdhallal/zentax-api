@@ -75,7 +75,7 @@ func TestGenerator_Uses445Calendar(t *testing.T) {
 	require.Len(t, rows, 2)
 	assert.Equal(t, dateonly.New(2024, 3, 2), rows[0].PeriodEndDate)
 	assert.Equal(t, dateonly.New(2024, 3, 17), rows[0].FilingDeadline)
-	assert.Equal(t, dateonly.New(2024, 3, 17), rows[0].PaymentDeadline, "no obligation → payment = filing")
+	assert.Equal(t, dateonly.New(2024, 3, 17), *rows[0].PaymentDeadline, "no obligation → payment = filing")
 	assert.Equal(t, dateonly.New(2025, 2, 1), rows[1].PeriodEndDate)
 }
 
@@ -123,10 +123,10 @@ func TestGenerator_PaymentOffsetRule(t *testing.T) {
 	require.Len(t, rows, 2)
 	assert.Equal(t, dateonly.New(2025, 3, 31), rows[0].PeriodEndDate)
 	assert.Equal(t, dateonly.New(2025, 4, 15), rows[0].FilingDeadline)
-	assert.Equal(t, dateonly.New(2025, 5, 12), rows[0].PaymentDeadline)
+	assert.Equal(t, dateonly.New(2025, 5, 12), *rows[0].PaymentDeadline)
 	assert.Equal(t, dateonly.New(2025, 4, 10), rows[0].DueDate)
 	assert.Equal(t, "Pay", rows[1].Name)
-	assert.Equal(t, dateonly.New(2025, 5, 12), rows[1].PaymentDeadline)
+	assert.Equal(t, dateonly.New(2025, 5, 12), *rows[1].PaymentDeadline)
 	assert.Equal(t, dateonly.New(2025, 5, 9), rows[1].DueDate)
 }
 
@@ -142,7 +142,7 @@ func TestGenerator_PaymentOffsetBorrowsWorkflowAdjustment(t *testing.T) {
 		DeadlineRule: entityobligationsdomain.DeadlineRule{PaymentOffset: &entityobligationsdomain.MonthDayOffset{Months: 1, Days: 10}},
 	}
 	rows := previewWith(t, wf, entity, []workflowtasksdomain.WorkflowTask{filingTask()}, obligation)
-	assert.Equal(t, dateonly.New(2025, 5, 9), rows[0].PaymentDeadline, "Sat 10 May → Fri 9 May")
+	assert.Equal(t, dateonly.New(2025, 5, 9), *rows[0].PaymentDeadline, "Sat 10 May → Fri 9 May")
 }
 
 // paymentFixedDates: the first fixed MM-DD on/after the period end, no
@@ -164,9 +164,9 @@ func TestGenerator_PaymentFixedDatesRule(t *testing.T) {
 	rows := previewWith(t, wf, entity, []workflowtasksdomain.WorkflowTask{filingTask()}, obligation)
 	require.Len(t, rows, 2)
 	assert.Equal(t, dateonly.New(2025, 3, 31), rows[0].PeriodEndDate)
-	assert.Equal(t, dateonly.New(2025, 5, 31), rows[0].PaymentDeadline, "31 May 2025 is a Saturday and stays")
+	assert.Equal(t, dateonly.New(2025, 5, 31), *rows[0].PaymentDeadline, "31 May 2025 is a Saturday and stays")
 	assert.Equal(t, dateonly.New(2025, 12, 31), rows[1].PeriodEndDate)
-	assert.Equal(t, dateonly.New(2026, 5, 31), rows[1].PaymentDeadline, "wraps into the next year")
+	assert.Equal(t, dateonly.New(2026, 5, 31), *rows[1].PaymentDeadline, "wraps into the next year")
 }
 
 // An obligation with neither payment offset nor fixed dates → payment = filing.
@@ -180,12 +180,12 @@ func TestGenerator_PaymentSameAsFiling(t *testing.T) {
 	}
 	rows := previewWith(t, wf, entity, []workflowtasksdomain.WorkflowTask{filingTask()}, obligation)
 	for _, r := range rows {
-		assert.Equal(t, r.FilingDeadline, r.PaymentDeadline)
+		assert.Equal(t, r.FilingDeadline, *r.PaymentDeadline)
 	}
 	// And with no obligation at all (resolver returns nil).
 	rows = previewWith(t, wf, entity, []workflowtasksdomain.WorkflowTask{filingTask()}, nil)
 	for _, r := range rows {
-		assert.Equal(t, r.FilingDeadline, r.PaymentDeadline)
+		assert.Equal(t, r.FilingDeadline, *r.PaymentDeadline)
 	}
 }
 
@@ -230,11 +230,11 @@ func TestGenerator_PaymentDeadlineOverrides(t *testing.T) {
 	require.Len(t, created, 2)
 
 	// M1: derived would be 28 Feb; override 20 Mar → due 18 Mar.
-	assert.Equal(t, m1Payment, created[0].PaymentDeadline)
+	assert.Equal(t, m1Payment, *created[0].PaymentDeadline)
 	assert.Equal(t, dateonly.New(2025, 3, 18), created[0].DueDate)
 	// M2: period end moved to 20 Feb → payment 20 Mar → due 18 Mar.
 	assert.Equal(t, m2PeriodEnd, created[1].PeriodEndDate)
-	assert.Equal(t, dateonly.New(2025, 3, 20), created[1].PaymentDeadline)
+	assert.Equal(t, dateonly.New(2025, 3, 20), *created[1].PaymentDeadline)
 	assert.Equal(t, dateonly.New(2025, 3, 18), created[1].DueDate)
 }
 

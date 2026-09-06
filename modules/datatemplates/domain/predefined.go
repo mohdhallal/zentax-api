@@ -1,47 +1,51 @@
 package domain
 
+import "github.com/mohamadhallal/zentax-api/shared/taxkeys"
+
 // PredefinedTemplates returns the curated templates every tenant receives
-// (seeded idempotently by name + category, immutable through the API). Ported
-// verbatim from the frontend fixtures (client/src/mocks/fixtures/
-// workflow-detail.ts: dt-vat, dt-cit, dt-wht) — same names, types, field ids,
-// labels and validation, so a tenant's tax data keys are stable across
-// environments.
+// (seeded idempotently by name + category, immutable through the API). Names,
+// labels, mandatory flags and numeric validation are the frontend fixtures'
+// (client/src/mocks/fixtures/workflow-detail.ts: dt-vat, dt-cit, dt-wht); the
+// field ids are the CANONICAL tax-data keys (shared/taxkeys) — the keys the
+// tax-financial report, the raw export and the compliance report read — so an
+// instance bound to a predefined template feeds the reports by construction.
+// (Migration 20260906000021 renamed the fixture-era ids on existing tenants.)
 func PredefinedTemplates() []CreateDataTemplateInput {
 	return []CreateDataTemplateInput{
 		{
 			Name:         "VAT Return",
-			TemplateType: "VAT",
+			TemplateType: taxkeys.TaxTypeVAT,
 			Category:     CategoryPredefined,
 			Description:  strPtr("Standard VAT/GST return figures"),
 			Fields: Fields{
-				currencyField("f-vat-sales", "Total Sales (net)", true),
-				currencyField("f-vat-output", "Output VAT", true),
-				currencyField("f-vat-input", "Input VAT", true),
-				currencyField("f-vat-net", "Net VAT Payable", false),
+				currencyField(taxkeys.SalesTotal, "Total Sales (net)", true),
+				currencyField(taxkeys.OutputVat, "Output VAT", true),
+				currencyField(taxkeys.InputVat, "Input VAT", true),
+				currencyField(taxkeys.NetVat, "Net VAT Payable", false),
 			},
 		},
 		{
 			Name:         "Corporate Income Tax",
-			TemplateType: "CIT",
+			TemplateType: taxkeys.TaxTypeCIT,
 			Category:     CategoryPredefined,
 			Description:  strPtr("Corporate income tax computation"),
 			Fields: Fields{
-				currencyField("f-cit-pbt", "Profit Before Tax", true),
-				currencyField("f-cit-adj", "Tax Adjustments", false),
-				currencyField("f-cit-taxable", "Taxable Profit", true),
-				percentField("f-cit-rate", "Tax Rate (%)", true),
-				currencyField("f-cit-due", "Tax Due", false),
+				currencyField(taxkeys.ProfitBeforeTax, "Profit Before Tax", true),
+				currencyField(taxkeys.Adjustments, "Tax Adjustments", false),
+				currencyField(taxkeys.TaxableIncome, "Taxable Profit", true),
+				percentField(taxkeys.TaxRate, "Tax Rate (%)", true),
+				currencyField(taxkeys.TaxLiability, "Tax Due", false),
 			},
 		},
 		{
 			Name:         "Withholding Tax",
-			TemplateType: "WHT",
+			TemplateType: taxkeys.TaxTypeWHT,
 			Category:     CategoryPredefined,
 			Description:  strPtr("Withholding tax on outbound payments"),
 			Fields: Fields{
-				currencyField("f-wht-base", "Payment Base", true),
-				percentField("f-wht-rate", "Withholding Rate (%)", true),
-				currencyField("f-wht-amount", "Withheld Amount", true),
+				currencyField(taxkeys.WhtBase, "Payment Base", true),
+				percentField(taxkeys.WhtRate, "Withholding Rate (%)", true),
+				currencyField(taxkeys.WhtAmount, "Withheld Amount", true),
 			},
 		},
 	}

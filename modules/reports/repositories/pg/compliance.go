@@ -4,12 +4,13 @@ import (
 	"context"
 
 	"github.com/mohamadhallal/zentax-api/modules/reports/domain"
+	"github.com/mohamadhallal/zentax-api/shared/taxkeys"
 )
 
 // complianceFrom is the FROM/WHERE shared by the heatmap and the
-// compliance-status report: instances of participating workflows, filtered by
-// the shared trio ($1..$3). Entity / obligation type are LEFT (a project
-// workflow may have neither).
+// compliance-status report: instances of participating (active / completed,
+// recurring) workflows, filtered by the shared trio ($1..$3). Entity /
+// obligation type are LEFT (a recurring workflow may lack an obligation type).
 const complianceFrom = `
 FROM task_instances ti
 JOIN workflows w ON w.id = ti.workflow_id
@@ -50,9 +51,10 @@ func (r *ReportsRepo) ComplianceHeatmap(ctx context.Context, args domain.Heatmap
 // complianceClassified is the CTE both compliance-status statements share:
 // every participating instance with its classification against the filing
 // deadline and its penalty/interest text. penalty_interest follows the legacy
-// precedence: tax_data penalty/interest figures (fixed keys) override a
-// payment task's notes; otherwise an empty string. $4 is the status filter (NULL = any),
-// applied on the computed classification.
+// precedence: tax_data penalty/interest figures (the shared/taxkeys chains)
+// override a payment task's notes; otherwise an empty string. $4 is the
+// status filter (NULL = any), applied on the computed classification by the
+// statements below.
 var complianceClassified = `
 WITH classified AS (
     SELECT ti.id AS task_instance_id,
@@ -67,11 +69,10 @@ WITH classified AS (
            COALESCE(ot.code, '') AS obligation_code,
            (` + complianceClass("ti.filing_deadline") + `) AS compliance_status,
            CASE
-               WHEN COALESCE(` + jsonTruthy("penaltyAmount") + `, ` + jsonTruthy("penalty") + `,
-                             ` + jsonTruthy("interestAmount") + `, ` + jsonTruthy("interest") + `) IS NOT NULL THEN
+               WHEN COALESCE(` + firstTruthy(taxkeys.PenaltyAliases) + `, ` + firstTruthy(taxkeys.InterestAliases) + `) IS NOT NULL THEN
                    concat_ws(', ',
-                       'Penalty: ' || COALESCE(` + jsonTruthy("penaltyAmount") + `, ` + jsonTruthy("penalty") + `),
-                       'Interest: ' || COALESCE(` + jsonTruthy("interestAmount") + `, ` + jsonTruthy("interest") + `))
+                       'Penalty: ' || ` + firstTruthy(taxkeys.PenaltyAliases) + `,
+                       'Interest: ' || ` + firstTruthy(taxkeys.InterestAliases) + `)
                WHEN ti.task_type = 'payment' AND ti.notes IS NOT NULL THEN ti.notes
                ELSE ''
            END AS penalty_interest` +
@@ -88,29 +89,38 @@ WHERE ($4::text IS NULL OR compliance_status = $4::text)
 ORDER BY entity_name, obligation_name, period, task_instance_id
 LIMIT $5 OFFSET $6`
 
-// The summary counts the SAME filtered set (legacy computes it after the
-// status filter), so total doubles as the page's exact totalCount.
+// The summary counts the WHOLE classified set (year / entity / obligation
+// filters applied, the status filter not) — the cards describe the population
+// the page was cut from — while filtered_total is the exact size of the
+// status-filtered set the rows page through (totalCount).
 var complianceSummarySQL = complianceClassified + `
 SELECT COUNT(*)::int AS total,
        COUNT(*) FILTER (WHERE compliance_status = 'on_time')::int AS on_time,
        COUNT(*) FILTER (WHERE compliance_status = 'late')::int AS late,
        COUNT(*) FILTER (WHERE compliance_status = 'missed')::int AS missed,
-       COUNT(*) FILTER (WHERE compliance_status = 'not_due')::int AS not_due
-FROM classified
-WHERE ($4::text IS NULL OR compliance_status = $4::text)`
+       COUNT(*) FILTER (WHERE compliance_status = 'not_due')::int AS not_due,
+       COUNT(*) FILTER (WHERE $4::text IS NULL OR compliance_status = $4::text)::int AS filtered_total
+FROM classified`
+
+type complianceSummaryRow struct {
+	domain.ComplianceSummary
+	FilteredTotal int `db:"filtered_total"`
+}
 
 func (r *ReportsRepo) ComplianceStatus(
 	ctx context.Context, args domain.ComplianceStatusArgs,
-) ([]domain.ComplianceRow, domain.ComplianceSummary, error) {
-	rows := []domain.ComplianceRow{}
-	var summary domain.ComplianceSummary
+) (*domain.ComplianceStatusResult, error) {
+	res := &domain.ComplianceStatusResult{Rows: []domain.ComplianceRow{}}
 	params := append(filterArgs(args.ReportFilters), args.Status)
-	if err := r.db.SelectContext(ctx, &rows, complianceRowsSQL,
+	if err := r.db.SelectContext(ctx, &res.Rows, complianceRowsSQL,
 		append(params, args.Limit, args.Offset)...); err != nil {
-		return nil, summary, err
+		return nil, err
 	}
+	var summary complianceSummaryRow
 	if err := r.db.GetContext(ctx, &summary, complianceSummarySQL, params...); err != nil {
-		return nil, summary, err
+		return nil, err
 	}
-	return rows, summary, nil
+	res.Summary = summary.ComplianceSummary
+	res.TotalCount = summary.FilteredTotal
+	return res, nil
 }

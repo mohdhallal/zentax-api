@@ -210,14 +210,24 @@ type ComplianceRow struct {
 	TaskInstanceID   string        `db:"task_instance_id"`
 }
 
-// ComplianceSummary counts the classified set AFTER the status filter (legacy
-// behaviour), so Total doubles as the page's totalCount.
+// ComplianceSummary counts the classified set BEFORE the status filter (the
+// year / entity / obligation filters still apply): the cards describe the
+// population the rows page was cut from, so Total = OnTime + Late + Missed +
+// NotDue whatever status the page is narrowed to.
 type ComplianceSummary struct {
 	Total  int `db:"total"`
 	OnTime int `db:"on_time"`
 	Late   int `db:"late"`
 	Missed int `db:"missed"`
 	NotDue int `db:"not_due"`
+}
+
+// ComplianceStatusResult: Rows is a capped page of the status-filtered set and
+// TotalCount its exact size; Summary is exact over the unfiltered-by-status set.
+type ComplianceStatusResult struct {
+	Rows       []ComplianceRow
+	Summary    ComplianceSummary
+	TotalCount int
 }
 
 // Tax-financial grouping keys.
@@ -385,9 +395,9 @@ type Reader interface {
 	// ComplianceHeatmap returns one aggregate cell per (entity, column), sorted
 	// by (row label, column id) — one GROUP BY statement.
 	ComplianceHeatmap(ctx context.Context, args HeatmapArgs) ([]HeatmapCell, error)
-	// ComplianceStatus returns one page of classified instances plus the exact
-	// summary of the (status-filtered) set.
-	ComplianceStatus(ctx context.Context, args ComplianceStatusArgs) ([]ComplianceRow, ComplianceSummary, error)
+	// ComplianceStatus returns one page of classified instances (status-filtered,
+	// with its exact total) plus the summary of the whole classified set.
+	ComplianceStatus(ctx context.Context, args ComplianceStatusArgs) (*ComplianceStatusResult, error)
 	// TaxFinancial returns a page of figure rows plus exact aggregates.
 	TaxFinancial(ctx context.Context, args TaxFinancialArgs) (*TaxFinancialResult, error)
 	// Export* return one page of the dataset plus its exact total.

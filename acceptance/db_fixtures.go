@@ -11,6 +11,16 @@ import (
 	"github.com/mohamadhallal/zentax-api/platform/crypto"
 )
 
+// nonAppTables are tables in the app schema that TruncateTables must leave
+// alone: they are infrastructure, not test data. `_migrations` is
+// deployment/docker/migrate.sh's ledger of applied migration files — emptying
+// it makes the scratch database un-re-migratable (the next migrate.sh run
+// replays 20260821000000_tenants.sql from scratch and aborts), so a DB that had
+// ever run the suite could only be dropped and recreated.
+var nonAppTables = map[string]bool{
+	"_migrations": true,
+}
+
 func (s *Suite) TruncateTables() {
 	var tables []string
 	err := s.DB.Select(&tables, `
@@ -19,13 +29,16 @@ func (s *Suite) TruncateTables() {
 		WHERE schemaname = current_schema()
 		ORDER BY tablename`)
 	s.Require().NoError(err)
-	if len(tables) == 0 {
-		return
-	}
 
 	quoted := make([]string, 0, len(tables))
 	for _, table := range tables {
+		if nonAppTables[table] {
+			continue
+		}
 		quoted = append(quoted, `"`+strings.ReplaceAll(table, `"`, `""`)+`"`)
+	}
+	if len(quoted) == 0 {
+		return
 	}
 
 	// No RESTART IDENTITY: our tables use UUID keys (no identity sequences to

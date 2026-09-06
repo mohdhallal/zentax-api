@@ -55,7 +55,7 @@ type CreateTaskInstanceInput struct {
 	DueDate          dateonly.Date
 	PeriodEndDate    dateonly.Date
 	FilingDeadline   dateonly.Date
-	PaymentDeadline  dateonly.Date // always set by the generator (ADR-0023 §5)
+	PaymentDeadline  *dateonly.Date // set by the generator for recurring instances (ADR-0023 §5); nil (NULL) on project instances
 	ApprovalRequired bool
 	OrderIndex       int
 	DataTemplateID   *string

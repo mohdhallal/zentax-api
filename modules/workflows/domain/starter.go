@@ -43,19 +43,26 @@ func OverrideKey(templateID, periodCode string) string {
 	return templateID + "_" + periodCode
 }
 
+// ProjectPeriodCode is the single period a project workflow's instances carry:
+// a project has no fiscal periods, so start materializes ONE instance per
+// template under this code, with the workflow's endDate as period end and
+// filing deadline (and no payment deadline). The legacy Express engine used
+// the same code, so exports and the UI already know it.
+const ProjectPeriodCode = "PROJECT"
+
 // PreviewTask is one planned task instance (dates are legal date-only values,
-// ADR-0002).
+// ADR-0002). PaymentDeadline is null for project instances.
 type PreviewTask struct {
-	TemplateID      string        `json:"templateId"`
-	PeriodCode      string        `json:"periodCode"`
-	Name            string        `json:"name"`
-	TaskType        string        `json:"taskType"`
-	AssigneeName    *string       `json:"assigneeName"`
-	DueDate         dateonly.Date `json:"dueDate"`
-	PeriodEndDate   dateonly.Date `json:"periodEndDate"`
-	FilingDeadline  dateonly.Date `json:"filingDeadline"`
-	PaymentDeadline dateonly.Date `json:"paymentDeadline"`
-	OrderIndex      int           `json:"orderIndex"`
+	TemplateID      string         `json:"templateId"`
+	PeriodCode      string         `json:"periodCode"`
+	Name            string         `json:"name"`
+	TaskType        string         `json:"taskType"`
+	AssigneeName    *string        `json:"assigneeName"`
+	DueDate         dateonly.Date  `json:"dueDate"`
+	PeriodEndDate   dateonly.Date  `json:"periodEndDate"`
+	FilingDeadline  dateonly.Date  `json:"filingDeadline"`
+	PaymentDeadline *dateonly.Date `json:"paymentDeadline"`
+	OrderIndex      int            `json:"orderIndex"`
 }
 
 // WorkflowPreview summarizes what starting the workflow would create. Tasks are

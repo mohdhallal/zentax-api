@@ -348,6 +348,28 @@ green on both the main module and `acceptance/`.
    and makes a gap or an out-of-order table a 400 naming the period; `selectedPeriods` accept the
    16-character custom codes the entity may define (was 10); a cleared override date (`""`) means
    "no override" instead of a 400; `/reports/task-instances` rows carry `paymentDeadline` too.
+   **Project workflows generate instances (2026-09-06):** `GET /workflows/{id}/preview` and `POST
+   /workflows/{id}/start` accept `workflowCategory=project` (the generator used to refuse it).
+   A project has no fiscal periods: the planner materializes **one instance per template** (orderIndex
+   order) under the single period code **`PROJECT`** (`workflowsdomain.ProjectPeriodCode`, the
+   legacy engine's convention), with `periodEndDate = filingDeadline = endDate`, **`paymentDeadline`
+   NULL** (`null` in every view — `PreviewTask.paymentDeadline` is now nullable too), and `dueDate` =
+   end date ± the template offset, every `dueDateReference` (period end, filing, payment) resolving to
+   the end date. `endDate` is required — absent / blank → 400 `project workflows need an end date`,
+   not a date → 400 — shared by preview and start; `entityId` stays optional and the entity calendar,
+   the entity obligation and the workflow `dueDateRule` play no part. Overrides address
+   `<templateId>_PROJECT` (`dueDate`, `periodEndDate`; a `paymentDeadline` override → 400 "project
+   workflows have no payment deadline"); the draft → active flip, the 409 idempotency guard and the
+   `workflow.started` audit entry (`periods: 1`) are the recurring ones. A workflow of any other
+   category is a 400. Project instances take part in `/task-instances`, `/reports/task-instances`,
+   `/reports/workflow-stats` and every `export-raw` dataset, but **not** in the three compliance /
+   financial reports (see #7). `GET /task-instances?status=` now also accepts `pending_approval`
+   (the reports list already did). Acceptance (`taskinstances`, +3): preview + start of a 3-template
+   project (dates per reference, `PROJECT` filter, audit details, 409, preview after start), the
+   end-date 400 on both routes with nothing created and start after `PUT` sets the date, overrides
+   (dueDate applied; paymentDeadline / period-shaped key 400 before anything is created). Unit tests
+   cover the project planner (one per template, references, nil payment deadline, no entity lookup,
+   preview, end-date guards, idempotency, overrides, unknown category).
 
 **Read models (2026-09-03, hand-written SQL over RLS-scoped tables, no writes, no migrations):**
 7. **reports** (`modules/reports`) — `GET /reports/task-instances` (`task:read`, paginated, default
@@ -371,16 +393,18 @@ green on both the main module and `acceptance/`.
    (`status=on_time|late|missed|not_due`, `limit` / `offset`): one instance per row classified in
    SQL against `filing_deadline`, **the tenant's "today"** and `completed_at`'s UTC date — the same expression
    the heatmap uses for overdue / completed-late (one Go const) — with `penaltyInterest` from a
-   fixed set of `tax_data` keys, plus an exact `summary` + `totalCount` over the status-filtered
-   set. `GET /reports/tax-financial` (`groupBy=entity|country|taxType|period|obligation`, `limit` /
+   fixed set of `tax_data` keys (`shared/taxkeys`), plus an exact `totalCount` over the
+   status-filtered set and a `summary` over the whole classified set (the 2026-09-06 note below).
+   `GET /reports/tax-financial` (`groupBy=entity|country|taxType|period|obligation`, `limit` /
    `offset`): figures extracted from a fixed `tax_data` key set with a safe numeric cast
    (non-numbers count as 0) in one CTE; `aggregated` / `chartData` / `summary` come from ONE
    `GROUPING SETS` statement over it, `rows` is a page with an exact `totalCount`. `GET
    /reports/export-raw` (`dataset=workflows|tasks|tax-data`, `category`, inclusive date-only
    `dateFrom` / `dateTo` on `workflows.created_at` resp. `due_date`, `limit` / `offset`): exactly
    the column keys of the export page. Row lists are capped (default 1 000, max 5 000) with exact
-   totals from an aggregate over the same `WHERE`; only `active` / `completed` workflows take part
-   in the three compliance reports, every workflow in the export. Migration
+   totals from an aggregate over the same `WHERE`; only `active` / `completed` **recurring**
+   workflows take part in the three compliance reports, every workflow (and every instance, project
+   ones included) in the export. Migration
    `20260904000015_reporting_indexes` adds `task_instances (due_date)` (export window),
    `task_instances (workflow_id, period_code)` (replacing the prefix-redundant `(workflow_id)`
    index), `workflows (financial_year)`, `workflows (status)` (parent indexes propagate to every
@@ -393,6 +417,31 @@ green on both the main module and `acceptance/`.
    late / on-time / missed classification, both heatmap view modes, status filter + paging totals,
    VAT/CIT figure extraction and group-bys, the three export datasets with window / category
    filters, viewer 200, anonymous 401, empty reports for the other tenant.
+   **Report semantics (2026-09-06):** (1) **`compliance-status` summary is global** — `summary
+   {total, onTime, late, missed, notDue}` is computed over the classified set BEFORE the `status`
+   filter (the `year` / `entityId` / `obligationTypeId` filters still narrow it), while `rows` and
+   `totalCount` describe the status-filtered page — so `?status=late` returns the late rows with
+   `totalCount = late` and cards that still sum to the whole population (`total = onTime + late +
+   missed + notDue`); the legacy "summary after the filter" is gone (`domain.ComplianceStatusResult`,
+   one `FILTER` aggregate for the filtered total). (2) **`tax-financial` periods follow the
+   calendar**: `chartData` and `groupBy=period` order their buckets by `MIN(period_end_date)` then
+   code (M1, M2, …, M9, M10, M12 — never text order), other groupings keep label order. (3) **Only
+   recurring workflows participate** in heatmap / compliance-status / tax-financial
+   (`w.workflow_category = 'recurring'` in the shared participating-workflows predicate): project
+   instances (period `PROJECT`, generated since 2026-09-06) have no obligation period to be compliant
+   against; they stay in `/reports/task-instances`, `/reports/workflow-stats` and `export-raw`.
+   (4) The figure keys the tax-financial CTE, the export and the penalty/interest text read are now
+   the **canonical tax-data keys + alias chains of `shared/taxkeys`** (`outputVat|outputTax|salesVat`,
+   `inputVat|…`, `netVat|vatPayable`, `taxableIncome|taxableProfit`, `taxLiability|taxPayable|
+   corporateTax`, `whtAmount|withholdingTax|taxWithheld`, `amount|totalAmount|taxAmount`,
+   `engagementCost|cost|filingCost`, `penaltyAmount|penalty`, `interestAmount|interest`; export pairs
+   camelCase|snake_case) — same SQL, one source of truth shared with the predefined data templates
+   (#9), so a template-bound instance finally feeds the report. Acceptance: the compliance fixture
+   re-pinned (summary 13/1/1/11/0 under every status filter, chart + period groups M1, M2, M12),
+   `TestTaxFinancialPeriodsFollowTheCalendar` (M12, M9, M1, M11, M10 listed out of order → M1, M9,
+   M10, M11, M12 for the chart under every groupBy), `TestProjectWorkflowsStayOutOfTheComplianceReports`
+   (project + recurring side by side: task list 3 / stats / export 1-3-2-1 datasets vs heatmap,
+   status and financial = recurring only, project tax data never counted).
 8. **auditlog** (`modules/auditlog`) — `GET /audit-log`, the read API for the ADR-0008 trail behind a
    **new capability `audit:read`** held by **reviewer, manager and tenant_admin only** (viewer and
    preparer → 403; a service principal may hold it like any read). Rows are the stored PII-free
@@ -423,8 +472,9 @@ green on both the main module and `acceptance/`.
    `PUT /{id}` (replaces name / templateType / description / fields), `DELETE /{id}` (204; referenced
    by any workflow task or task instance → 409 "template is in use"), and `POST
    /data-templates/predefined` — idempotently inserts the missing **predefined** templates (VAT Return
-   / Corporate Income Tax / Withholding Tax, ported verbatim from the frontend fixtures with the
-   same field ids, matched by name + category) and returns the predefined list; `cmd/seed-admin` runs
+   / Corporate Income Tax / Withholding Tax — the frontend fixtures' names, labels, flags and
+   validation, with the **canonical tax-data keys** as field ids since 2026-09-06, see below; matched
+   by name + category) and returns the predefined list; `cmd/seed-admin` runs
    the same use case after creating the tenant. Predefined rows are **immutable** (PUT / DELETE →
    403). Cross-field rules live in `domain.ValidateFields` (one rule set for API + seeding). Audit:
    `data_template.created {templateType, fields}` / `.updated` / `.deleted` /
@@ -446,6 +496,30 @@ green on both the main module and `acceptance/`.
    typed input (`""` for a date / number / boolean / file) clears the field like `null`; (3)
    predefined seeding skips a name already taken by a **custom** template (names are unique per
    tenant across categories) instead of failing the whole seed.
+   **Canonical tax-data keys (2026-09-06, product bug fix):** the predefined templates stored their
+   figures under fixture-era ids (`f-vat-output`, `f-cit-due`, `f-wht-amount`, …) that no report
+   read, and `ValidateTaxData` refuses keys outside the attached template — so a template-bound
+   instance could never feed the tax-financial report (it showed as a zero row). The field ids are
+   now the canonical keys of the new **`shared/taxkeys`** package, the single source the reports SQL
+   reads too: VAT `salesTotal`, `outputVat`, `inputVat`, `netVat`; CIT `profitBeforeTax`,
+   `adjustments`, `taxableIncome`, `taxRate`, `taxLiability`; WHT `whtBase`, `whtRate`, `whtAmount`
+   (names, labels, mandatory flags and numeric validation unchanged). `SeedPredefined` is keyed by
+   **name**, so a re-seed would have left old rows untouched — migration
+   **`20260906000021_canonical_tax_keys`** renames the ids on every tenant's predefined rows and the
+   same keys inside the `tax_data` of instances bound to them (directly or through their workflow
+   task); custom templates and free-form tax data are untouched. It is a data migration over
+   FORCE-RLS tables, so it lifts FORCE on `data_templates` / `workflow_tasks` / `task_instances` for
+   its own transaction (the RDS master user is an owner, not a superuser — under FORCE the tenant
+   policy would silently match nothing) and restores it before COMMIT; verified against a throwaway
+   DB seeded with old-shaped rows as a non-superuser owner role (templates renamed across tenants,
+   bound instances renamed via either path, an unbound instance and a custom template with the same
+   id left alone, FORCE back on). Unit test: every figure key the tax-financial report derives for
+   VAT / CIT / WHT (`taxkeys.FigureKeys`) is a numeric field of that type's predefined template.
+   Acceptance (`datatemplates`, +1): `TestPredefinedTemplatesFeedTheFinancialReport` — VAT / CIT /
+   WHT tasks bound to the predefined templates, a fixture-era key refused (400), canonical figures
+   recorded → tax-financial 1000/400/600 · 450 · 300 (total 1350) and the tax-data export read them.
+   The UI's generated `client/src/api/types.gen.ts` still carries the old `f-vat-sales` example
+   (regenerate with `npm run gen:api`); no UI code references the old ids.
 
 10. **documents** (`modules/documents`, 2026-09-04, ADR-0022) — files attached to a workflow and
    optionally one of its task instances, behind the **`platform/storage` seam** (below). Model
@@ -510,8 +584,8 @@ green on both the main module and `acceptance/`.
 Migrations (sqitch): `tenants`, `entities`, `obligation_types`, `entity_obligations`,
 `workflows`, `workflow_tasks`, `task_instances`, `task_instance_approvals`, `actor_columns`,
 `audit_log`, `service_accounts`, `entity_obligation_details`, `reporting_indexes`, `invite_tokens`,
-`documents`, `data_templates`, `fiscal_calendar`, `tenant_timezone` (+ boilerplate `appschema`,
-`internal_api_keys`, `nexus_accounts_api_keys`).
+`documents`, `data_templates`, `fiscal_calendar`, `tenant_timezone`, `canonical_tax_keys`
+(+ boilerplate `appschema`, `internal_api_keys`, `nexus_accounts_api_keys`).
 
 **Auth / identity (Increments A + B):** first-party email/password + server-side sessions + TOTP MFA
 (`modules/identity`, `platform/crypto`); `RequireSession` supplies the tenant from the session (the
@@ -704,7 +778,7 @@ Commits: `4cdcd4e` scaffold · `2851179` tenancy+entities · `d074780` obligatio
   the entity obligation's `paymentOffset` / `paymentFixedDates` / "same as filing".
   **Remaining:** `additionalDeadlines` (advance payments etc.) are recorded on the rule but not
   yet materialized; public holidays (jurisdiction-keyed, ADR-0017 data) on top of the weekend
-  adjustment; `/reports/task-instances` rows do not yet carry `paymentDeadline`.
+  adjustment.
 
 ### 🟡 Platform / infra (mostly Phase 2 per the ADRs)
 - ~~Object storage behind a `Storage` interface — S3 / filesystem·MinIO (ADR-0009). None wired.~~

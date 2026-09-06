@@ -13,8 +13,10 @@ import (
 
 // ComplianceStatusHandler serves GET /reports/compliance-status: one row per
 // task instance classified on_time / late / missed / not_due against its
-// filing deadline, as a capped page (default 1000, max 5000) with an exact
-// summary + totalCount over the same filtered set (ADR-0021 rule 2).
+// filing deadline, as a capped page (default 1000, max 5000) of the
+// status-filtered set with its exact totalCount (ADR-0021 rule 2), plus a
+// summary over the whole classified set (year / entity / obligation filters
+// applied, the status filter not).
 type ComplianceStatusHandler struct {
 	reader domain.Reader
 }
@@ -49,7 +51,7 @@ func (h *ComplianceStatusHandler) Execute(
 	if err != nil {
 		return nil, err
 	}
-	rows, summary, err := h.reader.ComplianceStatus(r.Context(), domain.ComplianceStatusArgs{
+	res, err := h.reader.ComplianceStatus(r.Context(), domain.ComplianceStatusArgs{
 		ReportFilters: filters,
 		Status:        status,
 		Limit:         query.Limit,
@@ -58,5 +60,5 @@ func (h *ComplianceStatusHandler) Execute(
 	if err != nil {
 		return nil, err
 	}
-	return httpkit.Ok(dto.ComplianceStatusToJSON(rows, summary)), nil
+	return httpkit.Ok(dto.ComplianceStatusToJSON(res)), nil
 }

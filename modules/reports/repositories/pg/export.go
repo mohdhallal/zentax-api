@@ -5,6 +5,7 @@ import (
 
 	"github.com/mohamadhallal/zentax-api/modules/reports/domain"
 	"github.com/mohamadhallal/zentax-api/shared/dateonly"
+	"github.com/mohamadhallal/zentax-api/shared/taxkeys"
 )
 
 // Raw export: every workflow (any status) filtered by entity / obligation type
@@ -61,18 +62,20 @@ const exportTasksCount = `SELECT COUNT(*)::int` + exportInstancesFrom
 
 const exportTaxDataWhere = ` AND ti.tax_data IS NOT NULL`
 
+// Figures are the canonical key then its legacy snake_case twin
+// (shared/taxkeys Export* pairs): no tax-type gating, no derivation.
 var exportTaxDataSQL = `
 SELECT ti.name, w.name AS workflow_name, e.name AS entity_name, e.country, ot.name AS obligation_name,
        ot.template AS tax_type, ti.period_code, w.financial_year, ti.tax_data_status,
-       (` + firstNonZero("outputVat", "output_vat") + `)::float8 AS output_vat,
-       (` + firstNonZero("inputVat", "input_vat") + `)::float8 AS input_vat,
-       (` + firstNonZero("netVat", "net_vat") + `)::float8 AS net_vat,
-       (` + firstNonZero("taxableIncome", "taxable_income") + `)::float8 AS taxable_income,
-       (` + firstNonZero("taxLiability", "tax_liability") + `)::float8 AS tax_liability,
-       (` + firstNonZero("whtAmount", "wht_amount") + `)::float8 AS wht_amount,
-       (` + firstNonZero("penaltyAmount", "penalty") + `)::float8 AS penalty_amount,
-       (` + firstNonZero("interestAmount", "interest") + `)::float8 AS interest_amount,
-       (` + firstNonZero("engagementCost", "engagement_cost") + `)::float8 AS engagement_cost` +
+       (` + firstNonZero(taxkeys.ExportOutputVat) + `)::float8 AS output_vat,
+       (` + firstNonZero(taxkeys.ExportInputVat) + `)::float8 AS input_vat,
+       (` + firstNonZero(taxkeys.ExportNetVat) + `)::float8 AS net_vat,
+       (` + firstNonZero(taxkeys.ExportTaxableIncome) + `)::float8 AS taxable_income,
+       (` + firstNonZero(taxkeys.ExportTaxLiability) + `)::float8 AS tax_liability,
+       (` + firstNonZero(taxkeys.ExportWhtAmount) + `)::float8 AS wht_amount,
+       (` + firstNonZero(taxkeys.ExportPenaltyAmount) + `)::float8 AS penalty_amount,
+       (` + firstNonZero(taxkeys.ExportInterestAmount) + `)::float8 AS interest_amount,
+       (` + firstNonZero(taxkeys.ExportEngagementCost) + `)::float8 AS engagement_cost` +
 	exportInstancesFrom + exportTaxDataWhere + `
 ORDER BY ti.due_date, ti.order_index, ti.id
 LIMIT $6 OFFSET $7`

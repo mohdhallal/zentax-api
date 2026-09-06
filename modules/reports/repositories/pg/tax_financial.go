@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/mohamadhallal/zentax-api/modules/reports/domain"
+	"github.com/mohamadhallal/zentax-api/shared/taxkeys"
 )
 
 // figuresCTE is the ONE filtered set every part of the tax-financial report
@@ -11,9 +12,10 @@ import (
 // hasData rule — an instance is included when any figure is non-zero OR its
 // tax_data has at least one key; the first implies the second, so the
 // predicate is simply "tax_data is a non-empty object"). Figures come from a
-// FIXED key set per tax type with the legacy alias chains, cast safely
-// (ADR-0021 rule 6). $4 is the groupBy, resolved here into group_key /
-// group_label so the aggregate statement can GROUP BY them.
+// FIXED key set per tax type — the canonical keys + legacy alias chains of
+// shared/taxkeys — cast safely (ADR-0021 rule 6). $4 is the groupBy, resolved
+// here into group_key / group_label so the aggregate statement can GROUP BY
+// them. period_end_date rides along so periods can be ordered by the calendar.
 var figuresCTE = `
 WITH raw AS (
     SELECT ti.id,
@@ -25,15 +27,16 @@ WITH raw AS (
            COALESCE(ot.code, '') AS obligation_code,
            COALESCE(ot.id::text, '') AS obligation_type_id,
            ti.period_code AS period,
+           ti.period_end_date,
            COALESCE(w.financial_year, '') AS financial_year,
-           CASE WHEN ot.template = 'VAT' THEN ` + firstNonZero("outputVat", "outputTax", "salesVat") + ` ELSE 0 END AS output_vat,
-           CASE WHEN ot.template = 'VAT' THEN ` + firstNonZero("inputVat", "inputTax", "purchaseVat") + ` ELSE 0 END AS input_vat,
-           CASE WHEN ot.template = 'VAT' THEN COALESCE(NULLIF(` + jsonNum("netVat") + `, 0), NULLIF(` + jsonNum("vatPayable") + `, 0)) END AS net_vat_given,
-           CASE WHEN ot.template = 'CIT' THEN ` + firstNonZero("taxableIncome", "taxableProfit") + ` ELSE 0 END AS taxable_income,
-           CASE WHEN ot.template = 'CIT' THEN ` + firstNonZero("taxLiability", "taxPayable", "corporateTax") + ` ELSE 0 END AS tax_liability,
-           CASE WHEN ot.template = 'WHT' THEN ` + firstNonZero("whtAmount", "withholdingTax", "taxWithheld") + ` ELSE 0 END AS wht_amount,
-           CASE WHEN COALESCE(ot.template, '') NOT IN ('VAT', 'CIT', 'WHT') THEN ` + firstNonZero("amount", "totalAmount", "taxAmount") + ` ELSE 0 END AS other_amount,
-           ` + firstNonZero("engagementCost", "cost", "filingCost") + ` AS engagement_cost
+           CASE WHEN ot.template = '` + taxkeys.TaxTypeVAT + `' THEN ` + firstNonZero(taxkeys.OutputVatAliases) + ` ELSE 0 END AS output_vat,
+           CASE WHEN ot.template = '` + taxkeys.TaxTypeVAT + `' THEN ` + firstNonZero(taxkeys.InputVatAliases) + ` ELSE 0 END AS input_vat,
+           CASE WHEN ot.template = '` + taxkeys.TaxTypeVAT + `' THEN NULLIF(` + firstNonZero(taxkeys.NetVatAliases) + `, 0) END AS net_vat_given,
+           CASE WHEN ot.template = '` + taxkeys.TaxTypeCIT + `' THEN ` + firstNonZero(taxkeys.TaxableIncomeAliases) + ` ELSE 0 END AS taxable_income,
+           CASE WHEN ot.template = '` + taxkeys.TaxTypeCIT + `' THEN ` + firstNonZero(taxkeys.TaxLiabilityAliases) + ` ELSE 0 END AS tax_liability,
+           CASE WHEN ot.template = '` + taxkeys.TaxTypeWHT + `' THEN ` + firstNonZero(taxkeys.WhtAmountAliases) + ` ELSE 0 END AS wht_amount,
+           CASE WHEN COALESCE(ot.template, '') NOT IN ('` + taxkeys.TaxTypeVAT + `', '` + taxkeys.TaxTypeCIT + `', '` + taxkeys.TaxTypeWHT + `') THEN ` + firstNonZero(taxkeys.OtherAmountAliases) + ` ELSE 0 END AS other_amount,
+           ` + firstNonZero(taxkeys.EngagementCostAliases) + ` AS engagement_cost
     FROM task_instances ti
     JOIN workflows w ON w.id = ti.workflow_id
     LEFT JOIN entities e ON e.id = w.entity_id
@@ -43,11 +46,11 @@ WITH raw AS (
 ),
 figures AS (
     SELECT raw.*,
-           COALESCE(net_vat_given, CASE WHEN tax_type = 'VAT' THEN output_vat - input_vat ELSE 0 END) AS net_vat,
+           COALESCE(net_vat_given, CASE WHEN tax_type = '` + taxkeys.TaxTypeVAT + `' THEN output_vat - input_vat ELSE 0 END) AS net_vat,
            CASE tax_type
-               WHEN 'VAT' THEN COALESCE(net_vat_given, output_vat - input_vat)
-               WHEN 'CIT' THEN tax_liability
-               WHEN 'WHT' THEN wht_amount
+               WHEN '` + taxkeys.TaxTypeVAT + `' THEN COALESCE(net_vat_given, output_vat - input_vat)
+               WHEN '` + taxkeys.TaxTypeCIT + `' THEN tax_liability
+               WHEN '` + taxkeys.TaxTypeWHT + `' THEN wht_amount
                ELSE other_amount
            END AS total_amount,
            CASE $4::text
@@ -80,6 +83,9 @@ LIMIT $5 OFFSET $6`
 // One aggregate statement yields the three exact roll-ups via GROUPING SETS:
 // grp 1 = per group_key (aggregated), grp 2 = per period (chartData),
 // grp 3 = grand total (summary + totalCount). Ordered so Go can split them.
+// Period buckets — the chart, and the aggregation when groupBy=period — follow
+// the CALENDAR (earliest period end, then the code), never period-code text
+// (which puts M10 before M2); every other grouping is ordered by label.
 var financialAggregateSQL = figuresCTE + `
 SELECT GROUPING(group_key, period)::int AS grp,
        COALESCE(group_key, '') AS group_key,
@@ -96,7 +102,10 @@ SELECT GROUPING(group_key, period)::int AS grp,
        COUNT(*)::int AS cnt
 FROM figures
 GROUP BY GROUPING SETS ((group_key, group_label), (period), ())
-ORDER BY grp, group_label, group_key, period`
+ORDER BY grp,
+         CASE WHEN GROUPING(group_key, period) = ` + grpByPeriodLiteral + ` OR $4::text = '` + domain.GroupByPeriod + `'
+              THEN MIN(period_end_date) END,
+         group_label, group_key, period`
 
 type financialAggRow struct {
 	Grp    int    `db:"grp"`
@@ -111,6 +120,8 @@ const (
 	grpByGroup  = 1 // GROUPING(group_key, period) = 0b01: period rolled up
 	grpByPeriod = 2 // 0b10: group_key rolled up
 	grpTotal    = 3 // 0b11: everything rolled up
+
+	grpByPeriodLiteral = "2" // grpByPeriod, spelled for the SQL text
 )
 
 func (r *ReportsRepo) TaxFinancial(ctx context.Context, args domain.TaxFinancialArgs) (*domain.TaxFinancialResult, error) {

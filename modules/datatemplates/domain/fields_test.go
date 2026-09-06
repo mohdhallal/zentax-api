@@ -5,6 +5,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/mohamadhallal/zentax-api/shared/taxkeys"
 )
 
 func f64(v float64) *float64 { return &v }
@@ -85,20 +87,48 @@ func TestPredefinedTemplates_AreValidAndStable(t *testing.T) {
 	}
 	assert.Equal(t, map[string]string{"VAT Return": "VAT", "Corporate Income Tax": "CIT", "Withholding Tax": "WHT"}, names)
 
-	// Field ids are the frontend fixture's (stable tax-data keys).
+	// Field ids are the canonical tax-data keys (stable across environments).
 	vat := tpls[0]
-	assert.Equal(t, []string{"f-vat-sales", "f-vat-output", "f-vat-input", "f-vat-net"}, fieldIDs(vat.Fields))
+	assert.Equal(t, []string{"salesTotal", "outputVat", "inputVat", "netVat"}, fieldIDs(vat.Fields))
 	assert.True(t, vat.Fields[0].Mandatory)
 	assert.False(t, vat.Fields[3].Mandatory)
 	assert.True(t, vat.Fields[0].NumericValidation.FormatAsCurrency)
 	assert.Equal(t, 2, *vat.Fields[0].NumericValidation.DecimalPlaces)
 
 	cit := tpls[1]
-	assert.Equal(t, []string{"f-cit-pbt", "f-cit-adj", "f-cit-taxable", "f-cit-rate", "f-cit-due"}, fieldIDs(cit.Fields))
+	assert.Equal(t, []string{"profitBeforeTax", "adjustments", "taxableIncome", "taxRate", "taxLiability"}, fieldIDs(cit.Fields))
 	assert.False(t, cit.Fields[3].NumericValidation.FormatAsCurrency, "a rate is not a currency")
 
 	wht := tpls[2]
-	assert.Equal(t, []string{"f-wht-base", "f-wht-rate", "f-wht-amount"}, fieldIDs(wht.Fields))
+	assert.Equal(t, []string{"whtBase", "whtRate", "whtAmount"}, fieldIDs(wht.Fields))
+}
+
+// Every figure the tax-financial report derives for a tax type (VAT: output /
+// input / net VAT; CIT: taxable income / liability; WHT: withheld amount) is a
+// NUMERIC field of that type's predefined template, under the canonical key —
+// so a template-bound instance can feed the report (the fixture-era ids never
+// could).
+func TestPredefinedTemplates_FeedTheFinancialReport(t *testing.T) {
+	t.Parallel()
+	byType := map[string]CreateDataTemplateInput{}
+	for _, tpl := range PredefinedTemplates() {
+		byType[tpl.TemplateType] = tpl
+	}
+	for _, taxType := range []string{taxkeys.TaxTypeVAT, taxkeys.TaxTypeCIT, taxkeys.TaxTypeWHT} {
+		tpl, ok := byType[taxType]
+		require.True(t, ok, "no predefined template for %s", taxType)
+		numeric := map[string]bool{}
+		for _, f := range tpl.Fields {
+			if f.FieldType == FieldTypeNumeric {
+				numeric[f.ID] = true
+			}
+		}
+		keys := taxkeys.FigureKeys(taxType)
+		require.NotEmpty(t, keys, taxType)
+		for _, key := range keys {
+			assert.True(t, numeric[key], "%s template must carry numeric field %q", taxType, key)
+		}
+	}
 }
 
 func TestFields_ValueScanRoundTrip(t *testing.T) {

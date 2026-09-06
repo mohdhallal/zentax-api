@@ -31,6 +31,6 @@ type ListTaskInstancesQuery struct {
 	Offset     int      `json:"offset"     default:"0"  validate:"min=0" example:"0"`
 	Sort       []string `json:"sort"       validate:"omitempty,dive,oneof=dueDate:asc dueDate:desc createdAt:asc createdAt:desc" example:"dueDate:asc"`
 	WorkflowID *string  `json:"workflowId" filter:"workflow_id" validate:"omitempty,uuid"`
-	Status     *string  `json:"status"     filter:"status" validate:"omitempty,oneof=not_started in_progress in_review completed blocked" example:"not_started"`
+	Status     *string  `json:"status"     filter:"status" validate:"omitempty,oneof=not_started in_progress in_review pending_approval completed blocked" example:"not_started"`
 	PeriodCode *string  `json:"periodCode" filter:"period_code" validate:"omitempty,max=10" example:"M1"`
 }

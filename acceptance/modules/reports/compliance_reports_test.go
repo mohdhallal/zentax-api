@@ -478,26 +478,38 @@ func (s *ReportsSuite) TestComplianceReports() {
 	s.Require().Equal("Penalty: 50, Interest: 12.5", byInstance[f.alphaVATM2Collect].PenaltyInterest)
 	s.Require().Equal("Late payment fee 3%", byInstance[f.alphaCITM2Pay].PenaltyInterest)
 
-	// Status filter: summary + totalCount describe the FILTERED set; paging.
+	// Status filter: rows + totalCount describe the FILTERED set (paging
+	// included); the summary keeps describing the whole classified set, so the
+	// cards stay global while the table narrows.
 	s.getJSON(tenant, "/reports/compliance-status?status=late", &cs)
 	s.Require().Len(cs.Rows, 1)
 	s.Require().Equal(f.alphaVATM1Collect, cs.Rows[0].TaskInstanceID)
 	s.Require().Equal(1, cs.TotalCount)
-	s.Require().Equal(1, cs.Summary.Total)
+	s.Require().Equal(13, cs.Summary.Total)
+	s.Require().Equal(1, cs.Summary.OnTime)
 	s.Require().Equal(1, cs.Summary.Late)
-	s.Require().Equal(0, cs.Summary.Missed)
+	s.Require().Equal(11, cs.Summary.Missed)
+	s.Require().Equal(0, cs.Summary.NotDue)
 	s.getJSON(tenant, "/reports/compliance-status?status=missed&limit=5&offset=10", &cs)
 	s.Require().Len(cs.Rows, 1)
 	s.Require().Equal(11, cs.TotalCount)
+	s.Require().Equal(13, cs.Summary.Total)
 	s.Require().Equal(11, cs.Summary.Missed)
+	// The year / entity / obligation filters DO narrow the summary.
 	s.getJSON(tenant, "/reports/compliance-status?status=all&year=2026", &cs)
 	s.Require().Equal(1, cs.TotalCount)
+	s.Require().Equal(1, cs.Summary.Total)
+	s.Require().Equal(1, cs.Summary.OnTime)
 	s.Require().Equal("M12", cs.Rows[0].Period)
 	s.getJSON(tenant, "/reports/compliance-status?entityId="+f.beta+"&obligationTypeId="+f.vat, &cs)
 	s.Require().Equal(4, cs.TotalCount)
+	s.Require().Equal(4, cs.Summary.Total)
+	s.Require().Equal(4, cs.Summary.Missed)
 	s.getJSON(tenant, "/reports/compliance-status?status=not_due", &cs)
 	s.Require().Empty(cs.Rows)
 	s.Require().Equal(0, cs.TotalCount)
+	s.Require().Equal(13, cs.Summary.Total)
+	s.Require().Equal(0, cs.Summary.NotDue)
 
 	// ---- tax financial.
 	var tf financialData
@@ -531,10 +543,11 @@ func (s *ReportsSuite) TestComplianceReports() {
 			OutputVat: 1000, InputVat: 400, NetVat: 600, TaxableIncome: 1000, TaxLiability: 250, TotalAmount: 850}},
 		{Key: f.beta, Label: "Acme Beta", Count: 2, figures: figures{TaxLiability: 75, EngagementCost: 20, TotalAmount: 75}},
 	}, tf.Aggregated)
+	// Chart points follow the calendar (M2 before M12), never period-code text.
 	s.Require().Equal([]chartPoint{
 		{Period: "M1", OutputVat: 1000, InputVat: 400, NetVat: 600, TaxLiability: 250, TotalAmount: 850},
-		{Period: "M12", TaxLiability: 75, TotalAmount: 75},
 		{Period: "M2"},
+		{Period: "M12", TaxLiability: 75, TotalAmount: 75},
 	}, tf.ChartData)
 	s.Require().Equal(float64(1000), tf.Summary.TotalOutputVat)
 	s.Require().Equal(float64(400), tf.Summary.TotalInputVat)
@@ -559,7 +572,7 @@ func (s *ReportsSuite) TestComplianceReports() {
 	s.Require().Equal(3, tf.Aggregated[1].Count)
 	s.getJSON(tenant, "/reports/tax-financial?groupBy=period", &tf)
 	s.Require().Len(tf.Aggregated, 3)
-	s.Require().Equal([]string{"M1", "M12", "M2"}, []string{tf.Aggregated[0].Key, tf.Aggregated[1].Key, tf.Aggregated[2].Key})
+	s.Require().Equal([]string{"M1", "M2", "M12"}, []string{tf.Aggregated[0].Key, tf.Aggregated[1].Key, tf.Aggregated[2].Key})
 	s.getJSON(tenant, "/reports/tax-financial?groupBy=obligation", &tf)
 	s.Require().Equal([]string{f.cit, f.vat}, []string{tf.Aggregated[0].Key, tf.Aggregated[1].Key})
 	s.Require().Equal("Corporate Tax", tf.Aggregated[0].Label)

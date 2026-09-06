@@ -68,7 +68,11 @@ func HeatmapToJSON(cells []domain.HeatmapCell) map[string]any {
 	return map[string]any{"rows": rows, "cols": cols, "cells": out, "summary": summary}
 }
 
-func ComplianceStatusToJSON(rows []domain.ComplianceRow, summary domain.ComplianceSummary) map[string]any {
+// ComplianceStatusToJSON: rows = the status-filtered page, totalCount = that
+// set's exact size, summary = the counts of the whole classified set (before
+// the status filter) so the cards stay global while the table narrows.
+func ComplianceStatusToJSON(res *domain.ComplianceStatusResult) map[string]any {
+	rows, summary := res.Rows, res.Summary
 	out := make([]map[string]any, 0, len(rows))
 	for i := range rows {
 		r := &rows[i]
@@ -96,7 +100,7 @@ func ComplianceStatusToJSON(rows []domain.ComplianceRow, summary domain.Complian
 			"missed": summary.Missed,
 			"notDue": summary.NotDue,
 		},
-		"totalCount": summary.Total,
+		"totalCount": res.TotalCount,
 	}
 }
 

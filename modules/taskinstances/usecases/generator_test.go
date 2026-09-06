@@ -138,16 +138,18 @@ func TestGenerator_RefusesIfAlreadyStarted(t *testing.T) {
 	assert.IsType(t, &apperrors.ConflictError{}, err)
 }
 
-func TestGenerator_RejectsNonRecurring(t *testing.T) {
+func TestGenerator_RejectsUnknownCategory(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
-	gen, _, workflows, _, _ := newGenerator()
+	gen, instances, workflows, _, _ := newGenerator()
 
-	project := &workflowsdomain.Workflow{ID: "wf-1", WorkflowCategory: "project"}
-	workflows.On("GetById", ctx, "wf-1").Return(project, nil).Once()
+	odd := &workflowsdomain.Workflow{ID: "wf-1", WorkflowCategory: "bogus"}
+	workflows.On("GetById", ctx, "wf-1").Return(odd, nil).Once()
 
 	_, err := gen.StartWorkflow(ctx, "wf-1", nil)
 	assert.IsType(t, &apperrors.ValidationError{}, err)
+	assert.Contains(t, err.Error(), "only recurring and project workflows generate task instances")
+	instances.AssertNotCalled(t, "CountByWorkflow", mock.Anything, mock.Anything)
 }
 
 func TestGenerator_WorkflowNotFound(t *testing.T) {

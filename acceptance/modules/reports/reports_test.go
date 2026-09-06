@@ -36,6 +36,7 @@ type reportRow struct {
 	DueDate            string  `json:"dueDate"`
 	PeriodEndDate      string  `json:"periodEndDate"`
 	FilingDeadline     string  `json:"filingDeadline"`
+	PaymentDeadline    *string `json:"paymentDeadline"`
 	ApprovalRequired   *bool   `json:"approvalRequired"`
 	CompletedAt        *string `json:"completedAt"`
 	OrderIndex         int     `json:"orderIndex"`

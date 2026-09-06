@@ -71,6 +71,14 @@ func (s *TaskInstancesSuite) TestApprovalHappyPathAndImmutability() {
 	s.Require().Equal("pending_approval", submitted.Status)
 	s.Require().NotNil(submitted.SubmittedBy)
 
+	// The base list filter knows the approval status too.
+	var pending []struct {
+		ID string `json:"id"`
+	}
+	s.As(tenant).GET(s.T(), "/task-instances?status=pending_approval").DecodeData(s.T(), &pending)
+	s.Require().Len(pending, 1)
+	s.Require().Equal(id, pending[0].ID)
+
 	// A preparer holds task:submit but not task:approve → 403 at the capability gate.
 	s.AsRole(tenant, "preparer").POST(s.T(), "/task-instances/"+id+"/approve", nil).
 		AssertStatus(s.T(), http.StatusForbidden)

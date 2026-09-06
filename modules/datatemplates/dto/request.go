@@ -16,7 +16,7 @@ type NumericValidationBody struct {
 // Cross-field rules (unique ids, numericValidation only on numeric fields,
 // min <= max) are enforced by domain.ValidateFields in the use case.
 type FieldBody struct {
-	ID                string                 `json:"id"                validate:"required,min=1,max=64" example:"f-vat-sales"`
+	ID                string                 `json:"id"                validate:"required,min=1,max=64" example:"salesTotal"`
 	Name              string                 `json:"name"              validate:"required,min=1,max=200" example:"Total Sales (net)"`
 	FieldType         string                 `json:"fieldType"         validate:"required,oneof=text numeric date boolean file" example:"numeric"`
 	Mandatory         bool                   `json:"mandatory"`

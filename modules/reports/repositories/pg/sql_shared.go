@@ -47,9 +47,12 @@ func complianceClass(deadlineColumn string) string {
 	return fmt.Sprintf(complianceClassTemplate, deadlineColumn, tenantToday, tenantCompletedDate)
 }
 
-// participatingWorkflows is the legacy rule for the three compliance /
-// financial reports: only active or completed workflows take part.
-const participatingWorkflows = `w.status IN ('active', 'completed')`
+// participatingWorkflows is the rule for the three compliance / financial
+// reports: only active or completed RECURRING workflows take part. Project
+// workflows generate instances too (one "PROJECT" period), but they have no
+// obligation period to be compliant against — they stay visible in the
+// task-instance list, workflow-stats and the raw export.
+const participatingWorkflows = `w.status IN ('active', 'completed') AND w.workflow_category = 'recurring'`
 
 // reportFiltersWhere binds the shared filter trio as $1..$3 (NULL = any).
 const reportFiltersWhere = `
@@ -74,8 +77,9 @@ func jsonNum(key string) string {
 }
 
 // firstNonZero mirrors the legacy `num(a) || num(b) || num(c)` alias chain:
-// the first key whose numeric value is non-zero wins, else 0.
-func firstNonZero(keys ...string) string {
+// the first key whose numeric value is non-zero wins, else 0. Keys come from
+// shared/taxkeys (canonical key first).
+func firstNonZero(keys []string) string {
 	parts := make([]string, 0, len(keys)+1)
 	for _, k := range keys {
 		parts = append(parts, "NULLIF("+jsonNum(k)+", 0)")
@@ -99,4 +103,14 @@ func jsonTruthy(key string) string {
 		" WHEN 'boolean' THEN NULLIF(" + v + ", 'false')" +
 		" WHEN 'string' THEN NULLIF(" + v + ", '')" +
 		" ELSE NULL END"
+}
+
+// firstTruthy is the alias-chain form of jsonTruthy: the first key with a
+// JS-truthy value, as text, else NULL.
+func firstTruthy(keys []string) string {
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, jsonTruthy(k))
+	}
+	return "COALESCE(" + strings.Join(parts, ", ") + ")"
 }

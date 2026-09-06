@@ -17,13 +17,22 @@ import (
 	"github.com/mohamadhallal/zentax-api/shared/deadline"
 )
 
-// Generator plans and materializes per-period task instances from a workflow's
-// task templates (GET /workflows/{id}/preview, POST /workflows/{id}/start). It
+// Workflow categories the planner knows.
+const (
+	categoryRecurring = "recurring"
+	categoryProject   = "project"
+)
+
+// Generator plans and materializes task instances from a workflow's task
+// templates (GET /workflows/{id}/preview, POST /workflows/{id}/start). It
 // reads across modules (workflow, entity, templates, entity obligation) and
 // writes task instances, all within the request's tenant-scoped transaction.
 //
 // Preview and start share planWorkflow, so what preview shows is exactly what
-// start persists.
+// start persists. A recurring workflow yields one instance per selected period
+// × template through the entity's fiscal calendar (ADR-0023); a project
+// workflow yields one instance per template under the single "PROJECT"
+// period, its endDate being period end and filing deadline alike.
 type Generator struct {
 	instances     tidomain.TaskInstanceRepository
 	workflows     workflowsdomain.WorkflowRepository
@@ -73,6 +82,7 @@ type plannedInstance struct {
 // workflowPlan is the shared output of planWorkflow.
 type workflowPlan struct {
 	workflow  *workflowsdomain.Workflow
+	periods   int // period codes planned: len(selectedPeriods), or 1 for a project
 	templates int
 	instances []plannedInstance
 }
@@ -86,7 +96,7 @@ func (g *Generator) PreviewWorkflow(ctx context.Context, workflowID string) (*wo
 	if err := g.authorizer.EnsureWorkflow(ctx, workflowID, authz.WorkflowRead); err != nil {
 		return nil, err
 	}
-	wf, err := g.loadRecurringWorkflow(ctx, workflowID)
+	wf, err := g.loadWorkflow(ctx, workflowID)
 	if err != nil {
 		return nil, err
 	}
@@ -98,7 +108,7 @@ func (g *Generator) PreviewWorkflow(ctx context.Context, workflowID string) (*wo
 	preview := &workflowsdomain.WorkflowPreview{
 		WorkflowID:        wf.ID,
 		WorkflowName:      wf.Name,
-		TotalPeriods:      len(wf.SelectedPeriods),
+		TotalPeriods:      plan.periods,
 		TaskTemplates:     plan.templates,
 		TotalTasks:        len(plan.instances),
 		AssigneesImpacted: []string{},
@@ -135,8 +145,8 @@ func (g *Generator) PreviewWorkflow(ctx context.Context, workflowID string) (*wo
 	return preview, nil
 }
 
-// StartWorkflow generates task instances for a recurring workflow (applying the
-// caller's per-instance overrides) and returns the count created. It is
+// StartWorkflow generates the workflow's task instances (applying the caller's
+// per-instance overrides) and returns the count created. It is
 // idempotent-guarded (refuses if instances already exist) and fails closed on
 // anything the calendar engine cannot compute rather than emit an approximate
 // — and therefore wrong — deadline.
@@ -145,7 +155,7 @@ func (g *Generator) StartWorkflow(ctx context.Context, workflowID string, overri
 	if err := g.authorizer.EnsureWorkflow(ctx, workflowID, authz.WorkflowWrite); err != nil {
 		return 0, err
 	}
-	wf, err := g.loadRecurringWorkflow(ctx, workflowID)
+	wf, err := g.loadWorkflow(ctx, workflowID)
 	if err != nil {
 		return 0, err
 	}
@@ -180,7 +190,7 @@ func (g *Generator) StartWorkflow(ctx context.Context, workflowID string, overri
 	if err := g.audit.Record(ctx, "workflow.started", "workflow", workflowID,
 		map[string]any{
 			"instancesCreated": count,
-			"periods":          len(wf.SelectedPeriods),
+			"periods":          plan.periods,
 			"overrides":        len(overrides),
 		}); err != nil {
 		return 0, err
@@ -189,9 +199,11 @@ func (g *Generator) StartWorkflow(ctx context.Context, workflowID string, overri
 	return count, nil
 }
 
-// loadRecurringWorkflow fetches the workflow and applies the validations shared
-// by preview and start (same messages for both).
-func (g *Generator) loadRecurringWorkflow(ctx context.Context, workflowID string) (*workflowsdomain.Workflow, error) {
+// loadWorkflow fetches the workflow and applies the validations shared by
+// preview and start (same messages for both), per category: a recurring
+// workflow needs its entity, periodicity, financial year and periods; a project
+// workflow needs its end date — the one deadline its instances hang off.
+func (g *Generator) loadWorkflow(ctx context.Context, workflowID string) (*workflowsdomain.Workflow, error) {
 	wf, err := g.workflows.GetById(ctx, workflowID)
 	if err != nil {
 		return nil, err
@@ -199,33 +211,52 @@ func (g *Generator) loadRecurringWorkflow(ctx context.Context, workflowID string
 	if wf == nil {
 		return nil, apperrors.NewNotFound("workflow not found: " + workflowID)
 	}
-	if wf.WorkflowCategory != "recurring" {
-		return nil, apperrors.NewValidation("only recurring workflows generate task instances")
-	}
-	if wf.EntityID == nil {
-		return nil, apperrors.NewValidation("recurring workflow has no entity")
-	}
-	if wf.Periodicity == nil || *wf.Periodicity == "" {
-		return nil, apperrors.NewValidation("recurring workflow has no periodicity")
-	}
-	if wf.FinancialYear == nil || *wf.FinancialYear == "" {
-		return nil, apperrors.NewValidation("recurring workflow has no financial year")
-	}
-	if len(wf.SelectedPeriods) == 0 {
-		return nil, apperrors.NewValidation("recurring workflow has no selected periods")
+	switch wf.WorkflowCategory {
+	case categoryRecurring:
+		if wf.EntityID == nil {
+			return nil, apperrors.NewValidation("recurring workflow has no entity")
+		}
+		if wf.Periodicity == nil || *wf.Periodicity == "" {
+			return nil, apperrors.NewValidation("recurring workflow has no periodicity")
+		}
+		if wf.FinancialYear == nil || *wf.FinancialYear == "" {
+			return nil, apperrors.NewValidation("recurring workflow has no financial year")
+		}
+		if len(wf.SelectedPeriods) == 0 {
+			return nil, apperrors.NewValidation("recurring workflow has no selected periods")
+		}
+	case categoryProject:
+		if wf.EndDate == nil || *wf.EndDate == "" {
+			return nil, apperrors.NewValidation("project workflows need an end date")
+		}
+		if _, err := dateonly.Parse(*wf.EndDate); err != nil {
+			return nil, apperrors.NewValidation("project workflow end date must be a YYYY-MM-DD date")
+		}
+	default:
+		return nil, apperrors.NewValidation("only recurring and project workflows generate task instances")
 	}
 	return wf, nil
 }
 
-// planWorkflow is the single planning function behind preview and start. It
-// resolves the entity's fiscal calendar (ADR-0023 — every pattern, through
-// the same engine GET /entities/{id}/periods uses), the payment rule of the
-// entity obligation and the task templates, then computes one instance per
-// selected period × template — in selectedPeriods order (not lexicographic),
-// then template orderIndex — with the caller's overrides applied. An override
-// key matching no (template, period) pair, or a period code outside the
-// entity's calendar, is a validation error.
+// planWorkflow is the single planning function behind preview and start,
+// dispatching on the workflow category.
 func (g *Generator) planWorkflow(
+	ctx context.Context, wf *workflowsdomain.Workflow, overrides workflowsdomain.TaskOverrides,
+) (*workflowPlan, error) {
+	if wf.WorkflowCategory == categoryProject {
+		return g.planProject(ctx, wf, overrides)
+	}
+	return g.planRecurring(ctx, wf, overrides)
+}
+
+// planRecurring resolves the entity's fiscal calendar (ADR-0023 — every
+// pattern, through the same engine GET /entities/{id}/periods uses), the
+// payment rule of the entity obligation and the task templates, then computes
+// one instance per selected period × template — in selectedPeriods order (not
+// lexicographic), then template orderIndex — with the caller's overrides
+// applied. An override key matching no (template, period) pair, or a period
+// code outside the entity's calendar, is a validation error.
+func (g *Generator) planRecurring(
 	ctx context.Context, wf *workflowsdomain.Workflow, overrides workflowsdomain.TaskOverrides,
 ) (*workflowPlan, error) {
 	entity, err := g.entities.GetById(ctx, *wf.EntityID)
@@ -244,34 +275,12 @@ func (g *Generator) planWorkflow(
 		return nil, apperrors.NewValidation(err.Error())
 	}
 
-	tasks, err := g.workflowTasks.ListByWorkflow(ctx, wf.ID)
+	tasks, err := g.loadTemplates(ctx, wf.ID)
 	if err != nil {
 		return nil, err
 	}
-	if len(tasks) == 0 {
-		return nil, apperrors.NewValidation("workflow has no task templates")
-	}
-	// Natural step order within a period, regardless of repository ordering.
-	sort.SliceStable(tasks, func(i, j int) bool { return tasks[i].OrderIndex < tasks[j].OrderIndex })
-
-	// Every override must address a real (template, period) pair.
-	if len(overrides) > 0 {
-		known := make(map[string]bool, len(tasks)*len(wf.SelectedPeriods))
-		for _, periodCode := range wf.SelectedPeriods {
-			for i := range tasks {
-				known[workflowsdomain.OverrideKey(tasks[i].ID, periodCode)] = true
-			}
-		}
-		unknown := make([]string, 0)
-		for key := range overrides {
-			if !known[key] {
-				unknown = append(unknown, key)
-			}
-		}
-		if len(unknown) > 0 {
-			sort.Strings(unknown) // deterministic error message
-			return nil, apperrors.NewValidation("unknown task override: " + unknown[0])
-		}
+	if err := validateOverrides(overrides, tasks, wf.SelectedPeriods); err != nil {
+		return nil, err
 	}
 
 	// The payment rule comes from the entity obligation linking the workflow's
@@ -289,6 +298,7 @@ func (g *Generator) planWorkflow(
 
 	plan := &workflowPlan{
 		workflow:  wf,
+		periods:   len(wf.SelectedPeriods),
 		templates: len(tasks),
 		instances: make([]plannedInstance, 0, len(tasks)*len(wf.SelectedPeriods)),
 	}
@@ -344,7 +354,7 @@ func (g *Generator) planWorkflow(
 					DueDate:          due,
 					PeriodEndDate:    periodEnd,
 					FilingDeadline:   filing,
-					PaymentDeadline:  payment,
+					PaymentDeadline:  &payment,
 					ApprovalRequired: task.ApprovalRequired,
 					OrderIndex:       task.OrderIndex,
 					DataTemplateID:   task.DataTemplateID,
@@ -355,6 +365,117 @@ func (g *Generator) planWorkflow(
 	}
 
 	return plan, nil
+}
+
+// planProject computes a project workflow's instances: ONE per template (in
+// orderIndex order) under the single ProjectPeriodCode period. The workflow's
+// endDate is the project's period end and filing deadline alike; there is no
+// payment deadline (NULL), so a template referencing payment_deadline falls
+// back to the filing deadline — every reference resolves to the end date, and
+// the task due date is that date ± the template offset. The workflow's
+// dueDateRule and the entity's calendar play no part (a project has no fiscal
+// period), and the entity itself stays optional. Overrides address
+// "<templateId>_PROJECT": dueDate replaces the due date; periodEndDate moves
+// that instance's end date (its filing deadline and due date follow); a
+// paymentDeadline override is refused — there is nothing for it to replace.
+func (g *Generator) planProject(
+	ctx context.Context, wf *workflowsdomain.Workflow, overrides workflowsdomain.TaskOverrides,
+) (*workflowPlan, error) {
+	end, err := dateonly.Parse(*wf.EndDate) // validated by loadWorkflow
+	if err != nil {
+		return nil, apperrors.NewValidation("project workflow end date must be a YYYY-MM-DD date")
+	}
+	tasks, err := g.loadTemplates(ctx, wf.ID)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateOverrides(overrides, tasks, []string{workflowsdomain.ProjectPeriodCode}); err != nil {
+		return nil, err
+	}
+
+	plan := &workflowPlan{
+		workflow:  wf,
+		periods:   1,
+		templates: len(tasks),
+		instances: make([]plannedInstance, 0, len(tasks)),
+	}
+	for i := range tasks {
+		task := tasks[i]
+		key := workflowsdomain.OverrideKey(task.ID, workflowsdomain.ProjectPeriodCode)
+		ov := overrides[key]
+		if ov.PaymentDeadline != nil {
+			return nil, apperrors.NewValidation("task override " + key + ": project workflows have no payment deadline")
+		}
+
+		periodEnd := end
+		if ov.PeriodEndDate != nil {
+			periodEnd = *ov.PeriodEndDate
+		}
+		filing := periodEnd
+		due := deadline.ApplyOffset(filing, task.DueDateOffsetValue, task.DueDateOffsetUnit, task.DueDateOffsetDirection)
+		if ov.DueDate != nil {
+			due = *ov.DueDate
+		}
+
+		plan.instances = append(plan.instances, plannedInstance{
+			CreateTaskInstanceInput: tidomain.CreateTaskInstanceInput{
+				WorkflowID:       wf.ID,
+				WorkflowTaskID:   task.ID,
+				PeriodCode:       workflowsdomain.ProjectPeriodCode,
+				Name:             task.Name,
+				Description:      task.Description,
+				TaskType:         task.TaskType,
+				DueDate:          due,
+				PeriodEndDate:    periodEnd,
+				FilingDeadline:   filing,
+				PaymentDeadline:  nil,
+				ApprovalRequired: task.ApprovalRequired,
+				OrderIndex:       task.OrderIndex,
+				DataTemplateID:   task.DataTemplateID,
+			},
+			RoleLabel: task.RoleLabel,
+		})
+	}
+	return plan, nil
+}
+
+// loadTemplates lists the workflow's task templates in natural step order
+// (orderIndex, regardless of repository ordering); none is a validation error.
+func (g *Generator) loadTemplates(ctx context.Context, workflowID string) ([]workflowtasksdomain.WorkflowTask, error) {
+	tasks, err := g.workflowTasks.ListByWorkflow(ctx, workflowID)
+	if err != nil {
+		return nil, err
+	}
+	if len(tasks) == 0 {
+		return nil, apperrors.NewValidation("workflow has no task templates")
+	}
+	sort.SliceStable(tasks, func(i, j int) bool { return tasks[i].OrderIndex < tasks[j].OrderIndex })
+	return tasks, nil
+}
+
+// validateOverrides checks that every override addresses a real (template,
+// period) pair — the keys the preview lists — before anything is planned.
+func validateOverrides(overrides workflowsdomain.TaskOverrides, tasks []workflowtasksdomain.WorkflowTask, periodCodes []string) error {
+	if len(overrides) == 0 {
+		return nil
+	}
+	known := make(map[string]bool, len(tasks)*len(periodCodes))
+	for _, periodCode := range periodCodes {
+		for i := range tasks {
+			known[workflowsdomain.OverrideKey(tasks[i].ID, periodCode)] = true
+		}
+	}
+	unknown := make([]string, 0)
+	for key := range overrides {
+		if !known[key] {
+			unknown = append(unknown, key)
+		}
+	}
+	if len(unknown) > 0 {
+		sort.Strings(unknown) // deterministic error message
+		return apperrors.NewValidation("unknown task override: " + unknown[0])
+	}
+	return nil
 }
 
 // paymentDeadline derives the payment deadline of one period (ADR-0023 §5):
