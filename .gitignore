@@ -37,6 +37,12 @@ Thumbs.db
 tmp/
 acceptance/test-output/
 
+# cmd/seed-demo's key -> id map (its default --out). It carries the demo users'
+# cleartext passwords and is scratch output of one local seed run. The stray
+# binary a bare `go build ./cmd/seed-demo/` drops here is ignored alongside it.
+/seed-demo-output.json
+/seed-demo
+
 # infra/ (AWS CDK): sources are tracked, build output and deps are not
 infra/node_modules
 infra/cdk.out

@@ -10,6 +10,9 @@
 // environments ECS injects it from Secrets Manager, so it never lands in a
 // task definition or CloudTrail) or from --password for local use. The tool
 // refuses to run when neither is set and never prints the password.
+//
+// The provisioning itself lives in platform/seed, so the demo seeder creates
+// its tenants exactly the same way; this file is flags, config and output.
 package main
 
 import (
@@ -17,18 +20,14 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 	_ "time/tzdata" // embed the IANA zone database: the runtime image is bare alpine (ADR-0003)
 
-	"github.com/mohamadhallal/zentax-api/app"
 	"github.com/mohamadhallal/zentax-api/config"
 	"github.com/mohamadhallal/zentax-api/logger"
-	datatemplatespg "github.com/mohamadhallal/zentax-api/modules/datatemplates/repositories/pg"
-	datatemplatesusecases "github.com/mohamadhallal/zentax-api/modules/datatemplates/usecases"
 	identitydomain "github.com/mohamadhallal/zentax-api/modules/identity/domain"
-	"github.com/mohamadhallal/zentax-api/platform/crypto"
 	"github.com/mohamadhallal/zentax-api/platform/database"
+	"github.com/mohamadhallal/zentax-api/platform/seed"
 )
 
 func main() {
@@ -67,58 +66,33 @@ func main() {
 	defer func() { _ = dbConn.Close() }()
 	db := database.NewExec(dbConn)
 
-	ctx := context.Background()
-	hash, err := crypto.HashPassword(password)
+	ids, err := seed.CreateTenant(context.Background(), db, seed.Params{
+		Slug:     *tenantSlug,
+		Name:     *tenantName,
+		Email:    *email,
+		Password: password,
+		UserName: *name,
+		Timezone: *timezone,
+	})
 	if err != nil {
-		fail("hash password", err)
-	}
-
-	// tenants + users are not RLS-scoped.
-	var tenantID string
-	if err := db.QueryRowxContext(ctx,
-		`INSERT INTO tenants (slug, name, timezone) VALUES ($1, $2, $3) RETURNING id`,
-		*tenantSlug, *tenantName, *timezone).Scan(&tenantID); err != nil {
-		fail("create tenant", err)
-	}
-
-	var userID string
-	if err := db.QueryRowxContext(ctx,
-		`INSERT INTO users (tenant_id, email, name, password_hash, status)
-		 VALUES ($1, $2, $3, $4, 'active') RETURNING id`,
-		tenantID, strings.ToLower(strings.TrimSpace(*email)), *name, hash).Scan(&userID); err != nil {
-		fail("create admin user", err)
-	}
-
-	// user_grants is RLS-scoped: set the tenant GUC (ADR-0004) for the insert.
-	if err := db.WithinTransaction(app.WithTenantID(ctx, tenantID), func(txCtx context.Context) error {
-		_, e := db.ExecContext(txCtx,
-			`INSERT INTO user_grants (user_id, role) VALUES ($1, 'tenant_admin')`, userID)
-		return e
-	}); err != nil {
-		fail("create tenant-admin grant", err)
-	}
-
-	// Predefined data templates (VAT / CIT / WHT): the same idempotent use case
-	// POST /data-templates/predefined runs, on a tenant-bound tx with the admin
-	// as the acting user (created_by). No authorizer / audit here — there is no
-	// request; the seeding is attributed through created_by.
-	seedCtx := app.WithRequester(app.WithTenantID(ctx, tenantID), &app.Requester{Kind: app.RequesterUser, ID: userID})
-	var seeded int
-	if err := db.WithinTransaction(seedCtx, func(txCtx context.Context) error {
-		templates, e := datatemplatesusecases.NewUseCases(datatemplatespg.NewDataTemplateRepo(db)).SeedPredefined(txCtx)
-		seeded = len(templates)
-		return e
-	}); err != nil {
-		fail("seed predefined data templates", err)
+		// CreateTenant names the stage that failed ("create tenant: …"), so the
+		// line printed here is the one this tool has always printed.
+		failErr(err)
 	}
 
 	// Reference ids only (ADR-0015): this line ends up in CI / task logs, so the
 	// admin's e-mail address is deliberately not echoed.
 	fmt.Printf("Seeded tenant %q\n  tenant_id: %s\n  timezone:  %s\n  admin user_id: %s\n  templates: %d predefined\n",
-		*tenantSlug, tenantID, *timezone, userID, seeded)
+		*tenantSlug, ids.TenantID, ids.Timezone, ids.UserID, ids.Templates)
 }
 
 func fail(msg string, err error) {
 	fmt.Fprintf(os.Stderr, "seed-admin: %s: %v\n", msg, err)
+	os.Exit(1)
+}
+
+// failErr reports an error that already carries its own stage prefix.
+func failErr(err error) {
+	fmt.Fprintf(os.Stderr, "seed-admin: %v\n", err)
 	os.Exit(1)
 }
