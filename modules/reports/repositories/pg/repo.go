@@ -7,6 +7,7 @@ package pg
 
 import (
 	"context"
+	baserepo "github.com/mohamadhallal/zentax-api/shared/repositories"
 	"strconv"
 	"strings"
 
@@ -27,7 +28,8 @@ func NewReportsRepo(db database.ExecerPg) *ReportsRepo {
 // taskInstanceBase is the instance set every task read is cut from: the
 // instances joined to their workflow (inner — an instance always belongs to
 // one). Counts and the summary aggregate over it directly; nothing in the
-// filters needs the display joins.
+// filters needs the display joins (the search over entity / obligation-type
+// names is a semi-join, see taskSearchPredicate).
 const taskInstanceBase = `
 FROM task_instances ti
 JOIN workflows w ON w.id = ti.workflow_id`
@@ -57,49 +59,99 @@ SELECT ti.id, ti.workflow_id, ti.workflow_task_id, ti.period_code, ti.name, ti.d
 
 const taskInstanceCount = `SELECT COUNT(*)::int` + taskInstanceBase
 
-// taskFilterWhere renders the WHERE clause for the filters that are SET —
-// and only those — binding them as $1..$n in order, and returns the clause
-// (empty when nothing is set) with its arguments. Assembling the predicates
-// dynamically keeps every statement shape specific to its request: pgx's
-// statement cache falls back to a generic plan after a few executions of a
-// `($n IS NULL OR col = $n)` statement, which loses the index on the column.
-// Column names are code-owned constants; caller data only ever travels as a
-// bind parameter.
-func taskFilterWhere(f domain.TaskFilters) (string, []any) {
-	var (
-		preds []string
-		args  []any
-	)
-	bind := func(v any) string {
-		args = append(args, v)
-		return "$" + strconv.Itoa(len(args))
+// whereBuilder collects the predicates of the filters that are SET — and only
+// those — numbering their binds $1..$n in order of appearance. Assembling the
+// predicates dynamically keeps every statement shape specific to its request:
+// pgx's statement cache falls back to a generic plan after a few executions
+// of a `($n IS NULL OR col = $n)` statement, which loses the index on the
+// column. Column names are code-owned constants; caller data only ever
+// travels as a bind parameter.
+type whereBuilder struct {
+	preds []string
+	args  []any
+}
+
+// bind appends a parameter and returns its placeholder.
+func (b *whereBuilder) bind(v any) string {
+	b.args = append(b.args, v)
+	return "$" + strconv.Itoa(len(b.args))
+}
+
+func (b *whereBuilder) add(pred string) {
+	b.preds = append(b.preds, pred)
+}
+
+// where renders the clause (empty when nothing is set) with its arguments.
+func (b *whereBuilder) where() (string, []any) {
+	if len(b.preds) == 0 {
+		return "", b.args
 	}
+	return "\nWHERE " + strings.Join(b.preds, "\n  AND "), b.args
+}
+
+// taskFilterWhere renders the WHERE clause for the task filters that are set.
+func taskFilterWhere(f domain.TaskFilters) (string, []any) {
+	var b whereBuilder
 	if f.WorkflowID != nil {
-		preds = append(preds, "ti.workflow_id = "+bind(*f.WorkflowID)+"::uuid")
+		b.add("ti.workflow_id = " + b.bind(*f.WorkflowID) + "::uuid")
 	}
 	if f.EntityID != nil {
-		preds = append(preds, "w.entity_id = "+bind(*f.EntityID)+"::uuid")
+		b.add("w.entity_id = " + b.bind(*f.EntityID) + "::uuid")
 	}
 	if f.AssigneeID != nil {
-		preds = append(preds, "ti.assignee_id = "+bind(*f.AssigneeID)+"::uuid")
+		if *f.AssigneeID == domain.AssigneeUnassigned {
+			b.add("ti.assignee_id IS NULL")
+		} else {
+			b.add("ti.assignee_id = " + b.bind(*f.AssigneeID) + "::uuid")
+		}
 	}
-	if p := financialYearPredicate(f.FinancialYears, bind); p != "" {
-		preds = append(preds, p)
+	if f.ObligationTypeID != nil {
+		b.add("w.obligation_type_id = " + b.bind(*f.ObligationTypeID) + "::uuid")
+	}
+	if f.TaxType != nil {
+		// Semi-join on the (RLS-scoped) obligation types of that template: the
+		// base set stays free of display joins.
+		b.add("w.obligation_type_id IN (SELECT sot.id FROM obligation_types sot WHERE sot.template = " +
+			b.bind(*f.TaxType) + "::varchar)")
+	}
+	if p := financialYearPredicate(f.FinancialYears, b.bind); p != "" {
+		b.add(p)
+	}
+	if f.PeriodCode != nil {
+		b.add("ti.period_code = " + b.bind(*f.PeriodCode) + "::varchar")
 	}
 	if f.Status != nil {
 		if *f.Status == domain.StatusOpen {
-			preds = append(preds, taskOpen)
+			b.add(taskOpen)
 		} else {
-			preds = append(preds, "ti.status = "+bind(*f.Status)+"::varchar")
+			b.add("ti.status = " + b.bind(*f.Status) + "::varchar")
 		}
 	}
 	if f.WorkflowCategory != nil {
-		preds = append(preds, "w.workflow_category = "+bind(*f.WorkflowCategory)+"::varchar")
+		b.add("w.workflow_category = " + b.bind(*f.WorkflowCategory) + "::varchar")
 	}
-	if len(preds) == 0 {
-		return "", args
+	if f.Due != nil {
+		// The DTO's enum guards the value; the window is the summary's own
+		// predicate, so a tile and its drill-down agree by construction.
+		switch *f.Due {
+		case domain.DueOverdue:
+			b.add("(" + dueOverdue + ")")
+		case domain.DueToday:
+			b.add("(" + dueToday + ")")
+		case domain.DueThisWeek:
+			b.add("(" + dueThisWeek + ")")
+		}
 	}
-	return "\nWHERE " + strings.Join(preds, "\n  AND "), args
+	if f.DueFrom != nil {
+		b.add("ti.due_date >= " + b.bind(f.DueFrom.String()) + "::date")
+	}
+	if f.DueTo != nil {
+		b.add("ti.due_date <= " + b.bind(f.DueTo.String()) + "::date")
+	}
+	if pattern := searchPattern(f.Search); pattern != "" {
+		b.add(taskSearchPredicate(b.bind(pattern)))
+	}
+	return b.where()
 }
 
 // financialYearPredicate OR-s the requested years; the FinancialYearNone
@@ -132,19 +184,61 @@ func financialYearPredicate(years []string, bind func(any) string) string {
 	return in
 }
 
-// orderBy maps the validated sort column to a deterministic ORDER BY. The
-// order_index + id tie-breakers keep pages stable when many instances share a
-// due date (the common case: one per template per period).
+// searchPattern turns the raw search term into the ILIKE pattern: trimmed,
+// LIKE metacharacters escaped so they match literally, wrapped in %…%. Empty
+// (or whitespace-only) means no search.
+func searchPattern(s *string) string {
+	if s == nil {
+		return ""
+	}
+	term := strings.TrimSpace(*s)
+	if term == "" {
+		return ""
+	}
+	return "%" + baserepo.EscapeLike(term) + "%"
+}
+
+// taskSearchPredicate matches the pattern bound at placeholder p (built by
+// searchPattern, '\' as the escape) against the instance's own text (name,
+// period code), its workflow's name and — through semi-joins, so the COUNT
+// and the summary never need the display LEFT JOINs — the names of its entity
+// and obligation type.
+func taskSearchPredicate(p string) string {
+	like := " ILIKE " + p + "::text ESCAPE '\\'"
+	return "(ti.name" + like +
+		"\n       OR ti.period_code" + like +
+		"\n       OR w.name" + like +
+		"\n       OR EXISTS (SELECT 1 FROM entities se WHERE se.id = w.entity_id AND se.name" + like + ")" +
+		"\n       OR EXISTS (SELECT 1 FROM obligation_types sot WHERE sot.id = w.obligation_type_id AND sot.name" + like + "))"
+}
+
+// orderBy maps the validated sort key to a deterministic ORDER BY: the primary
+// expression, then the tie-breakers — the feed's natural order (due_date,
+// order_index) where the primary is something else — and finally the unique
+// instance id, ALL in the primary direction, so offset pages are stable where
+// ties are densest (one instance per template per period shares a due date)
+// and one btree ((tenant_id, due_date, order_index, id), migration 22) can
+// serve the default order forwards or backwards.
 func orderBy(column string, desc bool) string {
 	dir := "ASC"
 	if desc {
 		dir = "DESC"
 	}
+	feed := ", ti.due_date " + dir + ", ti.order_index " + dir + ", ti.id " + dir
 	switch column {
 	case domain.SortByCreatedAt:
-		return " ORDER BY ti.created_at " + dir + ", ti.order_index ASC, ti.id ASC"
+		return " ORDER BY ti.created_at " + dir + ", ti.order_index " + dir + ", ti.id " + dir
+	case domain.SortByStatus:
+		return " ORDER BY " + statusRank + " " + dir + feed
+	case domain.SortByWorkflow:
+		return " ORDER BY w.name " + dir + feed
+	case domain.SortByEntity:
+		// Instances of project workflows have no entity: last either way.
+		return " ORDER BY e.name " + dir + " NULLS LAST" + feed
+	case domain.SortByName:
+		return " ORDER BY ti.name " + dir + feed
 	default:
-		return " ORDER BY ti.due_date " + dir + ", ti.order_index ASC, ti.id ASC"
+		return " ORDER BY ti.due_date " + dir + ", ti.order_index " + dir + ", ti.id " + dir
 	}
 }
 
@@ -201,22 +295,50 @@ func (r *ReportsRepo) TaskSummary(ctx context.Context, filters domain.TaskFilter
 	return &summary, nil
 }
 
-// workflowStatsSQL: one row per workflow (LEFT JOIN keeps instance-less
+// workflowStatsSelect: one row per workflow (LEFT JOIN keeps instance-less
 // workflows with zero counts); next_due_date is the earliest due date among
-// instances that are not yet completed, NULL when there is none.
-const workflowStatsSQL = `
+// instances that are not yet completed, NULL when there is none. The filters
+// (all on the workflow row) go between the FROM and the GROUP BY.
+const workflowStatsSelect = `
 SELECT w.id AS workflow_id,
        COUNT(ti.id)::int AS total_tasks,
        COUNT(ti.id) FILTER (WHERE ti.status = 'completed')::int AS completed_tasks,
        MIN(ti.due_date) FILTER (WHERE ti.status <> 'completed') AS next_due_date
 FROM workflows w
-LEFT JOIN task_instances ti ON ti.workflow_id = w.id
+LEFT JOIN task_instances ti ON ti.workflow_id = w.id`
+
+const workflowStatsGroup = `
 GROUP BY w.id
 ORDER BY w.id`
 
-func (r *ReportsRepo) WorkflowStats(ctx context.Context) ([]domain.WorkflowStats, error) {
+// workflowStatsWhere renders the WHERE clause for the workflow-stats filters
+// that are set (same dynamic assembly as the task filters).
+func workflowStatsWhere(f domain.WorkflowStatsFilters) (string, []any) {
+	var b whereBuilder
+	if f.WorkflowID != nil {
+		b.add("w.id = " + b.bind(*f.WorkflowID) + "::uuid")
+	}
+	if f.EntityID != nil {
+		b.add("w.entity_id = " + b.bind(*f.EntityID) + "::uuid")
+	}
+	if p := financialYearPredicate(f.FinancialYears, b.bind); p != "" {
+		b.add(p)
+	}
+	if f.Status != nil {
+		b.add("w.status = " + b.bind(*f.Status) + "::varchar")
+	}
+	if f.WorkflowCategory != nil {
+		b.add("w.workflow_category = " + b.bind(*f.WorkflowCategory) + "::varchar")
+	}
+	return b.where()
+}
+
+func (r *ReportsRepo) WorkflowStats(
+	ctx context.Context, filters domain.WorkflowStatsFilters,
+) ([]domain.WorkflowStats, error) {
+	where, params := workflowStatsWhere(filters)
 	stats := []domain.WorkflowStats{}
-	if err := r.db.SelectContext(ctx, &stats, workflowStatsSQL); err != nil {
+	if err := r.db.SelectContext(ctx, &stats, workflowStatsSelect+where+workflowStatsGroup, params...); err != nil {
 		return nil, err
 	}
 	return stats, nil

@@ -58,11 +58,16 @@ type TaskInstanceRow struct {
 	TaxType            *string `db:"tax_type"` // obligation_types.template (VAT/CIT/...)
 }
 
-// Sort columns accepted by ListTaskInstances. Kept as an allow-list so the
-// repository never interpolates a caller-controlled column name.
+// Sort keys accepted by ListTaskInstances. Kept as an allow-list so the
+// repository never interpolates a caller-controlled column name; each maps to
+// a deterministic ORDER BY that ends in the instance id.
 const (
 	SortByDueDate   = "due_date"
 	SortByCreatedAt = "created_at"
+	SortByStatus    = "status"        // board rank: open stages, completed, blocked
+	SortByWorkflow  = "workflow_name" // w.name
+	SortByEntity    = "entity_name"   // e.name, instances without an entity last
+	SortByName      = "name"          // ti.name
 )
 
 // Pseudo-values a task filter accepts on top of the stored ones.
@@ -74,21 +79,45 @@ const (
 	// year (workflows.financial_year IS NULL), so project workflows can always
 	// be kept inside a year scope.
 	FinancialYearNone = "none"
+	// AssigneeUnassigned selects instances with no assignee (assignee_id IS
+	// NULL). The API's other pseudo-assignee, `me`, never reaches the domain:
+	// the handler resolves it to the session user's id.
+	AssigneeUnassigned = "unassigned"
+)
+
+// Due windows the feed's `due` filter selects. They are the SAME predicates
+// the summary tiles count (open work only, against the tenant's civil day), so
+// a tile drill-down lists exactly the instances the tile counted.
+const (
+	DueOverdue  = "overdue"
+	DueToday    = "today"
+	DueThisWeek = "thisWeek"
 )
 
 // TaskFilters are the filters the task feed and the task summary share. nil /
 // empty means "any". Status is a stored status or StatusOpen; FinancialYears is
-// a set (OR-ed) that may contain FinancialYearNone. The repository assembles a
-// predicate ONLY for the filters that are set, so the statement shape (and
-// the planner's use of the indexes) follows the request rather than a generic
-// `($n IS NULL OR …)` plan.
+// a set (OR-ed) that may contain FinancialYearNone; AssigneeID is a user id or
+// AssigneeUnassigned; TaxType is an obligation_types.template value; Due is a
+// Due* window; DueFrom / DueTo bound due_date inclusively; Search is the raw
+// term (the repository escapes it) matched against the instance name, period
+// code, workflow name, entity name and obligation-type name. The repository
+// assembles a predicate ONLY for the filters that are set, so the statement
+// shape (and the planner's use of the indexes) follows the request rather
+// than a generic `($n IS NULL OR …)` plan.
 type TaskFilters struct {
 	WorkflowID       *string
 	EntityID         *string
 	AssigneeID       *string
+	ObligationTypeID *string
+	TaxType          *string
 	FinancialYears   []string
+	PeriodCode       *string
 	Status           *string
 	WorkflowCategory *string
+	Due              *string
+	DueFrom          *dateonly.Date
+	DueTo            *dateonly.Date
+	Search           *string
 }
 
 // ListTaskInstancesArgs are the validated filters + paging for the enriched
@@ -157,6 +186,18 @@ func (s TaskSummary) ByStatus() map[string]int {
 // rounding as WorkflowStats.CompletionPercent — and 0 when there is nothing.
 func (s TaskSummary) CompletionRate() int {
 	return roundedPercent(s.Completed, s.Total)
+}
+
+// WorkflowStatsFilters narrow the per-workflow stats to a subset of the
+// tenant's workflows. nil / empty means "any"; FinancialYears is a set that
+// may contain FinancialYearNone; Status is a workflows.status value. Like
+// TaskFilters, only the set filters become predicates.
+type WorkflowStatsFilters struct {
+	WorkflowID       *string
+	EntityID         *string
+	FinancialYears   []string
+	Status           *string
+	WorkflowCategory *string
 }
 
 // WorkflowStats is the per-workflow completion summary. NextDueDate is the
@@ -477,9 +518,10 @@ type Reader interface {
 	// TaskSummary returns the exact tile counts over the instances matching
 	// the filters — one aggregate statement, never a row walk.
 	TaskSummary(ctx context.Context, filters TaskFilters) (*TaskSummary, error)
-	// WorkflowStats returns one entry per workflow in the tenant, including
-	// workflows with no instances yet.
-	WorkflowStats(ctx context.Context) ([]WorkflowStats, error)
+	// WorkflowStats returns one entry per workflow matching the filters (every
+	// workflow in the tenant when none is set), including workflows with no
+	// instances yet.
+	WorkflowStats(ctx context.Context, filters WorkflowStatsFilters) ([]WorkflowStats, error)
 
 	// ComplianceHeatmap returns one aggregate cell per (entity, column), sorted
 	// by (row label, column id) — one GROUP BY statement.

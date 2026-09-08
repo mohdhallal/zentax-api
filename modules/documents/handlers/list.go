@@ -12,7 +12,8 @@ import (
 )
 
 // ListDocumentsHandler: GET /documents — the repository view (paginated,
-// filters entityId / workflowId / taskInstanceId / documentType / year / search).
+// filters entityId / workflowId / taskInstanceId / documentType / year
+// (repeatable, `none` = no financial year) / search).
 type ListDocumentsHandler struct {
 	usecases domain.DocumentUseCases
 }
@@ -52,8 +53,8 @@ func (h *ListDocumentsHandler) Execute(
 		WorkflowID:     dto.Filter(q.WorkflowID),
 		TaskInstanceID: dto.Filter(q.TaskInstanceID),
 		DocumentType:   dto.Filter(q.DocumentType),
-		Year:           dto.Filter(q.Year),
-		Search:         dto.Filter(q.Search),
+		Years:          dto.Filters(q.Year),
+		Search:         dto.SearchTerm(q.Search),
 		Limit:          q.Limit,
 		Offset:         q.Offset,
 	}

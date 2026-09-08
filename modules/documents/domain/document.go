@@ -137,15 +137,22 @@ type UpdateDocumentInput struct {
 	Category     *string
 }
 
-// ListDocumentsFilter: nil pointers mean "no filter". Limit 0 = unbounded
-// (the workflow / task-instance sub-lists); otherwise a page.
+// FinancialYearNone is the Years sentinel for documents of workflows that
+// carry no financial year (project workflows): workflows.financial_year IS
+// NULL. Named like the reports module's, so the API vocabulary is one.
+const FinancialYearNone = "none"
+
+// ListDocumentsFilter: nil / empty means "no filter". Years is a set (OR-ed)
+// of workflows.financial_year values that may contain FinancialYearNone.
+// Limit 0 = unbounded (the workflow / task-instance sub-lists); otherwise a
+// page. The repository assembles a predicate only for the filters that are set.
 type ListDocumentsFilter struct {
 	EntityID       *string
 	WorkflowID     *string
 	TaskInstanceID *string
 	DocumentType   *string
-	Year           *string // workflows.financial_year
-	Search         *string // ILIKE over file_name / label / notes
+	Years          []string // workflows.financial_year, "none" = IS NULL
+	Search         *string  // ILIKE over file_name / label / notes (escaped)
 	Limit          int
 	Offset         int
 }

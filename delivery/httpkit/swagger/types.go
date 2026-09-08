@@ -97,11 +97,12 @@ type Response struct {
 }
 
 type Schema struct {
-	Ref        string            `json:"$ref,omitempty"`
-	Type       string            `json:"type,omitempty"`
-	Format     string            `json:"format,omitempty"`
-	Items      *Schema           `json:"items,omitempty"`
-	Properties map[string]Schema `json:"properties,omitempty"`
+	Ref         string            `json:"$ref,omitempty"`
+	Type        string            `json:"type,omitempty"`
+	Format      string            `json:"format,omitempty"`
+	Description string            `json:"description,omitempty"`
+	Items       *Schema           `json:"items,omitempty"`
+	Properties  map[string]Schema `json:"properties,omitempty"`
 	// AdditionalProperties describes the values of a map-typed field.
 	AdditionalProperties *Schema  `json:"additionalProperties,omitempty"`
 	Required             []string `json:"required,omitempty"`

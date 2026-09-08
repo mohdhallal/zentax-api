@@ -43,7 +43,11 @@ func (h *TaskSummaryHandler) Execute(
 	w http.ResponseWriter, r *http.Request, input *types.ValidatedInput, requester *app.Requester,
 ) (*types.HttpResponse, error) {
 	query, _ := input.Query.(*dto.TaskSummaryQuery)
-	summary, err := h.reader.TaskSummary(r.Context(), taskFilters(query.TaskFilterQuery))
+	filters, err := taskFilters(query.TaskFilterQuery, requester)
+	if err != nil {
+		return nil, err
+	}
+	summary, err := h.reader.TaskSummary(r.Context(), filters)
 	if err != nil {
 		return nil, err
 	}

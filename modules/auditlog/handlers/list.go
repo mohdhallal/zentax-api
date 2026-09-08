@@ -56,7 +56,7 @@ func (h *ListAuditLogHandler) Execute(
 		WorkflowID:   query.WorkflowID,
 		ResourceType: query.ResourceType,
 		ResourceID:   query.ResourceID,
-		Action:       query.Action,
+		Actions:      actions(query.Action),
 		Limit:        query.Limit,
 		Offset:       query.Offset,
 	}
@@ -83,6 +83,19 @@ func (h *ListAuditLogHandler) Execute(
 		Limit:  args.Limit,
 		Offset: args.Offset,
 	}), nil
+}
+
+// actions keeps the non-blank action values in order (a blank `?action=` is
+// "no filter", as for every other filter); nil when nothing remains.
+func actions(values []string) []string {
+	var out []string
+	for _, v := range values {
+		if v == "" {
+			continue
+		}
+		out = append(out, v)
+	}
+	return out
 }
 
 // parseDate turns an already layout-validated YYYY-MM-DD query value into a

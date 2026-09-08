@@ -671,6 +671,37 @@ cell in AWS (the M1 is far faster than db.t4g.small — local PASS is necessary,
 ## What is missing / remaining
 
 ### 🟠 Auth & authorization
+- **Search and named workflow rows (2026-09-09, ADR-0026 increment 5, API side).** `search` (≤ 200
+  chars, trimmed, blank = no filter) on `/entities` (name, legal name), `/workflows` (name),
+  `/obligation-types` (name, code) and `/members` (name, email): case-insensitive `ILIKE` with `%`,
+  `_` and `\` escaped (`shared/repositories/like.go`), applied in BOTH the page and the count
+  statement through one bind so totals stay exact; the generic repository declares
+  `SQLConfig.SearchColumns`. The workflows list select is LEFT-JOINed to entities and obligation
+  types so every row carries `entityName` / `obligationTypeName` (nullable), with `w.`-qualified
+  filters, `w.created_at` order and `w.id` tie-breaker; the count stays over `workflows` alone.
+  `/workflows` year filters are lenient like every other year filter: `financialYear=` and
+  `financialYear=all` mean "no filter". Acceptance per module incl. the scale fixture's hostile
+  names (`Müller & Söhne 100% GmbH`, `Under_score Holdings Ltd`, `O'Brien \ Partners`).
+- **Task feed on the server (2026-09-09, ADR-0026 increment 4, API side).** `/reports/task-instances`
+  and `/reports/task-summary` share one filter set (`dto.TaskFilterQuery`): `workflowId`, `entityId`,
+  `assigneeId` (uuid | `me` = the session principal | `unassigned`), `obligationTypeId`, `taxType`
+  (semi-join on `obligation_types.template`), `financialYear` (repeatable, `none` = no year; `""`/`all`
+  ignored), `periodCode`, `status` (stored values + `open`), `workflowCategory`,
+  `due=overdue|today|thisWeek` (the `sql_shared.go` tenant-day predicates, so a tile drill-down is
+  exact), `dueFrom`/`dueTo` (inclusive; blank or `all` is a 400 like the uuid params), `search`
+  (task name, workflow name, period code, plus semi-joins on entity / obligation-type names — the
+  COUNT never needs the display LEFT JOINs). Feed `sort` is ONE key from dueDate | createdAt | status
+  (statusRank) | workflow | entity (NULLS LAST) | name × asc/desc, every clause ending in
+  `ti.order_index, ti.id` in the primary direction; a second sort key is a 400. Predicates are
+  assembled only for set filters. `/reports/workflow-stats` gains `workflowId`, `entityId`,
+  `financialYear`, `status`, `workflowCategory`; `/audit-log` `action` is repeatable; `/documents`
+  `year` is repeatable with `none` (= documents of workflows without a financial year) and its
+  `search` treats `all` as a term. OpenAPI: alternation rules (`uuid|oneof=me unassigned`) keep the
+  uuid format and document the extra literals; `datetime=2006-01-02` renders as `format: date`.
+  Acceptance: every filter, `due=*` on Pacific/Kiritimati and Pago Pago tenants with a required day
+  flip against UTC, six sort keys × two directions walked twice and asc = reverse of desc, workflow
+  stats filters, repeatable action and year. The demo oracle (403 checks) and the scale oracle
+  (3,105 checks) still report 0 differences: the changes are additive.
 - **List contracts (2026-09-08, ADR-0026 increment 2).** Every list `ORDER BY` now ends in a unique
   column, in the primary sort's direction: the generic repository (`shared/repositories`) appends an
   `id` tie-breaker (`due_date ASC, id ASC`; `created_at DESC, id DESC`); the audit log orders by `seq`

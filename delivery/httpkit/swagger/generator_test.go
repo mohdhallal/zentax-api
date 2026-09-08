@@ -213,3 +213,46 @@ func assertSecurity(t *testing.T, got []SecurityReq, want string) {
 		t.Fatalf("expected security requirement %q, got %#v", want, got)
 	}
 }
+
+// An alternation rule (`uuid|oneof=me unassigned`) validates when ANY branch
+// does, so the spec keeps the uuid format and documents the extra literals
+// instead of emitting an enum that would forbid the uuids. A date layout maps
+// to format: date.
+func TestGenerateAlternationAndDateRules(t *testing.T) {
+	type requestQuery struct {
+		AssigneeID string `json:"assigneeId" validate:"omitempty,uuid|oneof=me unassigned"`
+		DueFrom    string `json:"dueFrom" validate:"omitempty,datetime=2006-01-02"`
+		Status     string `json:"status" validate:"omitempty,oneof=open completed"`
+	}
+	spec := Generate([]routing.RouteMeta{
+		{
+			FullPath:   "/feed",
+			Definition: types.RouteDefinition{Method: http.MethodGet, Path: "/feed"},
+			Schema:     &types.SchemaDefinition{Query: requestQuery{}},
+		},
+	}, types.ModeExternal, Config{Title: "Test API"})
+	op := spec.Paths["/feed"]["get"]
+	if op == nil {
+		t.Fatal("expected GET /feed operation")
+	}
+	byName := map[string]Parameter{}
+	for _, p := range op.Parameters {
+		byName[p.Name] = p
+	}
+	a := byName["assigneeId"].Schema
+	if a.Format != "uuid" {
+		t.Fatalf("assigneeId format = %q, want uuid", a.Format)
+	}
+	if len(a.Enum) != 0 {
+		t.Fatalf("assigneeId must not carry an enum (it would forbid uuids): %v", a.Enum)
+	}
+	if a.Description != "Also accepts: me, unassigned" {
+		t.Fatalf("assigneeId description = %q", a.Description)
+	}
+	if byName["dueFrom"].Schema.Format != "date" {
+		t.Fatalf("dueFrom format = %q, want date", byName["dueFrom"].Schema.Format)
+	}
+	if got := byName["status"].Schema.Enum; len(got) != 2 || got[0] != "open" {
+		t.Fatalf("a plain oneof still becomes an enum, got %v", got)
+	}
+}

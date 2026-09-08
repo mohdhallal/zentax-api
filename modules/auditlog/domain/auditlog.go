@@ -32,15 +32,17 @@ type Entry struct {
 	Hash         string          `db:"hash"`
 }
 
-// ListArgs are the validated filters + paging. nil means "any". From/To are
-// legal calendar dates (inclusive, UTC day boundaries on occurred_at). The
+// ListArgs are the validated filters + paging. nil / empty means "any". From/To
+// are legal calendar dates (inclusive, UTC day boundaries on occurred_at). The
 // WorkflowID filter applies to the RESOLVED workflow — a workflow's own events
-// plus those of its task templates and task instances.
+// plus those of its task templates and task instances. Actions is a set
+// (OR-ed): the UI maps one verb choice onto several stored actions. The
+// repository assembles a predicate ONLY for the filters that are set.
 type ListArgs struct {
 	WorkflowID   *string
 	ResourceType *string
 	ResourceID   *string
-	Action       *string
+	Actions      []string
 	From         *dateonly.Date
 	To           *dateonly.Date
 	Limit        int

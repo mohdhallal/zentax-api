@@ -43,10 +43,16 @@ func (h *TaskInstancesReportHandler) DefineSchema() types.SchemaDefinition {
 	}
 }
 
+// DefineSortColumns maps the API sort keys (validated by the DTO's oneof) to
+// the repository's allow-listed sort columns.
 func (h *TaskInstancesReportHandler) DefineSortColumns() map[string]string {
 	return map[string]string{
 		"dueDate":   domain.SortByDueDate,
 		"createdAt": domain.SortByCreatedAt,
+		"status":    domain.SortByStatus,
+		"workflow":  domain.SortByWorkflow,
+		"entity":    domain.SortByEntity,
+		"name":      domain.SortByName,
 	}
 }
 
@@ -55,8 +61,12 @@ func (h *TaskInstancesReportHandler) Execute(
 ) (*types.HttpResponse, error) {
 	query, _ := input.Query.(*dto.ListTaskInstancesQuery)
 
+	filters, err := taskFilters(query.TaskFilterQuery, requester)
+	if err != nil {
+		return nil, err
+	}
 	args := domain.ListTaskInstancesArgs{
-		TaskFilters: taskFilters(query.TaskFilterQuery),
+		TaskFilters: filters,
 		SortColumn:  domain.SortByDueDate, // contract default: dueDate:asc
 		Limit:       query.Limit,
 		Offset:      query.Offset,

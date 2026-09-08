@@ -13,27 +13,18 @@ SELECT v.id, v.document_id, v.version, v.storage_key, v.file_name, v.file_size, 
 FROM document_versions v
 LEFT JOIN users u ON u.id = v.created_by AND u.tenant_id = v.tenant_id`
 
-// viewFrom joins a LIVE document to its latest version (the row whose version
+// viewFrom joins a document to its latest version (the row whose version
 // equals current_version — exactly one by the unique constraint), its workflow
 // and entity (RLS-scoped LEFT JOINs) and the uploader (users pinned to the
-// tenant). Filters are NULL-tolerant so one statement serves every
-// combination; the search pattern arrives pre-escaped with '\' as the escape.
+// tenant). The WHERE — live documents plus the filters that are set — is
+// assembled per request by documentsWhere (repo.go), so the page and the
+// count share it and the statement shape follows the request.
 const viewFrom = `
 FROM documents d
 JOIN document_versions v ON v.tenant_id = d.tenant_id AND v.document_id = d.id AND v.version = d.current_version
 LEFT JOIN workflows w ON w.id = d.workflow_id
 LEFT JOIN entities e ON e.id = w.entity_id
-LEFT JOIN users u ON u.id = v.created_by AND u.tenant_id = v.tenant_id
-WHERE d.deleted_at IS NULL
-  AND ($1::uuid IS NULL OR d.workflow_id = $1::uuid)
-  AND ($2::uuid IS NULL OR d.task_instance_id = $2::uuid)
-  AND ($3::uuid IS NULL OR w.entity_id = $3::uuid)
-  AND ($4::varchar IS NULL OR d.document_type = $4::varchar)
-  AND ($5::varchar IS NULL OR w.financial_year = $5::varchar)
-  AND ($6::text IS NULL
-       OR v.file_name ILIKE $6::text ESCAPE '\'
-       OR d.label ILIKE $6::text ESCAPE '\'
-       OR d.notes ILIKE $6::text ESCAPE '\')`
+LEFT JOIN users u ON u.id = v.created_by AND u.tenant_id = v.tenant_id`
 
 const viewSelect = `
 SELECT d.id, d.workflow_id, d.task_instance_id, d.category, d.document_type, d.label, d.notes,

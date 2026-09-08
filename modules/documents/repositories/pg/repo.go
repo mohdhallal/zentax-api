@@ -8,6 +8,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	baserepo "github.com/mohamadhallal/zentax-api/shared/repositories"
+	"strconv"
 	"strings"
 
 	apperrors "github.com/mohamadhallal/zentax-api/errors"
@@ -105,7 +107,7 @@ func (r *DocumentRepo) SoftDelete(ctx context.Context, id domain.DocumentID) (bo
 }
 
 func (r *DocumentRepo) GetView(ctx context.Context, id domain.DocumentID) (*domain.DocumentView, error) {
-	views, _, err := r.list(ctx, `d.id = $7::uuid`, domain.ListDocumentsFilter{}, id)
+	views, _, err := r.list(ctx, domain.ListDocumentsFilter{}, &id)
 	if err != nil {
 		return nil, err
 	}
@@ -116,34 +118,122 @@ func (r *DocumentRepo) GetView(ctx context.Context, id domain.DocumentID) (*doma
 }
 
 func (r *DocumentRepo) ListViews(ctx context.Context, filter domain.ListDocumentsFilter) ([]domain.DocumentView, int, error) {
-	return r.list(ctx, "", filter)
+	return r.list(ctx, filter, nil)
 }
 
-// list runs the view statement with the NULL-tolerant filters; extraWhere (with
-// its own positional arg) narrows it further. The count shares the WHERE so
-// pagination.total is exact.
-func (r *DocumentRepo) list(
-	ctx context.Context, extraWhere string, f domain.ListDocumentsFilter, extraArgs ...any,
-) ([]domain.DocumentView, int, error) {
-	var search *string
-	if f.Search != nil && strings.TrimSpace(*f.Search) != "" {
-		p := "%" + escapeLike(strings.TrimSpace(*f.Search)) + "%"
-		search = &p
-	}
-	args := []any{f.WorkflowID, f.TaskInstanceID, f.EntityID, f.DocumentType, f.Year, search}
-	args = append(args, extraArgs...)
+// whereBuilder collects the predicates of the filters that are SET — and only
+// those — numbering their binds $1..$n in order of appearance, so every
+// statement shape is specific to its request rather than a generic
+// `($n IS NULL OR …)` plan. Column names are code-owned constants; caller
+// data only ever travels as a bind parameter.
+type whereBuilder struct {
+	preds []string
+	args  []any
+}
 
-	where := ""
-	if extraWhere != "" {
-		where = " AND " + extraWhere
+func (b *whereBuilder) bind(v any) string {
+	b.args = append(b.args, v)
+	return "$" + strconv.Itoa(len(b.args))
+}
+
+func (b *whereBuilder) add(pred string) { b.preds = append(b.preds, pred) }
+
+func (b *whereBuilder) where() (string, []any) {
+	return "\nWHERE " + strings.Join(b.preds, "\n  AND "), b.args
+}
+
+// documentsWhere renders the WHERE clause of the view: live documents only,
+// optionally one document by id, then the set filters. The year set OR-s the
+// requested financial years of the document's workflow, `none` standing for a
+// workflow without one; the search pattern is escaped so the term is literal.
+func documentsWhere(f domain.ListDocumentsFilter, id *domain.DocumentID) (string, []any) {
+	var b whereBuilder
+	b.add("d.deleted_at IS NULL")
+	if id != nil {
+		b.add("d.id = " + b.bind(*id) + "::uuid")
 	}
+	if f.WorkflowID != nil {
+		b.add("d.workflow_id = " + b.bind(*f.WorkflowID) + "::uuid")
+	}
+	if f.TaskInstanceID != nil {
+		b.add("d.task_instance_id = " + b.bind(*f.TaskInstanceID) + "::uuid")
+	}
+	if f.EntityID != nil {
+		b.add("w.entity_id = " + b.bind(*f.EntityID) + "::uuid")
+	}
+	if f.DocumentType != nil {
+		b.add("d.document_type = " + b.bind(*f.DocumentType) + "::varchar")
+	}
+	if p := financialYearPredicate(f.Years, b.bind); p != "" {
+		b.add(p)
+	}
+	if pattern := searchPattern(f.Search); pattern != "" {
+		p := b.bind(pattern)
+		b.add("(v.file_name ILIKE " + p + "::text ESCAPE '\\'" +
+			"\n       OR d.label ILIKE " + p + "::text ESCAPE '\\'" +
+			"\n       OR d.notes ILIKE " + p + "::text ESCAPE '\\')")
+	}
+	return b.where()
+}
+
+// financialYearPredicate OR-s the requested years of the document's workflow;
+// the FinancialYearNone sentinel stands for a workflow with no financial year.
+func financialYearPredicate(years []string, bind func(any) string) string {
+	values := make([]string, 0, len(years))
+	none := false
+	for _, y := range years {
+		if y == domain.FinancialYearNone {
+			none = true
+			continue
+		}
+		values = append(values, y)
+	}
+	switch {
+	case len(values) == 0 && !none:
+		return ""
+	case len(values) == 0:
+		return "w.financial_year IS NULL"
+	}
+	var in string
+	if len(values) == 1 {
+		in = "w.financial_year = " + bind(values[0]) + "::varchar"
+	} else {
+		in = "w.financial_year = ANY(" + bind(values) + "::varchar[])"
+	}
+	if none {
+		return "(w.financial_year IS NULL OR " + in + ")"
+	}
+	return in
+}
+
+// searchPattern turns the raw search term into the ILIKE pattern: trimmed,
+// LIKE metacharacters escaped so they match literally, wrapped in %…%. Empty
+// (or whitespace-only) means no search.
+func searchPattern(s *string) string {
+	if s == nil {
+		return ""
+	}
+	term := strings.TrimSpace(*s)
+	if term == "" {
+		return ""
+	}
+	return "%" + baserepo.EscapeLike(term) + "%"
+}
+
+// list runs the view statement over the filters that are set (plus, for
+// GetView, one document id). The count shares the WHERE so pagination.total
+// is exact; an unbounded list (Limit 0, the sub-lists) counts what it returns.
+func (r *DocumentRepo) list(
+	ctx context.Context, f domain.ListDocumentsFilter, id *domain.DocumentID,
+) ([]domain.DocumentView, int, error) {
+	where, params := documentsWhere(f, id)
 
 	query := viewSelect + where + viewOrder
-	queryArgs := args
+	queryArgs := params
 	if f.Limit > 0 {
-		n := len(args)
-		query += " LIMIT $" + itoa(n+1) + " OFFSET $" + itoa(n+2)
-		queryArgs = append(append([]any{}, args...), f.Limit, f.Offset)
+		n := len(params)
+		query += " LIMIT $" + strconv.Itoa(n+1) + " OFFSET $" + strconv.Itoa(n+2)
+		queryArgs = append(append([]any{}, params...), f.Limit, f.Offset)
 	}
 
 	views := []domain.DocumentView{}
@@ -153,7 +243,7 @@ func (r *DocumentRepo) list(
 
 	total := len(views)
 	if f.Limit > 0 {
-		if err := r.db.GetContext(ctx, &total, viewCount+where, args...); err != nil {
+		if err := r.db.GetContext(ctx, &total, viewCount+where, params...); err != nil {
 			return nil, 0, err
 		}
 	}
@@ -190,27 +280,4 @@ func (r *DocumentRepo) GetLatestVersion(ctx context.Context, documentID domain.D
 		return nil, err
 	}
 	return &v, nil
-}
-
-// escapeLike escapes the LIKE metacharacters (and the escape char itself) so a
-// search term is matched literally.
-func escapeLike(s string) string {
-	s = strings.ReplaceAll(s, `\`, `\\`)
-	s = strings.ReplaceAll(s, `%`, `\%`)
-	s = strings.ReplaceAll(s, `_`, `\_`)
-	return s
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var b [20]byte
-	i := len(b)
-	for n > 0 {
-		i--
-		b[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(b[i:])
 }

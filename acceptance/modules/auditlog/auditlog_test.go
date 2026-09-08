@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -193,6 +194,24 @@ func (s *AuditLogSuite) TestAuditTrailReadAPI() {
 	rows, pg = s.list(admin, "?action=workflow.started")
 	s.Require().Equal(1, pg.Total)
 	s.Require().Equal("workflow.started", rows[0].Action)
+
+	// action repeats: any of the given actions (so a UI verb can map onto
+	// several stored actions); unknown values simply match nothing; a blank
+	// value is no filter; each value is capped at 60 characters.
+	rows, pg = s.list(admin, "?action=workflow.started&action=workflow.created")
+	s.Require().Equal(2, pg.Total)
+	s.Require().Equal([]string{"workflow.started", "workflow.created"}, actions(rows))
+	rows, pg = s.list(admin, "?action=workflow.started&action=nope")
+	s.Require().Equal(1, pg.Total)
+	s.Require().Equal([]string{"workflow.started"}, actions(rows))
+	_, pg = s.list(admin, "?action=nope")
+	s.Require().Zero(pg.Total)
+	_, pg = s.list(admin, "?action=")
+	s.Require().Equal(6, pg.Total)
+	rows, pg = s.list(admin, "?action=task_instance.updated&action=entity.created&workflowId="+wf.ID)
+	s.Require().Equal(1, pg.Total, "the action set composes with the other filters")
+	s.Require().Equal([]string{"task_instance.updated"}, actions(rows))
+	admin.GET(s.T(), "/audit-log?action="+strings.Repeat("a", 61)).AssertStatus(s.T(), http.StatusBadRequest)
 
 	rows, pg = s.list(admin, "?workflowId="+wf.ID+"&resourceType=workflow")
 	s.Require().Equal(2, pg.Total)

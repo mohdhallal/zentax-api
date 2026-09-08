@@ -532,48 +532,71 @@ func applyValidationConstraints(s *Schema, validate string) {
 		return
 	}
 	rules := strings.Split(validate, ",")
-	for _, rule := range rules {
-		rule = strings.TrimSpace(rule)
-		if strings.HasPrefix(rule, "oneof=") {
-			values := strings.Fields(strings.TrimPrefix(rule, "oneof="))
-			s.Enum = values
-		}
-		if strings.HasPrefix(rule, "max=") {
-			if v := parseIntTag(rule, "max="); v != nil {
-				if s.Type == schemaTypeString {
-					s.MaxLength = v
+	for _, rawRule := range rules {
+		rawRule = strings.TrimSpace(rawRule)
+		// An alternation (`uuid|oneof=me unassigned`) means ANY branch validates:
+		// a uuid keeps its format and the extra literals are documented, never
+		// turned into an enum that would forbid the uuids.
+		alternation := strings.Contains(rawRule, "|")
+		for _, rule := range strings.Split(rawRule, "|") {
+			rule = strings.TrimSpace(rule)
+			if strings.HasPrefix(rule, "oneof=") {
+				values := strings.Fields(strings.TrimPrefix(rule, "oneof="))
+				if alternation {
+					note := "Also accepts: " + strings.Join(values, ", ")
+					if s.Description == "" {
+						s.Description = note
+					} else {
+						s.Description += ". " + note
+					}
 				} else {
-					f := float64(*v)
-					s.Maximum = &f
+					s.Enum = values
 				}
 			}
-		}
-		if strings.HasPrefix(rule, "min=") {
-			if v := parseIntTag(rule, "min="); v != nil {
-				if s.Type == schemaTypeString {
+			if strings.HasPrefix(rule, "datetime=") {
+				if strings.TrimPrefix(rule, "datetime=") == "2006-01-02" {
+					s.Format = "date"
+				} else {
+					s.Format = "date-time"
+				}
+			}
+			if strings.HasPrefix(rule, "max=") {
+				if v := parseIntTag(rule, "max="); v != nil {
+					if s.Type == schemaTypeString {
+						s.MaxLength = v
+					} else {
+						f := float64(*v)
+						s.Maximum = &f
+					}
+				}
+			}
+			if strings.HasPrefix(rule, "min=") {
+				if v := parseIntTag(rule, "min="); v != nil {
+					if s.Type == schemaTypeString {
+						s.MinLength = v
+					} else {
+						f := float64(*v)
+						s.Minimum = &f
+					}
+				}
+			}
+			if strings.HasPrefix(rule, "len=") {
+				if v := parseIntTag(rule, "len="); v != nil {
 					s.MinLength = v
-				} else {
-					f := float64(*v)
-					s.Minimum = &f
+					s.MaxLength = v
 				}
 			}
-		}
-		if strings.HasPrefix(rule, "len=") {
-			if v := parseIntTag(rule, "len="); v != nil {
-				s.MinLength = v
-				s.MaxLength = v
+			if rule == "email" {
+				s.Format = "email"
 			}
-		}
-		if rule == "email" {
-			s.Format = "email"
-		}
-		if rule == "uuid" {
-			s.Format = "uuid"
-		}
-		if strings.HasPrefix(rule, "gt=") {
-			if v := parseIntTag(rule, "gt="); v != nil {
-				excl := float64(*v)
-				s.Minimum = &excl
+			if rule == "uuid" {
+				s.Format = "uuid"
+			}
+			if strings.HasPrefix(rule, "gt=") {
+				if v := parseIntTag(rule, "gt="); v != nil {
+					excl := float64(*v)
+					s.Minimum = &excl
+				}
 			}
 		}
 	}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -356,6 +357,36 @@ func (s *DocumentsSuite) TestRepositoryFiltersAndPaging() {
 	s.Require().Equal(d1.ID, p.Data[0].ID)
 	s.As(tenant).GET(s.T(), "/documents?limit=501").AssertStatus(s.T(), http.StatusBadRequest)
 	s.As(tenant).GET(s.T(), "/documents?entityId=not-a-uuid").AssertStatus(s.T(), http.StatusBadRequest)
+
+	// year repeats, and `none` selects the documents of workflows that carry
+	// no financial year (a project workflow) — so a year scope still shows
+	// them. The year is the document's WORKFLOW's financial year.
+	var project struct {
+		ID string `json:"id"`
+	}
+	rp := s.As(tenant).POST(s.T(), "/workflows", map[string]any{
+		"name": "Restructuring", "workflowCategory": "project", "projectType": "restructuring",
+		"entityId": a.EntityID, "startDate": "2025-01-15", "endDate": "2025-03-31",
+	})
+	rp.AssertStatus(s.T(), http.StatusCreated)
+	rp.DecodeData(s.T(), &project)
+	d4 := s.mustUpload(tenant, project.ID, map[string]string{"documentType": "advisor_memo"}, pdf("memo.pdf", pdfV1))
+	s.Require().Nil(d4.FinancialYear)
+
+	s.Require().Equal([]string{d4.ID, d3.ID, d2.ID, d1.ID}, s.ids(list("").Data))
+	s.Require().Equal([]string{d3.ID}, s.ids(list("?year=2025").Data), "a single value keeps working")
+	s.Require().Equal([]string{d3.ID, d2.ID, d1.ID}, s.ids(list("?year=2024&year=2025").Data))
+	s.Require().Equal([]string{d4.ID}, s.ids(list("?year=none").Data))
+	s.Require().Equal([]string{d4.ID, d3.ID}, s.ids(list("?year=2025&year=none").Data))
+	s.Require().Equal(4, list("?year=all").Pagination.Total, "the legacy all means no filter")
+	s.Require().Equal(4, list("?year=").Pagination.Total)
+	s.Require().Empty(list("?year=1999").Data)
+	s.Require().Equal([]string{d4.ID, d2.ID, d1.ID}, s.ids(list("?year=2024&year=none&entityId="+a.EntityID).Data),
+		"the year set composes with the other filters")
+	p = list("?year=2024&year=none&limit=2")
+	s.Require().Len(p.Data, 2)
+	s.Require().Equal(3, p.Pagination.Total, "the exact total is counted over the same year set")
+	s.As(tenant).GET(s.T(), "/documents?year=1234567890").AssertStatus(s.T(), http.StatusBadRequest)
 }
 
 func (s *DocumentsSuite) TestRBACAndTenancy() {
@@ -538,4 +569,20 @@ func (s *DocumentsSuite) TestSoftDeleteAndApprovedFreeze() {
 		}
 	}
 	s.Require().True(sawDelete, "document.deleted audit entry")
+}
+
+// "all" is a search TERM on /documents (a document labelled "all invoices"
+// must be findable); only the id/type/year filters treat it as the legacy
+// "no filter" sentinel.
+func (s *DocumentsSuite) TestSearchAllIsATerm() {
+	tenant := s.InsertTenant("doc-search-all", "Doc Search All").String()
+	var page struct {
+		Pagination struct {
+			Total int `json:"total"`
+		} `json:"pagination"`
+	}
+	r := s.As(tenant).GET(s.T(), "/documents?search=all")
+	r.AssertStatus(s.T(), http.StatusOK)
+	s.Require().NoError(json.Unmarshal(r.Bytes(), &page))
+	s.Require().Equal(0, page.Pagination.Total, "an empty tenant has no document containing 'all'")
 }
