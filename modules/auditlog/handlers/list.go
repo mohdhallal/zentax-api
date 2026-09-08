@@ -41,7 +41,8 @@ func (h *ListAuditLogHandler) DefineSchema() types.SchemaDefinition {
 }
 
 // DefineSortColumns declares no sortable keys: the trail has one order
-// (occurred_at DESC, seq DESC) so pages are stable and chronological.
+// (seq DESC — the per-tenant ledger order, assigned under the same lock as
+// occurred_at, so it is chronological too) so pages are stable.
 func (h *ListAuditLogHandler) DefineSortColumns() map[string]string {
 	return map[string]string{}
 }

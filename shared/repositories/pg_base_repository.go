@@ -11,6 +11,15 @@ import (
 	sharedtypes "github.com/mohamadhallal/zentax-api/shared/types"
 )
 
+// NullFilterValue is the sentinel a nullable filter column accepts to select
+// rows whose column IS NULL (`financialYear=none` keeps project workflows,
+// which carry no financial year, inside a year scope).
+const NullFilterValue = "none"
+
+// defaultTieBreaker is the unique column List orders by last when a module
+// declares none: every generic table has a uuid primary key named id.
+const defaultTieBreaker = "id"
+
 type SQLConfig struct {
 	GetById        string
 	Create         string
@@ -24,6 +33,19 @@ type SQLConfig struct {
 	// newest first). Leave false for columns whose natural order is ascending:
 	// due_date (earliest deadline first) and order_index (step order).
 	DefaultOrderDesc bool
+	// TieBreaker is the unique column List ALWAYS appends as the last ORDER BY
+	// clause, in the direction of the primary (first) sort clause — `due_date
+	// ASC, id ASC`, `created_at DESC, id DESC` — so offset pages are
+	// deterministic where ties are densest (one instance per template per
+	// period shares a due date; every row of one start shares created_at) and
+	// one btree can serve the whole order. Empty means "id". A caller's sort
+	// that already names the column is left alone.
+	TieBreaker string
+	// NullableFilters names the filter columns for which NullFilterValue
+	// ("none") selects rows whose column IS NULL: `col IS NULL` when it is the
+	// only value, `(col = ANY($n) OR col IS NULL)` when it accompanies others.
+	// Undeclared columns treat "none" as an ordinary value.
+	NullableFilters map[string]bool
 }
 
 type BaseRepo[T any, ID comparable] struct {
@@ -46,50 +68,15 @@ func (r *BaseRepo[T, ID]) Delete(ctx context.Context, id ID) (bool, error) {
 func (r *BaseRepo[T, ID]) List(ctx context.Context, args sharedtypes.ListArgs) ([]T, error) {
 	var sb strings.Builder
 	sb.WriteString(r.SQL.ListBase)
-	paramIdx := 1
-	var params []any
+	params := r.writeWhere(&sb, args.Filters)
 
-	for _, f := range args.Filters {
-		if !r.SQL.AllowedColumns[f.Column] {
-			continue
-		}
-		if paramIdx == 1 {
-			sb.WriteString(" WHERE ")
-		} else {
-			sb.WriteString(" AND ")
-		}
-		sb.WriteString(f.Column)
-		sb.WriteString(" = $")
-		sb.WriteString(strconv.Itoa(paramIdx))
-		params = append(params, f.Value)
-		paramIdx++
-	}
-
-	var orderClauses []string
-	for _, sf := range args.Sort {
-		if !r.SQL.AllowedColumns[sf.Column] {
-			continue
-		}
-		dir := "ASC"
-		if sf.Desc {
-			dir = "DESC"
-		}
-		orderClauses = append(orderClauses, sf.Column+" "+dir)
-	}
-	if len(orderClauses) == 0 {
-		dir := "ASC"
-		if r.SQL.DefaultOrderDesc {
-			dir = "DESC"
-		}
-		orderClauses = []string{r.SQL.DefaultOrderBy + " " + dir}
-	}
 	sb.WriteString(" ORDER BY ")
-	sb.WriteString(strings.Join(orderClauses, ", "))
+	sb.WriteString(strings.Join(r.orderClauses(args.Sort), ", "))
 
 	sb.WriteString(" LIMIT $")
-	sb.WriteString(strconv.Itoa(paramIdx))
+	sb.WriteString(strconv.Itoa(len(params) + 1))
 	sb.WriteString(" OFFSET $")
-	sb.WriteString(strconv.Itoa(paramIdx + 1))
+	sb.WriteString(strconv.Itoa(len(params) + 2))
 	params = append(params, args.Limit, args.Offset)
 
 	var results []T
@@ -103,24 +90,7 @@ func (r *BaseRepo[T, ID]) List(ctx context.Context, args sharedtypes.ListArgs) (
 func (r *BaseRepo[T, ID]) GetTotal(ctx context.Context, filters []sharedtypes.Filter) (int, error) {
 	var sb strings.Builder
 	sb.WriteString(r.SQL.Count)
-	paramIdx := 1
-	var params []any
-
-	for _, f := range filters {
-		if !r.SQL.AllowedColumns[f.Column] {
-			continue
-		}
-		if paramIdx == 1 {
-			sb.WriteString(" WHERE ")
-		} else {
-			sb.WriteString(" AND ")
-		}
-		sb.WriteString(f.Column)
-		sb.WriteString(" = $")
-		sb.WriteString(strconv.Itoa(paramIdx))
-		params = append(params, f.Value)
-		paramIdx++
-	}
+	params := r.writeWhere(&sb, filters)
 
 	var total int
 	err := r.DB.GetContext(ctx, &total, sb.String(), params...)
@@ -128,6 +98,116 @@ func (r *BaseRepo[T, ID]) GetTotal(ctx context.Context, filters []sharedtypes.Fi
 		return 0, err
 	}
 	return total, nil
+}
+
+// writeWhere appends the WHERE clause the filters describe (nothing when no
+// allowed filter is set) and returns the positional parameters it consumed, in
+// order. List and GetTotal share it so a page and its total always agree.
+func (r *BaseRepo[T, ID]) writeWhere(sb *strings.Builder, filters []sharedtypes.Filter) []any {
+	var params []any
+	clauses := 0
+	for _, f := range filters {
+		if !r.SQL.AllowedColumns[f.Column] {
+			continue
+		}
+		pred, values := r.predicate(f, len(params)+1)
+		if clauses == 0 {
+			sb.WriteString(" WHERE ")
+		} else {
+			sb.WriteString(" AND ")
+		}
+		sb.WriteString(pred)
+		params = append(params, values...)
+		clauses++
+	}
+	return params
+}
+
+// predicate renders one filter as SQL starting at placeholder $paramIdx and
+// returns the parameters it binds (none for a pure IS NULL). A []string value
+// is a multi-value filter (`col = ANY($n)`); on a nullable column the "none"
+// sentinel — alone or among the values, single or multi — selects NULL rows.
+func (r *BaseRepo[T, ID]) predicate(f sharedtypes.Filter, paramIdx int) (string, []any) {
+	placeholder := "$" + strconv.Itoa(paramIdx)
+	nullable := r.SQL.NullableFilters[f.Column]
+
+	switch v := f.Value.(type) {
+	case []string:
+		values, wantNull := splitNullSentinel(v, nullable)
+		switch {
+		case wantNull && len(values) == 0:
+			return f.Column + " IS NULL", nil
+		case wantNull:
+			return "(" + f.Column + " = ANY(" + placeholder + ") OR " + f.Column + " IS NULL)", []any{values}
+		default:
+			return f.Column + " = ANY(" + placeholder + ")", []any{values}
+		}
+	case string:
+		if nullable && v == NullFilterValue {
+			return f.Column + " IS NULL", nil
+		}
+	}
+	return f.Column + " = " + placeholder, []any{f.Value}
+}
+
+// splitNullSentinel removes the "none" sentinel from a nullable column's values
+// and reports whether it was present. On a non-nullable column the slice is
+// returned unchanged (a copy either way, so the caller's args are never
+// mutated).
+func splitNullSentinel(values []string, nullable bool) ([]string, bool) {
+	out := make([]string, 0, len(values))
+	wantNull := false
+	for _, v := range values {
+		if nullable && v == NullFilterValue {
+			wantNull = true
+			continue
+		}
+		out = append(out, v)
+	}
+	return out, wantNull
+}
+
+// orderClauses renders the ORDER BY list: the caller's allowed sort fields (or
+// the module default), then the tie-breaker in the primary clause's direction
+// unless a clause already names it.
+func (r *BaseRepo[T, ID]) orderClauses(sort []sharedtypes.SortField) []string {
+	tie := r.SQL.TieBreaker
+	if tie == "" {
+		tie = defaultTieBreaker
+	}
+
+	var clauses []string
+	primaryDir := ""
+	tieNamed := false
+	for _, sf := range sort {
+		if !r.SQL.AllowedColumns[sf.Column] {
+			continue
+		}
+		dir := direction(sf.Desc)
+		if primaryDir == "" {
+			primaryDir = dir
+		}
+		if sf.Column == tie {
+			tieNamed = true
+		}
+		clauses = append(clauses, sf.Column+" "+dir)
+	}
+	if len(clauses) == 0 {
+		primaryDir = direction(r.SQL.DefaultOrderDesc)
+		tieNamed = r.SQL.DefaultOrderBy == tie
+		clauses = []string{r.SQL.DefaultOrderBy + " " + primaryDir}
+	}
+	if !tieNamed {
+		clauses = append(clauses, tie+" "+primaryDir)
+	}
+	return clauses
+}
+
+func direction(desc bool) string {
+	if desc {
+		return "DESC"
+	}
+	return "ASC"
 }
 
 func (r *BaseRepo[T, ID]) QueryRow(ctx context.Context, query string, args ...any) (*T, error) {

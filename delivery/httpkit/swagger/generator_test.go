@@ -51,6 +51,40 @@ func TestGenerateIncludesDTOExamples(t *testing.T) {
 	assertExample(t, paramsByName["sort"].Example, "createdAt")
 }
 
+// A repeatable query parameter is an array in the spec, so its example must be
+// an array too (OpenAPI 3.0.3: an example SHOULD match the schema; a bare
+// string on an array schema trips spec linters).
+func TestGenerateArrayParamExampleIsAnArray(t *testing.T) {
+	type requestQuery struct {
+		Status []string `json:"status" validate:"omitempty,dive,oneof=draft active" example:"active"`
+	}
+	spec := Generate([]routing.RouteMeta{
+		{
+			FullPath:   "/things",
+			Definition: types.RouteDefinition{Method: http.MethodGet, Path: "/things"},
+			Schema:     &types.SchemaDefinition{Query: requestQuery{}},
+		},
+	}, types.ModeExternal, Config{Title: "Test API"})
+	op := spec.Paths["/things"]["get"]
+	if op == nil {
+		t.Fatal("expected GET /things operation")
+	}
+	for _, param := range op.Parameters {
+		if param.Name != "status" {
+			continue
+		}
+		if param.Schema.Type != "array" {
+			t.Fatalf("status schema type = %q, want array", param.Schema.Type)
+		}
+		got, ok := param.Example.([]string)
+		if !ok || len(got) != 1 || got[0] != "active" {
+			t.Fatalf("status example = %#v, want []string{\"active\"}", param.Example)
+		}
+		return
+	}
+	t.Fatal("status parameter not generated")
+}
+
 func TestGenerateExternalSecurityIsSessionOrBearer(t *testing.T) {
 	spec := Generate([]routing.RouteMeta{
 		{

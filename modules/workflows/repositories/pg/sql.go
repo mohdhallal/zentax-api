@@ -21,7 +21,10 @@ var sqlConfig = baserepo.SQLConfig{
 	},
 	DefaultOrderBy:   "created_at",
 	DefaultOrderDesc: true, // newest first
-	GetById:          `SELECT ` + workflowColumns + ` FROM workflows WHERE id = $1 LIMIT 1`,
+	// financial_year is NULL on project workflows: `financialYear=none` keeps
+	// them inside a fiscal-year scope (baserepo.NullFilterValue).
+	NullableFilters: map[string]bool{"financial_year": true},
+	GetById:         `SELECT ` + workflowColumns + ` FROM workflows WHERE id = $1 LIMIT 1`,
 	// tenant_id defaults from the GUC; selected_periods/due_date_rule/status default in DDL.
 	Create: `
 		INSERT INTO workflows (

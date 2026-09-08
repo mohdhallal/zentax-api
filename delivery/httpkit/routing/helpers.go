@@ -86,13 +86,23 @@ func extractPagination(query any, sortColMap map[string]string) *sharedtypes.Lis
 		}
 
 		if col := field.Tag.Get("filter"); col != "" {
-			if fieldVal.Kind() == reflect.Ptr {
+			switch fieldVal.Kind() {
+			case reflect.Ptr:
 				if fieldVal.IsNil() {
 					continue
 				}
 				fieldVal = fieldVal.Elem()
-			} else if fieldVal.IsZero() {
-				continue
+			case reflect.Slice:
+				// A []string bound from repeated query params (?status=a&status=b)
+				// travels as ONE multi-value filter whose value is the slice; the
+				// repository renders it as `col = ANY($n)`. Nothing bound → no filter.
+				if fieldVal.Len() == 0 {
+					continue
+				}
+			default:
+				if fieldVal.IsZero() {
+					continue
+				}
 			}
 			args.Filters = append(args.Filters, sharedtypes.Filter{Column: col, Value: fieldVal.Interface()})
 		}

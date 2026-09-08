@@ -47,7 +47,7 @@ type ListArgs struct {
 	Offset       int
 }
 
-// Reader is the read-side port. Sorted occurred_at DESC, seq DESC. Every query
+// Reader is the read-side port. Sorted seq DESC (ledger order, chronological by construction). Every query
 // runs on the request transaction, so RLS confines it to the session tenant.
 type Reader interface {
 	List(ctx context.Context, args ListArgs) ([]Entry, int, error)

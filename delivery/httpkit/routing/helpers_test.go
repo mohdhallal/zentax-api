@@ -183,7 +183,7 @@ func TestWriteResponse_WithPagination_IncludesPaginationField(t *testing.T) {
 		Status: http.StatusOK,
 		Data:   []string{"a", "b"},
 		Pagination: &types.Pagination{
-			Total: 100, Limit: 10, Offset: 0,
+			Total: 100, Limit: 10, Offset: 0, HasMore: true,
 		},
 	})
 
@@ -192,7 +192,39 @@ func TestWriteResponse_WithPagination_IncludesPaginationField(t *testing.T) {
 	require.Contains(t, body, "pagination")
 	pg, ok := body["pagination"].(map[string]any)
 	require.True(t, ok)
-	assert.Equal(t, float64(100), pg["total"])
+	assert.Equal(t, map[string]any{
+		"total": float64(100), "limit": float64(10), "offset": float64(0), "hasMore": true,
+	}, pg, "the envelope carries exactly total/limit/offset/hasMore")
+}
+
+func TestWriteResponse_EnvelopeViaWithPagination_DerivesHasMore(t *testing.T) {
+	t.Parallel()
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", http.NoBody)
+
+	// The handlers' idiom: httpkit.Ok(rows).WithPagination(...) — the last page.
+	resp := (&types.HttpResponse{Status: http.StatusOK, Data: []string{"y", "z"}}).
+		WithPagination(types.Pagination{Total: 12, Limit: 5, Offset: 10})
+	writeResponse(w, r, resp)
+
+	var body struct {
+		Status     bool     `json:"status"`
+		Data       []string `json:"data"`
+		Pagination struct {
+			Total   int  `json:"total"`
+			Limit   int  `json:"limit"`
+			Offset  int  `json:"offset"`
+			HasMore bool `json:"hasMore"`
+		} `json:"pagination"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.True(t, body.Status)
+	assert.Equal(t, []string{"y", "z"}, body.Data)
+	assert.Equal(t, 12, body.Pagination.Total)
+	assert.Equal(t, 5, body.Pagination.Limit)
+	assert.Equal(t, 10, body.Pagination.Offset)
+	assert.False(t, body.Pagination.HasMore)
 }
 
 func TestWriteResponse_CustomHeaders_Set(t *testing.T) {
@@ -241,6 +273,78 @@ type paginationQuery struct {
 	Status *string  `json:"status" filter:"status"`
 	Name   string   `json:"name"   filter:"name"`
 	Sort   []string `json:"sort"`
+}
+
+// multiValueQuery mirrors the workflows list query: repeated query params bind
+// into []string fields that carry a filter tag.
+type multiValueQuery struct {
+	Limit         int      `json:"limit"`
+	Status        []string `json:"status"        filter:"status"`
+	FinancialYear []string `json:"financialYear" filter:"financial_year"`
+	EntityID      *string  `json:"entityId"      filter:"entity_id"`
+	Sort          []string `json:"sort"`
+}
+
+func TestExtractPagination_SliceFilter_PassedThroughAsMultiValue(t *testing.T) {
+	t.Parallel()
+
+	entity := "e-1"
+	q := &multiValueQuery{
+		Limit:         25,
+		Status:        []string{"active", "draft"},
+		FinancialYear: []string{"2026", "none"},
+		EntityID:      &entity,
+		Sort:          []string{"createdAt:desc"},
+	}
+	result := extractPagination(q, map[string]string{"createdAt": "created_at"})
+
+	require.Len(t, result.Filters, 3)
+	assert.Equal(t, sharedtypes.Filter{Column: "status", Value: []string{"active", "draft"}}, result.Filters[0])
+	assert.Equal(t, sharedtypes.Filter{Column: "financial_year", Value: []string{"2026", "none"}}, result.Filters[1])
+	assert.Equal(t, sharedtypes.Filter{Column: "entity_id", Value: "e-1"}, result.Filters[2])
+	// The sort slice carries no filter tag and is never mistaken for one.
+	require.Len(t, result.Sort, 1)
+	assert.Equal(t, "created_at", result.Sort[0].Column)
+}
+
+func TestExtractPagination_SliceFilter_SingleValueStillASlice(t *testing.T) {
+	t.Parallel()
+
+	q := &multiValueQuery{Status: []string{"active"}}
+	result := extractPagination(q, nil)
+	require.Len(t, result.Filters, 1)
+	assert.Equal(t, []string{"active"}, result.Filters[0].Value)
+}
+
+func TestExtractPagination_SliceFilter_NilOrEmpty_Skipped(t *testing.T) {
+	t.Parallel()
+
+	assert.Empty(t, extractPagination(&multiValueQuery{Limit: 10}, nil).Filters)
+	assert.Empty(t, extractPagination(&multiValueQuery{Limit: 10, Status: []string{}}, nil).Filters)
+}
+
+func TestValidateQuery_RepeatedParams_BindIntoSliceFilter(t *testing.T) {
+	t.Parallel()
+
+	// End to end through the query binder: ?status=active&status=draft lands in
+	// the []string field, and a single value is a one-element slice.
+	type query struct {
+		Status []string `json:"status" filter:"status" validate:"omitempty,dive,oneof=draft active"`
+	}
+	validated, err := validateQuery(map[string][]string{"status": {"active", " draft "}}, query{})
+	require.NoError(t, err)
+	args := extractPagination(validated, nil)
+	require.Len(t, args.Filters, 1)
+	assert.Equal(t, []string{"active", "draft"}, args.Filters[0].Value)
+
+	validated, err = validateQuery(map[string][]string{"status": {"active"}}, query{})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"active"}, extractPagination(validated, nil).Filters[0].Value)
+
+	// dive validates each element: one bad value rejects the request.
+	_, err = validateQuery(map[string][]string{"status": {"active", "bogus"}}, query{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must be one of")
 }
 
 func TestExtractPagination_LimitOffset(t *testing.T) {

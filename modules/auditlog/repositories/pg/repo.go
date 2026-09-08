@@ -50,12 +50,16 @@ WHERE ($1::uuid IS NULL OR rw.id = $1::uuid)
   AND ($5::date IS NULL OR a.occurred_at >= ($5::date)::timestamp AT TIME ZONE 'UTC')
   AND ($6::date IS NULL OR a.occurred_at < ($6::date + 1)::timestamp AT TIME ZONE 'UTC')`
 
+// Newest first by seq alone: platform/audit.Record assigns seq and occurred_at
+// inside the same per-tenant advisory lock (held to commit), so the two orders
+// are identical by construction and seq — the chain's own order, unique per
+// tenant — is the deterministic key the (tenant_id, seq DESC) index serves.
 const auditSelect = `
 SELECT a.event_id, a.seq, a.action, a.resource_type, a.resource_id, a.actor_id,
        u.name AS actor_name, a.occurred_at, a.request_id, a.details,
        rw.id AS workflow_id, w.name AS workflow_name, a.hash` +
 	auditFrom + `
-ORDER BY a.occurred_at DESC, a.seq DESC
+ORDER BY a.seq DESC
 LIMIT $7 OFFSET $8`
 
 const auditCount = `SELECT COUNT(*)::int` + auditFrom

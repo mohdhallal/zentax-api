@@ -39,11 +39,17 @@ type WorkflowIdParams struct {
 	ID string `json:"id" validate:"required,uuid" example:"6ba7b810-9dad-11d1-80b4-00c04fd430c8"`
 }
 
+// ListWorkflowsQuery pages and filters the workflow list. status and
+// financialYear are repeatable (?status=active&status=draft is "ongoing";
+// ?financialYear=2026&financialYear=none is one fiscal year plus the project
+// workflows, which carry no year — `none` selects a NULL financial_year);
+// each repeated value is validated on its own (dive).
 type ListWorkflowsQuery struct {
 	Limit            int      `json:"limit"            default:"20" validate:"min=1,max=100" example:"20"`
 	Offset           int      `json:"offset"           default:"0"  validate:"min=0" example:"0"`
 	Sort             []string `json:"sort"             validate:"omitempty,dive,oneof=createdAt:asc createdAt:desc name:asc name:desc" example:"createdAt:desc"`
 	WorkflowCategory *string  `json:"workflowCategory" filter:"workflow_category" validate:"omitempty,oneof=recurring project" example:"recurring"`
-	Status           *string  `json:"status"           filter:"status" validate:"omitempty,oneof=draft active completed archived" example:"active"`
+	Status           []string `json:"status"           filter:"status" validate:"omitempty,dive,oneof=draft active completed archived" example:"active"`
+	FinancialYear    []string `json:"financialYear"    filter:"financial_year" validate:"omitempty,dive,min=1,max=9" example:"2025"`
 	EntityID         *string  `json:"entityId"         filter:"entity_id" validate:"omitempty,uuid"`
 }

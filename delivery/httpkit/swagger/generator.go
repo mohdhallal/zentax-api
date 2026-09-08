@@ -300,7 +300,8 @@ func errorResponse(description string) Response {
 
 // envelopeSchemas are the shared response envelopes every endpoint uses. The
 // `data` payload is deliberately untyped at this stage — typed response DTOs
-// land with the client-generation pass.
+// land with the client-generation pass. The pagination block mirrors
+// types.Pagination field for field (total, limit, offset, hasMore).
 func envelopeSchemas() map[string]Schema {
 	intSchema := Schema{Type: schemaTypeInteger}
 	return map[string]Schema{
@@ -321,8 +322,9 @@ func envelopeSchemas() map[string]Schema {
 					Type: schemaTypeObject,
 					Properties: map[string]Schema{
 						"total": intSchema, "limit": intSchema, "offset": intSchema,
+						"hasMore": {Type: schemaTypeBoolean, Example: true},
 					},
-					Required: []string{"total", "limit", "offset"},
+					Required: []string{"total", "limit", "offset", "hasMore"},
 				},
 			},
 			Required: []string{"status", "data", "pagination"},
@@ -436,7 +438,8 @@ func structToParams(v any, in string) []Parameter {
 				Schema:   Schema{Type: "array", Items: &itemSchema},
 			}
 			if ex := field.Tag.Get("example"); ex != "" {
-				p.Example = ex
+				// The example must match the schema: one element of the array.
+				p.Example = []string{ex}
 			}
 			params = append(params, p)
 			continue
