@@ -321,3 +321,144 @@ func TestList_NoneOnNonNullableColumn_IsAnOrdinaryValue(t *testing.T) {
 	assert.Equal(t, "SELECT COUNT(*)::int AS total FROM workflows WHERE status = $1", got.Query)
 	assert.Equal(t, []any{"none"}, got.Args)
 }
+
+// --- free-text search ---
+
+func entityConfig() SQLConfig {
+	return SQLConfig{
+		ListBase:         "SELECT id FROM entities",
+		Count:            "SELECT COUNT(*)::int AS total FROM entities",
+		AllowedColumns:   map[string]bool{"created_at": true, "name": true, "status": true},
+		DefaultOrderBy:   "created_at",
+		DefaultOrderDesc: true,
+		SearchColumns:    []string{"name", "legal_name"},
+	}
+}
+
+func search(term string) sharedtypes.Filter {
+	return sharedtypes.Filter{Column: sharedtypes.SearchFilter, Value: term}
+}
+
+func TestSearch_OneBindSharedByEveryColumn_InListAndTotal(t *testing.T) {
+	t.Parallel()
+
+	repo, db := newRepo(entityConfig())
+	got := list(t, repo, db, sharedtypes.ListArgs{Limit: 50, Offset: 100, Filters: []sharedtypes.Filter{search("acme")}})
+	assert.Equal(t,
+		`SELECT id FROM entities WHERE (name ILIKE $1 ESCAPE '\' OR legal_name ILIKE $1 ESCAPE '\')`+
+			" ORDER BY created_at DESC, id DESC LIMIT $2 OFFSET $3",
+		got.Query)
+	assert.Equal(t, []any{"%acme%", 50, 100}, got.Args)
+
+	// The total carries the SAME predicate and bind, so a searched page and
+	// its total agree.
+	got = total(t, repo, db, []sharedtypes.Filter{search("acme")})
+	assert.Equal(t,
+		`SELECT COUNT(*)::int AS total FROM entities WHERE (name ILIKE $1 ESCAPE '\' OR legal_name ILIKE $1 ESCAPE '\')`,
+		got.Query)
+	assert.Equal(t, []any{"%acme%"}, got.Args)
+}
+
+func TestSearch_MetacharactersMatchedLiterally(t *testing.T) {
+	t.Parallel()
+
+	repo, db := newRepo(entityConfig())
+	cases := map[string]string{
+		"100%":               `%100\%%`,
+		"Under_score":        `%Under\_score%`,
+		`O'Brien \ Partners`: `%O'Brien \\ Partners%`,
+		"Müller & Söhne":     "%Müller & Söhne%",
+	}
+	for term, bind := range cases {
+		got := total(t, repo, db, []sharedtypes.Filter{search(term)})
+		assert.Equal(t, []any{bind}, got.Args, "term %q", term)
+		assert.Contains(t, got.Query, `ILIKE $1 ESCAPE '\'`)
+	}
+}
+
+func TestSearch_BlankTerm_NoPredicateNoPlaceholder(t *testing.T) {
+	t.Parallel()
+
+	repo, db := newRepo(entityConfig())
+	got := list(t, repo, db, sharedtypes.ListArgs{
+		Limit: 5, Filters: []sharedtypes.Filter{search("   "), {Column: "status", Value: "active"}},
+	})
+	assert.Equal(t, "SELECT id FROM entities WHERE status = $1 ORDER BY created_at DESC, id DESC LIMIT $2 OFFSET $3", got.Query)
+	assert.Equal(t, []any{"active", 5, 0}, got.Args)
+
+	got = total(t, repo, db, []sharedtypes.Filter{search("")})
+	assert.Equal(t, "SELECT COUNT(*)::int AS total FROM entities", got.Query)
+	assert.Empty(t, got.Args)
+}
+
+func TestSearch_NoSearchColumns_FilterIgnored(t *testing.T) {
+	t.Parallel()
+
+	// taskConfig declares no SearchColumns: the term is dropped and consumes
+	// no placeholder, so the following filter still binds as $1.
+	repo, db := newRepo(taskConfig())
+	got := list(t, repo, db, sharedtypes.ListArgs{
+		Limit: 5, Filters: []sharedtypes.Filter{search("vat"), {Column: "status", Value: "blocked"}},
+	})
+	assert.Equal(t, "SELECT id FROM task_instances WHERE status = $1 ORDER BY due_date ASC, id ASC LIMIT $2 OFFSET $3", got.Query)
+	assert.Equal(t, []any{"blocked", 5, 0}, got.Args)
+}
+
+func TestSearch_IsNeverASortColumn(t *testing.T) {
+	t.Parallel()
+
+	repo, db := newRepo(entityConfig())
+	got := list(t, repo, db, sharedtypes.ListArgs{
+		Limit: 5, Sort: []sharedtypes.SortField{{Column: sharedtypes.SearchFilter}},
+	})
+	assert.Equal(t, "SELECT id FROM entities ORDER BY created_at DESC, id DESC LIMIT $1 OFFSET $2", got.Query)
+}
+
+// joinedWorkflowConfig mirrors the workflows repository: a LEFT-JOINed select
+// with alias-qualified columns everywhere the base repo renders SQL, and a
+// count over workflows alone under the same alias so one WHERE serves both.
+func joinedWorkflowConfig() SQLConfig {
+	return SQLConfig{
+		ListBase: "SELECT w.id, e.name AS entity_name FROM workflows w" +
+			" LEFT JOIN entities e ON e.id = w.entity_id",
+		Count: "SELECT COUNT(*)::int AS total FROM workflows w",
+		AllowedColumns: map[string]bool{
+			"w.created_at": true, "w.name": true, "w.status": true, "w.financial_year": true, "w.entity_id": true,
+		},
+		DefaultOrderBy:   "w.created_at",
+		DefaultOrderDesc: true,
+		TieBreaker:       "w.id",
+		NullableFilters:  map[string]bool{"w.financial_year": true},
+		SearchColumns:    []string{"w.name"},
+	}
+}
+
+func TestSearch_QualifiedColumns_WithMultiValueFilters(t *testing.T) {
+	t.Parallel()
+
+	repo, db := newRepo(joinedWorkflowConfig())
+	filters := []sharedtypes.Filter{
+		{Column: "w.status", Value: []string{"active", "draft"}},
+		{Column: "w.financial_year", Value: []string{"2026", "none"}},
+		search("vat"),
+		{Column: "status", Value: "smuggled"}, // unqualified: not an allowed column, dropped
+	}
+	got := list(t, repo, db, sharedtypes.ListArgs{
+		Limit: 25, Filters: filters, Sort: []sharedtypes.SortField{{Column: "w.name"}},
+	})
+	assert.Equal(t,
+		"SELECT w.id, e.name AS entity_name FROM workflows w LEFT JOIN entities e ON e.id = w.entity_id"+
+			" WHERE w.status = ANY($1) AND (w.financial_year = ANY($2) OR w.financial_year IS NULL)"+
+			` AND (w.name ILIKE $3 ESCAPE '\')`+
+			" ORDER BY w.name ASC, w.id ASC LIMIT $4 OFFSET $5",
+		got.Query)
+	assert.Equal(t, []any{[]string{"active", "draft"}, []string{"2026"}, "%vat%", 25, 0}, got.Args)
+
+	got = total(t, repo, db, filters)
+	assert.Equal(t,
+		"SELECT COUNT(*)::int AS total FROM workflows w"+
+			" WHERE w.status = ANY($1) AND (w.financial_year = ANY($2) OR w.financial_year IS NULL)"+
+			` AND (w.name ILIKE $3 ESCAPE '\')`,
+		got.Query)
+	assert.Equal(t, []any{[]string{"active", "draft"}, []string{"2026"}, "%vat%"}, got.Args)
+}

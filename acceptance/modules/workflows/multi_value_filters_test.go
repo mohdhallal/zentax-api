@@ -173,3 +173,26 @@ func (s *WorkflowsSuite) TestMultiValueStatusAndFinancialYearFilters() {
 	s.Require().Equal([]string{"Other tenant project"}, otherScope.Names)
 	s.Require().Equal(1, otherScope.Pg.Total)
 }
+
+// Year filters are lenient everywhere: a blank or the legacy "all" is "no
+// filter" on /workflows too, matching the reports feed, task-summary,
+// workflow-stats and documents — so a select's "All years" value can be sent
+// verbatim and never produces an empty page or a 400.
+func (s *WorkflowsSuite) TestFinancialYearBlankAndAllMeanNoFilter() {
+	tenant := s.InsertTenant("fy-lenient", "FY Lenient").String()
+	total := func(query string) int {
+		var page struct {
+			Pagination struct {
+				Total int `json:"total"`
+			} `json:"pagination"`
+		}
+		r := s.As(tenant).GET(s.T(), "/workflows?limit=1"+query)
+		r.AssertStatus(s.T(), http.StatusOK)
+		s.Require().NoError(json.Unmarshal(r.Bytes(), &page))
+		return page.Pagination.Total
+	}
+	all := total("")
+	s.Require().Equal(all, total("&financialYear=all"), "financialYear=all must not filter")
+	s.Require().Equal(all, total("&financialYear="), "a blank financialYear must not filter")
+	s.Require().Equal(all, total("&financialYear=&financialYear=all"), "blank and all together must not filter")
+}

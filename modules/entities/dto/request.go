@@ -38,12 +38,16 @@ type EntityIdParams struct {
 	ID string `json:"id" validate:"required,uuid" example:"6ba7b810-9dad-11d1-80b4-00c04fd430c8"`
 }
 
+// ListEntitiesQuery pages and filters the entity list. search is a literal,
+// case-insensitive substring of name or legalName (% _ \ match themselves);
+// blank means no search, and the total counts the same predicate as the page.
 type ListEntitiesQuery struct {
 	Limit   int      `json:"limit"   default:"20" validate:"min=1,max=100" example:"20"`
 	Offset  int      `json:"offset"  default:"0"  validate:"min=0" example:"0"`
 	Sort    []string `json:"sort"    validate:"omitempty,dive,oneof=createdAt:asc createdAt:desc name:asc name:desc" example:"createdAt:desc"`
 	Country *string  `json:"country" filter:"country" validate:"omitempty,max=100" example:"Germany"`
 	Status  *string  `json:"status"  filter:"status"  validate:"omitempty,oneof=active inactive archived" example:"active"`
+	Search  string   `json:"search"  validate:"omitempty,max=200" example:"Acme"`
 }
 
 // PeriodsQuery selects the period list of GET /entities/{id}/periods:

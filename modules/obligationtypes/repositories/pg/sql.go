@@ -17,7 +17,9 @@ var sqlConfig = baserepo.SQLConfig{
 	},
 	DefaultOrderBy:   "created_at",
 	DefaultOrderDesc: true, // newest first
-	GetById:          `SELECT ` + obligationTypeColumns + ` FROM obligation_types WHERE id = $1 LIMIT 1`,
+	// `search` matches the name or the code (ILIKE, escaped).
+	SearchColumns: []string{"name", "code"},
+	GetById:       `SELECT ` + obligationTypeColumns + ` FROM obligation_types WHERE id = $1 LIMIT 1`,
 	// tenant_id defaults from the app.tenant_id GUC; status/created_at default in DDL.
 	Create: `
 		INSERT INTO obligation_types (name, code, category, template, description)

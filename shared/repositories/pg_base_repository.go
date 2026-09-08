@@ -46,6 +46,14 @@ type SQLConfig struct {
 	// only value, `(col = ANY($n) OR col IS NULL)` when it accompanies others.
 	// Undeclared columns treat "none" as an ordinary value.
 	NullableFilters map[string]bool
+	// SearchColumns are the columns the free-text search filter
+	// (sharedtypes.SearchFilter) matches as a literal, case-insensitive
+	// substring: `(c1 ILIKE $n ESCAPE '\' OR c2 ILIKE $n ESCAPE '\')`, ONE bind
+	// (`%` + EscapeLike(term) + `%`) shared by every column. Names may be
+	// alias-qualified (w.name) when ListBase joins. List and GetTotal both
+	// append the predicate, so a searched page and its total agree. Empty means
+	// the repository has no search: the filter is ignored.
+	SearchColumns []string
 }
 
 type BaseRepo[T any, ID comparable] struct {
@@ -107,10 +115,21 @@ func (r *BaseRepo[T, ID]) writeWhere(sb *strings.Builder, filters []sharedtypes.
 	var params []any
 	clauses := 0
 	for _, f := range filters {
-		if !r.SQL.AllowedColumns[f.Column] {
+		var (
+			pred   string
+			values []any
+		)
+		switch {
+		case f.Column == sharedtypes.SearchFilter:
+			pred, values = r.searchPredicate(f, len(params)+1)
+			if pred == "" {
+				continue
+			}
+		case !r.SQL.AllowedColumns[f.Column]:
 			continue
+		default:
+			pred, values = r.predicate(f, len(params)+1)
 		}
-		pred, values := r.predicate(f, len(params)+1)
 		if clauses == 0 {
 			sb.WriteString(" WHERE ")
 		} else {
@@ -148,6 +167,24 @@ func (r *BaseRepo[T, ID]) predicate(f sharedtypes.Filter, paramIdx int) (string,
 		}
 	}
 	return f.Column + " = " + placeholder, []any{f.Value}
+}
+
+// searchPredicate renders the free-text search filter over SearchColumns as
+// one OR-group bound to a single placeholder — empty (no predicate, no
+// parameter) when the term is blank or the repository declares no search
+// columns. The metacharacters are escaped so the term is matched literally.
+func (r *BaseRepo[T, ID]) searchPredicate(f sharedtypes.Filter, paramIdx int) (string, []any) {
+	term, _ := f.Value.(string)
+	term = strings.TrimSpace(term)
+	if term == "" || len(r.SQL.SearchColumns) == 0 {
+		return "", nil
+	}
+	placeholder := "$" + strconv.Itoa(paramIdx)
+	parts := make([]string, 0, len(r.SQL.SearchColumns))
+	for _, col := range r.SQL.SearchColumns {
+		parts = append(parts, col+" ILIKE "+placeholder+` ESCAPE '\'`)
+	}
+	return "(" + strings.Join(parts, " OR ") + ")", []any{"%" + EscapeLike(term) + "%"}
 }
 
 // splitNullSentinel removes the "none" sentinel from a nullable column's values

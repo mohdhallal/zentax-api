@@ -93,8 +93,11 @@ type ListMembersArgs struct {
 	TenantID string
 	Kind     string // "" = all
 	Status   string // "" = all
-	Limit    int
-	Offset   int
+	// Search is a trimmed free-text term matched as a literal, case-insensitive
+	// substring of name or email; "" = no search. Page and total share it.
+	Search string
+	Limit  int
+	Offset int
 }
 
 type CreateMemberInput struct {

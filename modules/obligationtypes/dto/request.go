@@ -21,6 +21,10 @@ type ObligationTypeIdParams struct {
 	ID string `json:"id" validate:"required,uuid" example:"6ba7b810-9dad-11d1-80b4-00c04fd430c8"`
 }
 
+// ListObligationTypesQuery pages and filters the obligation-type list. search
+// is a literal, case-insensitive substring of name or code (% _ \ match
+// themselves); blank means no search, and the total counts the same predicate
+// as the page.
 type ListObligationTypesQuery struct {
 	Limit    int      `json:"limit"    default:"20" validate:"min=1,max=100" example:"20"`
 	Offset   int      `json:"offset"   default:"0"  validate:"min=0" example:"0"`
@@ -28,4 +32,5 @@ type ListObligationTypesQuery struct {
 	Template *string  `json:"template" filter:"template" validate:"omitempty,oneof=VAT CIT TP WHT Custom" example:"VAT"`
 	Category *string  `json:"category" filter:"category" validate:"omitempty,oneof=predefined custom" example:"custom"`
 	Status   *string  `json:"status"   filter:"status"   validate:"omitempty,oneof=active inactive" example:"active"`
+	Search   string   `json:"search"   validate:"omitempty,max=200" example:"VAT"`
 }

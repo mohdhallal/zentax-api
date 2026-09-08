@@ -51,7 +51,7 @@ func (h *ListMembersHandler) Execute(
 	if q.Status != nil {
 		status = *q.Status
 	}
-	members, total, err := h.usecases.ListMembers(r.Context(), kind, status, q.Limit, q.Offset)
+	members, total, err := h.usecases.ListMembers(r.Context(), kind, status, q.Search, q.Limit, q.Offset)
 	if err != nil {
 		return nil, err
 	}

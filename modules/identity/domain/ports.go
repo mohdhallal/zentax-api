@@ -136,7 +136,7 @@ type InviteTokenRepository interface {
 // step. Mutations are gated by member:manage, reads by member:read, at the
 // route layer.
 type MemberUseCases interface {
-	ListMembers(ctx context.Context, kind, status string, limit, offset int) ([]Member, int, error)
+	ListMembers(ctx context.Context, kind, status, search string, limit, offset int) ([]Member, int, error)
 	GetMember(ctx context.Context, id string) (*Member, error)
 	Invite(ctx context.Context, input CreateMemberInput) (*InviteResult, error)
 	ReissueInvite(ctx context.Context, memberID string) (*InviteResult, error)

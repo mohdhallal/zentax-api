@@ -414,6 +414,33 @@ func TestExtractPagination_NonStruct_ReturnsEmpty(t *testing.T) {
 	assert.Equal(t, &sharedtypes.ListArgs{}, result)
 }
 
+// searchQuery mirrors the entities / workflows / obligation-types list
+// queries: a plain string tagged json:"search" with NO filter tag.
+type searchQuery struct {
+	Limit  int     `json:"limit"`
+	Status *string `json:"status" filter:"status"`
+	Search string  `json:"search"`
+}
+
+func TestExtractPagination_SearchTag_TrimmedIntoSearchFilter(t *testing.T) {
+	t.Parallel()
+
+	status := "active"
+	q := &searchQuery{Limit: 10, Status: &status, Search: "  Müller & Söhne 100%  "}
+	result := extractPagination(q, nil)
+
+	require.Len(t, result.Filters, 2)
+	assert.Equal(t, sharedtypes.Filter{Column: "status", Value: "active"}, result.Filters[0])
+	assert.Equal(t, sharedtypes.Filter{Column: sharedtypes.SearchFilter, Value: "Müller & Söhne 100%"}, result.Filters[1])
+}
+
+func TestExtractPagination_SearchTag_BlankIsNoFilter(t *testing.T) {
+	t.Parallel()
+
+	assert.Empty(t, extractPagination(&searchQuery{Limit: 10}, nil).Filters)
+	assert.Empty(t, extractPagination(&searchQuery{Limit: 10, Search: "   "}, nil).Filters)
+}
+
 // --- parseSortFields ---
 
 func TestParseSortFields_Desc_Default(t *testing.T) {

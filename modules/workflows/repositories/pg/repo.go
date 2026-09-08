@@ -36,7 +36,7 @@ func (r *WorkflowRepo) Create(ctx context.Context, input domain.CreateWorkflowIn
 		}
 		return nil, err
 	}
-	return wf, nil
+	return r.withNames(ctx, wf)
 }
 
 func (r *WorkflowRepo) Update(ctx context.Context, id domain.WorkflowID, input domain.UpdateWorkflowInput) (*domain.Workflow, error) {
@@ -52,5 +52,23 @@ func (r *WorkflowRepo) Update(ctx context.Context, id domain.WorkflowID, input d
 		}
 		return nil, err
 	}
-	return wf, nil
+	return r.withNames(ctx, wf)
+}
+
+// withNames re-reads a just-written row through the joined read projection so
+// a create/update response carries entityName / obligationTypeName exactly as
+// the list and GetById do (RETURNING cannot join). One primary-key lookup on
+// the same transaction; a nil row (not found) is passed through unchanged.
+func (r *WorkflowRepo) withNames(ctx context.Context, wf *domain.Workflow) (*domain.Workflow, error) {
+	if wf == nil {
+		return nil, nil //nolint:nilnil // nil,nil means not found
+	}
+	read, err := r.GetById(ctx, wf.ID)
+	if err != nil {
+		return nil, err
+	}
+	if read == nil {
+		return wf, nil
+	}
+	return read, nil
 }

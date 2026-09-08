@@ -42,11 +42,16 @@ type TokenIdParams struct {
 
 // --- members (tenant directory, invites, roles) ---
 
+// ListMembersQuery pages and filters the tenant directory. search is a literal,
+// case-insensitive substring of the member's name or email (% _ \ match
+// themselves); blank means no search, and the total counts the same predicate
+// as the page.
 type ListMembersQuery struct {
 	Limit  int     `json:"limit"  default:"100" validate:"min=1,max=500" example:"100"`
 	Offset int     `json:"offset" default:"0"   validate:"min=0" example:"0"`
 	Kind   *string `json:"kind"   validate:"omitempty,oneof=human service" example:"human"`
 	Status *string `json:"status" validate:"omitempty,oneof=active invited disabled" example:"active"`
+	Search string  `json:"search" validate:"omitempty,max=200" example:"jane"`
 }
 
 type CreateMemberBody struct {

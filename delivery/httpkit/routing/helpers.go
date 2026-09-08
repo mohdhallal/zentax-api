@@ -83,6 +83,15 @@ func extractPagination(query any, sortColMap map[string]string) *sharedtypes.Lis
 			if fieldVal.Kind() == reflect.Slice {
 				args.Sort = parseSortFields(fieldVal, sortColMap)
 			}
+		case sharedtypes.SearchFilter:
+			// The free-text search rides the filter list (never a filter tag: it
+			// is not a column) so it reaches GetTotal as well as List — a page and
+			// its total must agree. Trimmed here; blank is "no search".
+			if fieldVal.Kind() == reflect.String {
+				if term := strings.TrimSpace(fieldVal.String()); term != "" {
+					args.Filters = append(args.Filters, sharedtypes.Filter{Column: sharedtypes.SearchFilter, Value: term})
+				}
+			}
 		}
 
 		if col := field.Tag.Get("filter"); col != "" {

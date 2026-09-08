@@ -4,27 +4,47 @@ import baserepo "github.com/mohamadhallal/zentax-api/shared/repositories"
 
 // workflowColumns is the domain projection — WITHOUT tenant_id (RLS infra).
 // selected_periods (JSONB) and due_date_rule (JSONB) scan into the domain
-// Periods / DueDateRule Scanner/Valuer types.
+// Periods / DueDateRule Scanner/Valuer types. RETURNING clauses use this bare
+// form; reads use workflowReadColumns (alias-qualified + the joined names).
 const workflowColumns = `id, name, description, workflow_category, project_type, financial_year, ` +
 	`periodicity, selected_periods, entity_id, obligation_type_id, due_date_rule, start_date, end_date, ` +
 	`tasks_sequential, status, created_at, updated_at, created_by, updated_by`
 
+// workflowReadColumns is the read projection: every workflow column qualified
+// by the `w` alias plus the referenced entity's and obligation type's names.
+const workflowReadColumns = `w.id, w.name, w.description, w.workflow_category, w.project_type, w.financial_year, ` +
+	`w.periodicity, w.selected_periods, w.entity_id, w.obligation_type_id, w.due_date_rule, w.start_date, w.end_date, ` +
+	`w.tasks_sequential, w.status, w.created_at, w.updated_at, w.created_by, w.updated_by, ` +
+	`e.name AS entity_name, ot.name AS obligation_type_name`
+
+// workflowReadFrom LEFT JOINs the two referenced tables so list rows carry the
+// names without an N+1 lookup. entities and obligation_types are RLS-scoped
+// like workflows, so a name can only ever come from the same tenant. Every
+// column the base repository renders (filters, sort, tie-breaker, search) is
+// `w.`-qualified so `status` / `name` are unambiguous across the join.
+const workflowReadFrom = ` FROM workflows w` +
+	` LEFT JOIN entities e ON e.id = w.entity_id` +
+	` LEFT JOIN obligation_types ot ON ot.id = w.obligation_type_id`
+
 var sqlConfig = baserepo.SQLConfig{
 	AllowedColumns: map[string]bool{
-		"created_at":         true,
-		"name":               true,
-		"workflow_category":  true,
-		"status":             true,
-		"entity_id":          true,
-		"obligation_type_id": true,
-		"financial_year":     true,
+		"w.created_at":         true,
+		"w.name":               true,
+		"w.workflow_category":  true,
+		"w.status":             true,
+		"w.entity_id":          true,
+		"w.obligation_type_id": true,
+		"w.financial_year":     true,
 	},
-	DefaultOrderBy:   "created_at",
+	DefaultOrderBy:   "w.created_at",
 	DefaultOrderDesc: true, // newest first
+	TieBreaker:       "w.id",
 	// financial_year is NULL on project workflows: `financialYear=none` keeps
 	// them inside a fiscal-year scope (baserepo.NullFilterValue).
-	NullableFilters: map[string]bool{"financial_year": true},
-	GetById:         `SELECT ` + workflowColumns + ` FROM workflows WHERE id = $1 LIMIT 1`,
+	NullableFilters: map[string]bool{"w.financial_year": true},
+	// `search` matches the workflow name only (ILIKE, escaped).
+	SearchColumns: []string{"w.name"},
+	GetById:       `SELECT ` + workflowReadColumns + workflowReadFrom + ` WHERE w.id = $1 LIMIT 1`,
 	// tenant_id defaults from the GUC; selected_periods/due_date_rule/status default in DDL.
 	Create: `
 		INSERT INTO workflows (
@@ -53,7 +73,9 @@ var sqlConfig = baserepo.SQLConfig{
 		    updated_at = NOW()
 		WHERE id = $1
 		RETURNING ` + workflowColumns,
-	Delete:   `DELETE FROM workflows WHERE id = $1`,
-	Count:    `SELECT COUNT(*)::int AS total FROM workflows`,
-	ListBase: `SELECT ` + workflowColumns + ` FROM workflows`,
+	Delete: `DELETE FROM workflows WHERE id = $1`,
+	// The count stays over workflows alone under the same alias, so the WHERE
+	// the base repository appends to both statements binds identically.
+	Count:    `SELECT COUNT(*)::int AS total FROM workflows w`,
+	ListBase: `SELECT ` + workflowReadColumns + workflowReadFrom,
 }

@@ -32,7 +32,7 @@ func (uc *UseCases) requireTenant(ctx context.Context) (string, error) {
 	return tenantID, nil
 }
 
-func (uc *UseCases) ListMembers(ctx context.Context, kind, status string, limit, offset int) ([]domain.Member, int, error) {
+func (uc *UseCases) ListMembers(ctx context.Context, kind, status, search string, limit, offset int) ([]domain.Member, int, error) {
 	tenantID, err := uc.requireTenant(ctx)
 	if err != nil {
 		return nil, 0, err
@@ -47,7 +47,7 @@ func (uc *UseCases) ListMembers(ctx context.Context, kind, status string, limit,
 		offset = 0
 	}
 	return uc.members.List(ctx, domain.ListMembersArgs{
-		TenantID: tenantID, Kind: kind, Status: status, Limit: limit, Offset: offset,
+		TenantID: tenantID, Kind: kind, Status: status, Search: strings.TrimSpace(search), Limit: limit, Offset: offset,
 	})
 }
 

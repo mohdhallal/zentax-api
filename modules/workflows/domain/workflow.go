@@ -27,6 +27,11 @@ type Workflow struct {
 	UpdatedBy        *string     `json:"updatedBy" db:"updated_by"`
 	CreatedAt        time.Time   `json:"createdAt"        db:"created_at"`
 	UpdatedAt        time.Time   `json:"updatedAt"        db:"updated_at"`
+	// EntityName / ObligationTypeName are the referenced rows' display names,
+	// resolved at read time through RLS-scoped LEFT JOINs (nil when the
+	// reference is nil — a project workflow). Read-model fields: never written.
+	EntityName         *string `json:"entityName"         db:"entity_name"`
+	ObligationTypeName *string `json:"obligationTypeName" db:"obligation_type_name"`
 }
 
 type CreateWorkflowInput struct {

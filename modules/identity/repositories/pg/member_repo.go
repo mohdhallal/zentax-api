@@ -4,11 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strconv"
+	"strings"
 
 	"github.com/mohamadhallal/zentax-api/app"
 	apperrors "github.com/mohamadhallal/zentax-api/errors"
 	"github.com/mohamadhallal/zentax-api/modules/identity/domain"
 	"github.com/mohamadhallal/zentax-api/platform/database"
+	baserepo "github.com/mohamadhallal/zentax-api/shared/repositories"
 )
 
 var _ domain.MemberRepository = (*MemberRepo)(nil)
@@ -27,32 +30,44 @@ func NewMemberRepo(db database.ExecerPg) *MemberRepo {
 
 const memberColumns = `id, tenant_id, email, name, kind, status, totp_enabled, password_hash IS NOT NULL AS has_password, created_at`
 
-// memberFilter is shared by the page and the count so both agree. NULL-tolerant
-// filters let one statement serve every combination.
-const memberFilter = ` FROM users
-WHERE tenant_id = $1
-  AND ($2::varchar IS NULL OR kind = $2::varchar)
-  AND ($3::varchar IS NULL OR status = $3::varchar)`
-
-func (r *MemberRepo) List(ctx context.Context, args domain.ListMembersArgs) ([]domain.Member, int, error) {
-	var kind, status *string
+// memberWhere renders the directory predicate the page and the count share, so
+// both always agree. The tenant is always bound ($1); kind, status and the
+// search term are appended only when set (never `$n IS NULL OR col = $n` — a
+// set filter is a real predicate, an unset one is absent). The search is one
+// bind matched literally (ILIKE, escaped) against name and email.
+func memberWhere(args domain.ListMembersArgs) (string, []any) {
+	where := ` FROM users WHERE tenant_id = $1`
+	params := []any{args.TenantID}
 	if args.Kind != "" {
-		kind = &args.Kind
+		params = append(params, args.Kind)
+		where += ` AND kind = $` + strconv.Itoa(len(params))
 	}
 	if args.Status != "" {
-		status = &args.Status
+		params = append(params, args.Status)
+		where += ` AND status = $` + strconv.Itoa(len(params))
 	}
+	if term := strings.TrimSpace(args.Search); term != "" {
+		params = append(params, "%"+baserepo.EscapeLike(term)+"%")
+		n := `$` + strconv.Itoa(len(params))
+		where += ` AND (name ILIKE ` + n + ` ESCAPE '\' OR email ILIKE ` + n + ` ESCAPE '\')`
+	}
+	return where, params
+}
+
+func (r *MemberRepo) List(ctx context.Context, args domain.ListMembersArgs) ([]domain.Member, int, error) {
+	where, params := memberWhere(args)
 
 	var members []domain.Member
+	pageParams := append(append([]any{}, params...), args.Limit, args.Offset)
 	if err := r.db.SelectContext(ctx, &members,
-		`SELECT `+memberColumns+memberFilter+` ORDER BY name, email, id LIMIT $4 OFFSET $5`,
-		args.TenantID, kind, status, args.Limit, args.Offset); err != nil {
+		`SELECT `+memberColumns+where+
+			` ORDER BY name, email, id LIMIT $`+strconv.Itoa(len(params)+1)+` OFFSET $`+strconv.Itoa(len(params)+2),
+		pageParams...); err != nil {
 		return nil, 0, err
 	}
 
 	var total int
-	if err := r.db.GetContext(ctx, &total,
-		`SELECT COUNT(*)::int`+memberFilter, args.TenantID, kind, status); err != nil {
+	if err := r.db.GetContext(ctx, &total, `SELECT COUNT(*)::int`+where, params...); err != nil {
 		return nil, 0, err
 	}
 
