@@ -656,6 +656,15 @@ http://localhost:3000` (add `--no-fail` to capture a table that misses).
 | | | entities (search not yet honoured — unfiltered first page) | 3.0 | 2.3 | 500 | PASS |
 | | | a VAT workflow's instances (108, 50/page) | 4.6 | 4.2 | 500 | PASS |
 | | | tax-financial by entity | 61.9 | 112.4 | 2000 | PASS |
+| 2026-09-09 | 3483ca1 (after inc 4+5: feed filters, search, named workflow rows) | task feed page 1 / page 200 (dueDate) | — | 37.9 / 63.6 | 500 | PASS |
+| | | task feed page 1 / page 200 (createdAt) | — | 119.7 / 134.8 | 500 | PASS |
+| | | `/reports/task-summary` | — | 44.2 | 500 | PASS |
+| | | `/reports/workflow-stats` | — | 43.3 | 500 | PASS |
+| | | compliance heatmap (FY 2026) | — | 50.8 | 2000 | PASS |
+| | | compliance status page 1 | — | 174.0 | 2000 | PASS |
+| | | `/entities?search=Mül` (**real search now** — total 1) | — | 2.9 | 500 | PASS |
+| | | a VAT workflow's instances | — | 4.3 | 500 | PASS |
+| | | tax-financial by entity | — | 72.1 | 2000 | PASS |
 
 What moved and why: migration `20260908000022` (tenant-prefixed `(tenant_id, due_date, order_index,
 id)` + the same columns on open rows). The deep task-feed page went from an index scan on the
