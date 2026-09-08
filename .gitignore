@@ -42,6 +42,9 @@ acceptance/test-output/
 # binary a bare `go build ./cmd/seed-demo/` drops here is ignored alongside it.
 /seed-demo-output.json
 /seed-demo
+# The scale fixture's generation record (`seed-demo scale --out` default):
+# scratch output of one local run, kept next to the fixture for verify --scale.
+/seed-demo-scale.json
 
 # infra/ (AWS CDK): sources are tracked, build output and deps are not
 infra/node_modules

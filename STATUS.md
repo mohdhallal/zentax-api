@@ -456,6 +456,38 @@ green on both the main module and `acceptance/`.
    Acceptance: full flow lists 6 events newest-first with `actorName` = the seeded user, workflow
    filter picks 4 (not the entity), type/id/action/date-window filters, paging totals, role gate, RLS.
 
+   **Task summary + shared task filters (2026-09-08, pagination increment 1):** `GET /reports/task-summary`
+   (`task:read`, not paginated) answers the dashboard / tasks-page tiles as ONE aggregate over
+   `task_instances ⋈ workflows` — `{today, total, completed, active, overdue, dueToday, dueThisWeek,
+   awaitingApproval, completionRate, byStatus{not_started, in_progress, in_review, pending_approval,
+   completed, blocked}}`, every key always present — so the numbers stay exact past any page cap
+   instead of being computed in the browser over the first 500 rows. `today` is the tenant's civil
+   date (ADR-0023 §6, the same `tenantToday` sub-select the compliance classification uses, hoisted by
+   the planner into InitPlans evaluated once per statement); `overdue` = open AND due < today,
+   `dueToday` = open AND due = today, `dueThisWeek` = open AND today < due ≤ the Saturday ending the
+   week (`sql_shared.go`: `tenantWeekEnd`, `dueOverdue`, `dueToday`, `dueThisWeek`, `statusRank`) — a
+   completed instance is never bucketed, `awaitingApproval` = `pending_approval`, `completionRate`
+   rounds like `workflow-stats` (`domain.roundedPercent`, 0 on an empty set). The summary and
+   `/reports/task-instances` share one filter set (`dto.TaskFilterQuery`): `workflowId`, `entityId`,
+   `assigneeId`, `financialYear` (repeatable; `none` = workflows with no financial year, i.e. project
+   workflows), `status` (stored values plus the pseudo-value **`open`** = not completed) and
+   `workflowCategory`; predicates are assembled dynamically for the filters that are set (never
+   `($n IS NULL OR col = $n)`, which pgx's statement cache would turn into a generic plan without the
+   index), the feed's exact total COUNTs over the base join without the display LEFT JOINs, and the
+   dashboard's priority list is `status=open&sort=dueDate:asc&limit=5`. Unit: predicates carry
+   `tenantToday` and never `CURRENT_DATE`, week end is `6 - EXTRACT(DOW …)`, the WHERE builder emits
+   only set filters, rounding 1/3 → 33 and 0/0 → 0, byStatus always six keys. Acceptance
+   (`TestTaskSummary`): three tenants in UTC / Pacific/Kiritimati / Pacific/Pago_Pago with due dates
+   pinned to yesterday / today / tomorrow / next week UTC plus a completed, a submitted, an in-progress
+   and a blocked instance — every tile and byStatus per zone with `today` = the tenant's civil date
+   (at least one zone flips against UTC at any hour), summary ⇔ feed consistency (`active` = the
+   `status=open` total, `overdue` = open rows due before `today`), every filter incl.
+   `financialYear=2025&financialYear=none`, `status=open`, viewer 200, anonymous 401, another tenant
+   at zeros with `today` set; `status=open` on the feed. Oracle: `seed-demo verify` gained
+   `checkTaskSummary` (today, eight counters, completionRate, byStatus incl. missing/unknown keys) —
+   403 checks per full run, 0 differences on acme / globex / initech against the API built from this
+   tree.
+
 9. **data-templates** (`modules/datatemplates`, 2026-09-04) — reusable typed field sets (the
    frontend's exact `DataField`: `id` 1..64 unique within the template, `name`, `fieldType`
    text|numeric|date|boolean|file, `mandatory`, `description?`, `numericValidation?` {min, max
@@ -600,6 +632,41 @@ Commits: `4cdcd4e` scaffold · `2851179` tenancy+entities · `d074780` obligatio
 `c52c25a` task-instances+generation · `b63852d` identity module · `e1c186b` wire auth (Increment A).
 
 ---
+
+## Performance — ADR-0021 rule 7 (measured)
+
+Budgets: p95 ≤ **500 ms** for dashboard/list reads, ≤ **2 s** for aggregate reports, at 10⁵
+instances per tenant. Fixture: the `scale` tenant (`seed-demo scale`, 48 entities × 5 obligation
+types × 8 fiscal years → 1,925 workflows, **97,152 instances**) next to the three demo tenants,
+in the compose `postgres:16-alpine`; `seed-demo bench` = 3 warm-ups + 30 sequential timed requests
+per target, client wall-clock on loopback, reference machine Apple M1 Max. A > 25 % p95 regression
+on an unchanged endpoint blocks review. Rerun: `go run ./cmd/seed-demo bench --api
+http://localhost:3000` (add `--no-fail` to capture a table that misses).
+
+| date | api | target | p95 baseline (ms) | p95 after inc 2 (ms) | budget | result |
+|---|---|---|---:|---:|---:|---|
+| 2026-09-08/09 | 4f2aded → cb4df2e | task feed page 1 (dueDate asc, 50/page) | 33.5 | 42.9 | 500 | PASS |
+| | | task feed **page 200** (dueDate asc, offset 9950) | 448.8 (max 508.9) | **67.5** | 500 | PASS |
+| | | task feed page 1 (createdAt asc) | 105.3 | 109.2 | 500 | PASS |
+| | | task feed page 200 (createdAt asc) | 112.2 | 129.3 | 500 | PASS |
+| | | `/reports/task-summary` | — (404, inc 1) | 63.6 | 500 | PASS |
+| | | `/reports/workflow-stats` (1,925 rows) | 99.3 | 75.7 | 500 | PASS |
+| | | compliance heatmap (FY 2026, period view) | 52.5 | 71.4 | 2000 | PASS |
+| | | compliance status page 1 (50/page, exact summary) | **4,159.3** | **220.9** | 2000 | FAIL → PASS |
+| | | entities (search not yet honoured — unfiltered first page) | 3.0 | 2.3 | 500 | PASS |
+| | | a VAT workflow's instances (108, 50/page) | 4.6 | 4.2 | 500 | PASS |
+| | | tax-financial by entity | 61.9 | 112.4 | 2000 | PASS |
+
+What moved and why: migration `20260908000022` (tenant-prefixed `(tenant_id, due_date, order_index,
+id)` + the same columns on open rows). The deep task-feed page went from an index scan on the
+tenant-less `(due_date)` that discarded other tenants' rows via the RLS filter to a range scan on the
+tenant's own index; the compliance-status statement, which classifies every instance of the tenant
+against `filing_deadline`/`due_date` inside a CTE, stopped scanning the partition. Measured index
+build at 100,000 rows: **134 ms** for the whole transaction (the lock window). `createdAt` sorts are
+unchanged (no `(tenant_id, created_at, id)` index — within budget, so not added, per the plan).
+Plan text (EXPLAIN ANALYZE, BUFFERS) for the deep page and the summary: `docs/testing/perf-2026-09-09.md`
+in the UI repo. Not measured yet: search (increment 5), the task feed's new filters (increment 4), a
+cell in AWS (the M1 is far faster than db.t4g.small — local PASS is necessary, not sufficient).
 
 ## What is missing / remaining
 

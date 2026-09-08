@@ -19,6 +19,18 @@ package main
 // tenant by natural key, so a database seeded by an earlier run verifies
 // without the seeder's key → id file. When that file IS on disk (--in,
 // defaulting to the path seed writes) it is cross-checked as well.
+//
+//	seed-demo verify --scale [--scale-config ./seed-demo-scale.json] --api …
+//
+// --scale verifies the scale fixture (seed/demo/scale) instead of the dataset:
+// the tenant is regenerated from the generation record `seed-demo scale`
+// wrote — never from the defaults, because the status distribution was drawn
+// for the record's asOf and a default-asOf regeneration on a later day
+// describes a different world — and the same check families run against the
+// scale tenant alone. What cannot run there (the dataset's static expectedAsOf
+// tables — a generated fixture declares none) is reported as SKIPPED, never
+// dropped silently. The run is long (~10⁵ instances, ~2,000 previews) and
+// prints its progress on stderr.
 
 import (
 	"context"
@@ -32,6 +44,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mohamadhallal/zentax-api/seed/demo/scale"
 	"github.com/mohamadhallal/zentax-api/seed/demo/spec"
 	"github.com/mohamadhallal/zentax-api/shared/apiclient"
 	"github.com/mohamadhallal/zentax-api/shared/dateonly"
@@ -63,6 +76,12 @@ type VerifyDeps struct {
 	// StrictStatic makes drift between the dataset's static expectedAsOf
 	// tables and the recomputed oracle a failure instead of INFO.
 	StrictStatic bool
+	// Scale verifies the scale fixture instead of the dataset (see the file
+	// comment). It does not combine with Only: the fixture is one tenant.
+	Scale bool
+	// ScaleConfig is the generation record `seed-demo scale` wrote; the
+	// fixture is recomputed from exactly its config.
+	ScaleConfig string
 
 	Stdout io.Writer
 	Stderr io.Writer
@@ -87,6 +106,15 @@ func verifyFlagSet(d *VerifyDeps) *flag.FlagSet {
 	fs.BoolVar(&d.JSON, "json", d.JSON, "print the machine-readable result")
 	fs.BoolVar(&d.StrictStatic, "strict-static", d.StrictStatic,
 		"fail on drift between the dataset's static expectedAsOf tables and the recomputed oracle")
+	fs.BoolVar(&d.Scale, "scale", d.Scale,
+		"verify the scale fixture (seed/demo/scale) instead of the dataset: recompute it from the\n"+
+			"\tgeneration record (--scale-config) and diff the scale tenant alone. Does not combine with --only;\n"+
+			"\t--spec and --in are not read")
+	// No backquotes in this usage string: the flag package would read them as
+	// the value's placeholder name.
+	fs.StringVar(&d.ScaleConfig, "scale-config", d.ScaleConfig,
+		"--scale: the generation record that seed-demo scale --out wrote (its config, asOf above all, is\n"+
+			"\twhat the fixture is recomputed from)")
 	return fs
 }
 
@@ -116,20 +144,38 @@ func runVerify(ctx context.Context, d VerifyDeps) error {
 		}
 		todayOverride = parsed
 	}
+	if d.Scale && strings.TrimSpace(d.Only) != "" {
+		return errors.New("--scale and --only do not combine: verify either the scale fixture or dataset tenants")
+	}
 
-	dataset, err := spec.LoadAndValidate(d.Spec)
-	if err != nil {
-		return err
+	// The world under test: the dataset, or the scale fixture regenerated from
+	// its record. In scale mode there is no seeder key → id file to cross-check
+	// (the record is cross-checked instead) and no static tables to compare.
+	var (
+		dataset  *spec.Spec
+		scaleRun *verifyScaleRun
+		idMap    *seedOutput
+		err      error
+	)
+	if d.Scale {
+		scaleRun, err = verifyLoadScale(d.ScaleConfig)
+		if err != nil {
+			return err
+		}
+		dataset = scaleRun.spec
+	} else {
+		if dataset, err = spec.LoadAndValidate(d.Spec); err != nil {
+			return err
+		}
+		if idMap, err = verifyReadIDMap(d.In); err != nil {
+			return err
+		}
 	}
 	world, err := buildOracleWorld(dataset, d.Now(), todayOverride)
 	if err != nil {
 		return fmt.Errorf("recompute the oracle: %w", err)
 	}
 	tenants, err := verifySelectTenants(world, d.Only)
-	if err != nil {
-		return err
-	}
-	idMap, err := verifyReadIDMap(d.In)
 	if err != nil {
 		return err
 	}
@@ -144,8 +190,22 @@ func runVerify(ctx context.Context, d VerifyDeps) error {
 
 	report := &verifyReport{StrictStatic: d.StrictStatic}
 	for _, tenant := range tenants {
-		if err := verifyTenant(ctx, report, client, dataset, tenant, idMap); err != nil {
+		// A long run (the scale fixture, or any tenant of its size) says where
+		// it is; a demo tenant is done before a line would help.
+		var progress *verifyProgress
+		if d.Scale || len(tenant.instances) >= verifyProgressThreshold {
+			progress = &verifyProgress{w: d.Stderr, tenant: tenant.spec.Key}
+		}
+		if err := verifyTenant(ctx, report, client, dataset, tenant, idMap, scaleRun, progress); err != nil {
 			return fmt.Errorf("tenant %s: %w", tenant.spec.Key, err)
+		}
+		if scaleRun != nil {
+			// A generated fixture declares no expectedAsOf tables: the oracle's
+			// recomputation is its only reference. Say so rather than run
+			// nothing.
+			report.check(tenant.spec.Key, "static-expectations", "").
+				skip("the scale fixture is generated, not declared: it has no static expectedAsOf tables to cross-check")
+			continue
 		}
 		verifyStaticTables(report, dataset, tenant.spec.Key, d.StrictStatic)
 	}
@@ -155,7 +215,12 @@ func runVerify(ctx context.Context, d VerifyDeps) error {
 			return err
 		}
 	} else {
-		fmt.Fprintf(d.Stdout, "verify: %s, spec %s\n", client.BaseURL(), d.Spec)
+		if scaleRun != nil {
+			fmt.Fprintf(d.Stdout, "verify --scale: %s, generation record %s\n", client.BaseURL(), scaleRun.path)
+			fmt.Fprintf(d.Stdout, "  %s\n", scaleRun.describe())
+		} else {
+			fmt.Fprintf(d.Stdout, "verify: %s, spec %s\n", client.BaseURL(), d.Spec)
+		}
 		if !todayOverride.IsZero() {
 			fmt.Fprintf(d.Stdout,
 				"WHAT-IF RUN: the oracle uses today=%s while the API answers on its own clock;\n"+
@@ -226,6 +291,9 @@ func (d *VerifyDeps) applyDefaults() {
 	if d.In == "" {
 		d.In = DefaultOutputPath
 	}
+	if d.ScaleConfig == "" {
+		d.ScaleConfig = DefaultScaleOutputPath
+	}
 	if d.Stdout == nil {
 		d.Stdout = os.Stdout
 	}
@@ -258,6 +326,113 @@ func verifyReadIDMap(path string) (*seedOutput, error) {
 }
 
 // ---------------------------------------------------------------------------
+// The scale fixture
+// ---------------------------------------------------------------------------
+
+// verifyScaleRun is a --scale run's world: the generation record, the config
+// restored from it, and the tenant regenerated from that config.
+type verifyScaleRun struct {
+	path   string
+	record scaleOutput
+	config scale.Config
+	spec   *spec.Spec
+}
+
+// verifyLoadScale reads the generation record and regenerates the fixture
+// from its config — the record's, not the defaults: the statuses were drawn
+// for the record's asOf, so any other asOf describes a different tenant.
+func verifyLoadScale(path string) (*verifyScaleRun, error) {
+	record, err := readScaleOutput(path)
+	if err != nil {
+		return nil, fmt.Errorf("--scale needs the generation record `seed-demo scale` wrote (--scale-config): %w", err)
+	}
+	cfg, err := scaleConfigFromOutput(record)
+	if err != nil {
+		return nil, err
+	}
+	generated, err := scale.Spec(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("regenerate the scale fixture from %s: %w", path, err)
+	}
+	return &verifyScaleRun{path: path, record: record, config: cfg, spec: generated}, nil
+}
+
+// describe renders the config the world was recomputed from.
+func (s *verifyScaleRun) describe() string {
+	c := s.config
+	return fmt.Sprintf("tenant %s (%q, %s), seed %d, %d entities, %d years, asOf %s — generated %s",
+		c.Slug, c.Name, c.Timezone, c.Seed, c.Entities, c.Years, c.AsOf, s.record.GeneratedAt)
+}
+
+// checkScaleRecord cross-checks the generation record against the live
+// tenant, the way checkKeyResolution cross-checks the seeder's key → id file
+// for the dataset: the ids `scale` reported and the counts it wrote must be
+// the tenant verify just read. A record for a different tenant (a re-run
+// with another slug, a stale file) is caught here rather than half-way
+// through the report checks.
+func (r *verifyRun) checkScaleRecord() {
+	if r.scale == nil {
+		return
+	}
+	c := r.check("scale-record", r.scale.path)
+	record := r.scale.record
+	c.equal("config.slug", "", r.tenant.spec.Slug, record.Config.Slug)
+	c.equal("config.timezone", "", r.tenant.spec.Timezone, record.Config.Timezone)
+	if record.TenantID != "" {
+		c.equal("tenantId", "", record.TenantID, r.client.identity.Tenant.ID)
+	}
+	if record.AdminID != "" {
+		c.equal("adminId", "", record.AdminID, r.client.identity.ID)
+	}
+	c.equal("counts.entities", "", record.Counts.Entities, len(r.ids.entities))
+	c.equal("counts.obligationTypes", "", record.Counts.ObligationTypes, len(r.ids.obligations))
+	c.equal("counts.workflows", "", record.Counts.Workflows, len(r.ids.workflows))
+	c.equal("counts.instances", "", record.Counts.Instances, len(r.instances))
+	// The regenerated spec must be the size the record says was written —
+	// otherwise the record and the generator have drifted apart.
+	c.equal("generated.workflows", "", record.Counts.Workflows, len(r.tenant.workflows))
+	c.equal("generated.instances", "", record.Counts.Instances, len(r.tenant.instances))
+}
+
+// ---------------------------------------------------------------------------
+// Progress
+// ---------------------------------------------------------------------------
+
+// verifyProgressThreshold is the tenant size (expected instances) from which
+// verify narrates its long loops — the instance walk, the per-workflow
+// previews, the per-entity period lists and the paged reports — so an
+// operator can tell a slow run from a stuck one.
+const verifyProgressThreshold = 5000
+
+// verifyProgressEvery is how many previews / period lists pass between two
+// progress lines.
+const verifyProgressEvery = 250
+
+// verifyProgress writes progress lines for one tenant. A nil *verifyProgress
+// is silent, so callers never test for it.
+type verifyProgress struct {
+	w      io.Writer
+	tenant string
+}
+
+func (p *verifyProgress) step(format string, args ...any) {
+	if p == nil || p.w == nil {
+		return
+	}
+	fmt.Fprintf(p.w, "  %s: %s\n", p.tenant, fmt.Sprintf(format, args...))
+}
+
+// every reports the i-th of n steps at the interval, and always the last.
+func (p *verifyProgress) every(what string, i, n int) {
+	if p == nil || n == 0 {
+		return
+	}
+	if i%verifyProgressEvery == 0 || i == n {
+		p.step("%s %d/%d", what, i, n)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // One tenant
 // ---------------------------------------------------------------------------
 
@@ -280,6 +455,11 @@ type verifyRun struct {
 
 	// stats caches GET /reports/workflow-stats (two checks read it).
 	stats map[string]verifyWorkflowStat
+
+	// scale is set on a --scale run (the record to cross-check); progress is
+	// where a long run narrates itself (nil = silent).
+	scale    *verifyScaleRun
+	progress *verifyProgress
 }
 
 // expectations is the dataset's static table for this tenant, if it declares
@@ -297,17 +477,19 @@ func (r *verifyRun) expectations() (spec.Expectations, bool) {
 func verifyTenant(
 	ctx context.Context, report *verifyReport, base *apiclient.Client,
 	loaded *spec.Spec, tenant *oracleTenant, idMap *seedOutput,
+	scaleRun *verifyScaleRun, progress *verifyProgress,
 ) error {
 	admin := tenant.spec.Admin
 	client, err := verifyLogin(ctx, base, admin.Email, admin.Password)
 	if err != nil {
 		return err
 	}
+	progress.step("signed in as %s; resolving ids", admin.Email)
 	ids, err := verifyResolveIDs(ctx, client, tenant)
 	if err != nil {
 		return err
 	}
-	instances, err := verifyInstances(ctx, client)
+	instances, err := verifyInstances(ctx, client, progress)
 	if err != nil {
 		return err
 	}
@@ -316,6 +498,7 @@ func verifyTenant(
 		ctx: ctx, report: report, spec: loaded, tenant: tenant,
 		client: client, ids: ids, instances: instances,
 		byLiveID: map[string]*oracleInstance{}, liveByRef: map[string]verifyInstanceRow{},
+		scale: scaleRun, progress: progress,
 	}
 
 	info := verifyTenantInfo{
@@ -333,6 +516,7 @@ func verifyTenant(
 	run.checkTenantRegistry()
 	run.checkInstances()
 	run.checkKeyResolution(idMap)
+	run.checkScaleRecord()
 	run.checkPreviews()
 	run.checkPeriods()
 	run.checkHeatmaps()
@@ -341,6 +525,7 @@ func verifyTenant(
 	run.checkExportRaw()
 	run.checkWorkflowStats()
 	run.checkDashboard()
+	run.checkTaskSummary()
 	run.checkProjectParticipation()
 	return nil
 }

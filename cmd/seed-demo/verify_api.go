@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"net/url"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/mohamadhallal/zentax-api/shared/apiclient"
@@ -358,10 +359,11 @@ func verifyListAll[T any](ctx context.Context, c *verifyClient, path string) ([]
 	}
 }
 
-// verifyInstances reads every enriched task instance of the tenant.
-func verifyInstances(ctx context.Context, c *verifyClient) ([]verifyInstanceRow, error) {
+// verifyInstances reads every enriched task instance of the tenant — at 10⁵
+// instances that is ~200 pages, so the walk narrates itself.
+func verifyInstances(ctx context.Context, c *verifyClient, progress *verifyProgress) ([]verifyInstanceRow, error) {
 	out := []verifyInstanceRow{}
-	for offset := 0; ; {
+	for offset, pageNo := 0, 0; ; pageNo++ {
 		var page []verifyInstanceRow
 		p, err := c.api.GetPaginated(ctx, verifyQuery("/reports/task-instances", map[string]string{
 			"limit":  fmt.Sprint(verifyInstancePageSize),
@@ -374,7 +376,48 @@ func verifyInstances(ctx context.Context, c *verifyClient) ([]verifyInstanceRow,
 		out = append(out, page...)
 		offset += len(page)
 		if len(page) == 0 || !p.Present || offset >= p.Total {
+			progress.step("task-instances: %d rows read", len(out))
 			return out, nil
+		}
+		if pageNo%25 == 0 {
+			progress.step("task-instances page %d/%d (%d/%d rows)",
+				pageNo+1, (p.Total+verifyInstancePageSize-1)/verifyInstancePageSize, offset, p.Total)
+		}
+	}
+}
+
+// verifyReportPages walks a report endpoint's rows to exhaustion at the
+// endpoints' page cap: page n is read at offset n × cap, and the walk stops
+// when a page comes back empty or the offset reaches the totalCount the page
+// reports. count returns one page's row count and its totalCount. The pages
+// come back in order; the first one's summary describes the whole set.
+//
+// A tenant under the cap (every demo tenant) makes exactly one request, as
+// before; the scale fixture's 96k compliance rows make twenty.
+func verifyReportPages[P any](
+	r *verifyRun, what, path string, params map[string]string, count func(*P) (rows, total int),
+) ([]*P, error) {
+	pages := []*P{}
+	for offset := 0; ; {
+		query := make(map[string]string, len(params)+2)
+		for k, v := range params {
+			query[k] = v
+		}
+		query["limit"] = strconv.Itoa(verifyReportLimit)
+		query["offset"] = strconv.Itoa(offset)
+		var page P
+		full := verifyQuery(path, query)
+		if err := r.client.api.GET(r.ctx, full, nil, &page); err != nil {
+			return nil, fmt.Errorf("GET %s: %w", full, err)
+		}
+		pages = append(pages, &page)
+		n, total := count(&page)
+		offset += n
+		if pageCount := (total + verifyReportLimit - 1) / verifyReportLimit; pageCount > 1 {
+			r.progress.step("%s page %d/%d", what, len(pages), pageCount)
+		}
+		if n == 0 || offset >= total {
+			return pages, nil
 		}
 	}
 }

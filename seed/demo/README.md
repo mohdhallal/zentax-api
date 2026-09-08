@@ -14,7 +14,8 @@ or a new developer's first afternoon at.
 |---|---|
 | Spec | `seed/demo/dataset.json` (~340 KB) |
 | Loader / validator | `seed/demo/spec/` |
-| Tool | `cmd/seed-demo/` — `seed`, `verify`, `reset` |
+| Tool | `cmd/seed-demo/` — `seed`, `verify`, `reset`, plus `scale` and `bench` for the scale fixture |
+| Scale fixture generator | `seed/demo/scale/` (see [The scale fixture](#the-scale-fixture)) |
 | Human narrative | `../../../zentax-ui/docs/testing/seed-dataset.md` |
 
 The dataset is the contract. `$schemaNotes` inside `dataset.json` documents every
@@ -205,9 +206,10 @@ participation to check.)
 
 Flags: `--json` (machine-readable), `--strict-static` (also fail when the
 dataset's own `expectedAsOf` tables disagree with the recomputation — normally
-reported as INFO, since the recomputation is the authority), `--only`, and
+reported as INFO, since the recomputation is the authority), `--only`,
 `--today YYYY-MM-DD`, a what-if that moves the *oracle's* today while the API
-answers on its own clock.
+answers on its own clock, and `--scale`, which verifies the scale fixture
+instead of the dataset (see [Verify](#verify-the-scale-fixture) below).
 
 `verify` resolves the dataset's keys from the **live tenant** by natural key
 (entity name, obligation-type code, workflow name), so it works on a database
@@ -296,9 +298,12 @@ passwords must never appear anywhere but a local stack.
 | `globex` | reviewer@globex.test | reviewer | `Globex-Reviewer-2026!` |
 | `initech` | admin@initech.test | tenant_admin | `Initech-Admin-2026!` |
 | `initech` | preparer@initech.test | preparer | `Initech-Preparer-2026!` |
+| `scale` | admin@scale.test | tenant_admin | `Scale-Admin-2026!` |
+| `scale` | `<role>N@scale.test` — manager1–2, reviewer1–2, preparer1–6, viewer1 | as named; preparer5 scoped to *Scale EMEA Holding B.V.*, preparer6 **disabled** | `Scale-Member-2026!` (one shared member password) |
 
 `disabled@acme-demo.test` cannot sign in — that is the point of it. The seeder
-creates the account, uses it, and disables it last.
+creates the account, uses it, and disables it last. The `scale` rows exist only
+after `seed-demo scale` (below).
 
 The UI is at <http://localhost:5001> and proxies `/api/*` to the Go API. Signing
 in there works with the same credentials:
@@ -312,6 +317,238 @@ curl -s -b /tmp/j 'http://localhost:5001/api/reports/compliance-heatmap?year=all
 
 Send **no** `Origin` header when calling the Go API directly — CSRF rejects a
 cross-origin one. `curl` omits it by default.
+
+---
+
+## The scale fixture
+
+The demo dataset proves the reports are *right*. It cannot prove they are
+*fast*, or that the lists page: 243 instances fit under every cap. ADR-0021
+rule 7 promises p95 ≤ 500 ms list reads at 10⁵ task instances, and rule 2 that
+the UI shows "N of M" — both need a tenant with years of history. The scale
+fixture is that tenant: **`scale` / Scale Group AG, Europe/Berlin, 97,152 task
+instances**, generated in memory by `seed/demo/scale` and bulk-written by
+`seed-demo scale`.
+
+```sh
+/tmp/seed-demo scale --yes --database-url "$APP_DSN"                                   # ~15 s locally
+/tmp/seed-demo reset --scale --yes --admin-dsn "$ADMIN_DSN" --database-url "$APP_DSN"  # remove it again
+```
+
+**`reset --scale` is slow and silent while it works: between 45 s and 4 min
+on the default fixture.** Deleting the tenant cascades through its 97,152 task
+instances (plus 11,165 task templates and 1,925 workflows) in one transaction,
+and nothing is printed until the delete returns. It has not hung — wait for it.
+
+`scale` takes the application DSN (the same RLS reasoning as `seed`), only
+writes to a local database (the `reset` guard), refuses a slug or an e-mail
+that already exists — it tells you to `reset --scale` — and needs `--yes`.
+`--dry-run` generates and prints the statistics without touching anything.
+Flags: `--seed` (default 1), `--entities` (48), `--years` (8), `--as-of`
+(today in the tenant's zone), `--slug` / `--name` / `--timezone`, `--out`
+(default `./seed-demo-scale.json`).
+
+That last file is the **generation record**: the exact `Config` the tenant was
+derived from, plus ids and counts. Keep it next to the fixture — the tenant is
+a pure function of that config, and a recomputation (`verify --scale`, which
+reads the record through `--scale-config`) must start from the same values,
+`asOf` above all: the statuses are drawn for the generation day, so
+regenerating on a later day with the default `--as-of` describes a different
+world.
+
+### Size
+
+| | Default | Rule |
+|---|---|---|
+| Entities | 48 | 1 holding → 3 regional sub-holdings → 44 operating companies across 12 countries; standard calendar; 42 close on 12-31, a cluster of 6 (UK / Japan) on 03-31 |
+| Users | 12 | admin, 2 managers, 2 reviewers, 6 preparers (one scoped to the EMEA subtree, one disabled), 1 viewer |
+| Obligation types | 5 | VAT (monthly, **9** templates), WHT (monthly, 5), ENV levy on the `Custom` template (monthly, 5), CIT (quarterly, 5), TP (annual, 5) |
+| Entity obligations | 240 | one per (entity, type), jurisdiction-dependent filing / payment rules; half the countries move weekend deadlines, half do not |
+| Workflows | 1,925 | entities × types × years = **1,920 started** (≈1 % `completed`, ≈1 % `archived`, the rest `active`) + 5 never-started drafts for the next fiscal year |
+| Task templates | 11,165 | |
+| Task instances | **97,152** | entities × years × 253 per entity-year (VAT 12 × 9 + WHT 12 × 5 + ENV 12 × 5 + CIT 4 × 5 + TP 1 × 5). A VAT workflow is 108 instances — past the 100-row list cap on purpose |
+
+The fiscal years end with the entity's year running at `--as-of`, so for the
+12-31 entities the default is FY2019–FY2026 and for the 03-31 cluster
+FY2020–FY2027. Three entity names exist to exercise search escaping and are
+spelled exactly: `Müller & Söhne 100% GmbH`, `Under_score Holdings Ltd`,
+`O'Brien \ Partners`.
+
+### Generated, not declared
+
+Nothing in the fixture is a number somebody typed. Everything — the tree, the
+rules, the state of every instance — is a pure function of the `Config`
+(seed, entities, years, asOf) through a seeded PRNG: the same seed produces a
+byte-identical `spec.Tenant`, and the tests pin that. The reason is size: a
+hand-written `expectedAsOf` block for 97,152 instances would be nobody's
+contract. **The only reference for what the API must return is a
+recomputation** — the same `spec.Tenant` handed to the verify oracle
+(`verify --scale`), which recomputes every report for the run day exactly as
+it does for the demo dataset.
+
+The state of each instance is drawn by its due-date band relative to `asOf`
+(the table in `seed/demo/scale/states.go`): far past mostly completed with one
+in five late, the last sixty days a mix of completed / in progress / pending
+approval / blocked, today and the next month mostly open, the far future
+untouched. Completions are dated in the tenant's zone and never after `asOf`.
+The offsets differ by jurisdiction, so something is due on every calendar day
+**from the generation day until 2027-02-06** for the default configuration —
+which is what keeps *overdue*, *due today*, *this week*, *awaiting approval*
+and *on_time / late / missed / not_due* all non-empty on any run day until
+then, not only on the generation day. 2027-02-07 is the first day with nothing
+due: by then the 42 entities closing on 12-31 have no period left in their
+current fiscal year (the last FY2026 deadline is the UK VAT filing 37 days
+after 31 December), and the six 03-31 entities alone do not cover every day.
+**Regenerate the fixture after 2027-02-06** (`reset --scale`, then `scale`
+again, which picks a new `--as-of` and a new current fiscal year).
+
+Dates come from the same engine the API's generator uses (`shared/deadline`
+through the entity calendar) with the oracle's rules; the oracle's planner is
+unexported in `cmd/seed-demo`, so the generator mirrors it and
+`TestScalePlanMatchesTheOracle` diffs the two plans instance by instance. The
+writer persists the oracle's own plan, so what `verify --scale` recomputes is,
+by construction, what was written.
+
+### Verify the scale fixture
+
+```sh
+/tmp/seed-demo verify --scale --api http://localhost:3000                                     # reads ./seed-demo-scale.json
+/tmp/seed-demo verify --scale --scale-config ./seed-demo-scale.json --api http://localhost:3000
+```
+
+`--scale` reads the generation record (`--scale-config`, default
+`./seed-demo-scale.json` — the `--out` of `scale`), regenerates the tenant from
+**the record's** config, and runs the same check families `verify` runs for
+the demo tenants against the `scale` tenant alone, signed in as
+`admin@scale.test`. It does not read `--spec` or `--in`, and it refuses
+`--only` (the fixture is one tenant: *"--scale and --only do not combine"*).
+`--today` and `--json` work as for the dataset.
+
+What differs from the dataset run, and is said rather than hidden:
+
+- **`static-expectations` is SKIPPED** — a generated fixture declares no
+  `expectedAsOf` tables; the recomputation is its only reference. The line
+  appears under `SKIPPED`, together with `project-participation` (the fixture
+  has no project workflow).
+- **`scale-record`** replaces the seeder-id-map cross-check: the record's
+  tenant id, admin id and counts must match the live tenant and the
+  regenerated spec, so a stale or foreign record is caught before the reports
+  are compared.
+- The row-level report checks (compliance-status, tax-financial, export-raw)
+  **walk every page** at the 5,000-row cap — twenty pages of compliance rows,
+  twenty of the tasks export — and the paging proof pages at the cap too
+  instead of at 100, so it makes twenty requests rather than a thousand.
+- Filters: without a dataset there are no declared filter keys, so the reports
+  run unfiltered (`viewMode=period` / `tax-type` for the heatmap, `all` for the
+  rest, every `groupBy` for tax-financial, all three export datasets).
+
+The run makes ~3,400 requests (195 pages of 500 task instances, 1,925 workflow
+previews, 1,157 entity period lists, 20 + 20 pages of compliance rows, 20 of
+the tasks export) — **one to two minutes** against the compose stack on the
+reference machine (65 s idle, 105 s with `bench` running alongside) — and
+**prints its progress on stderr**
+(`scale: workflow-preview 500/1925`, …) so a slow run is distinguishable from
+a stuck one. Do not run it across the tenant's midnight (22:00 UTC in summer
+for Europe/Berlin): the oracle reads today once at the start, the API on every
+request, and a run that straddles the day boundary differs on every due
+window. Expect, on success:
+
+```
+verify --scale: http://localhost:3000, generation record ./seed-demo-scale.json
+  tenant scale ("Scale Group AG", Europe/Berlin), seed 1, 48 entities, 8 years, asOf 2026-09-08 — generated 2026-09-08T19:20:15.137Z
+
+tenant scale    slug=scale      zone=Europe/Berlin      today=2026-09-08  instances: expected 97152, live 97152
+
+SKIPPED (2):
+  scale project-participation []: the tenant has no project workflow
+  scale static-expectations []: the scale fixture is generated, not declared: it has no static expectedAsOf tables to cross-check
+
+3105 checks, 3103 passed, 0 failed, 2 skipped — 0 differences
+```
+
+A difference here is one of the three kinds listed under
+[Changing the dataset](#changing-the-dataset) — an oracle (or generator) bug,
+a writer bug (`cmd/seed-demo/scale_write.go` did not persist what the plan
+says), or a product bug — and the line names the endpoint, the key and both
+values.
+
+### How it is written
+
+Unlike `seed`, `scale` does not drive the API — 97,152 `PUT`s would take an
+hour. It creates the tenant, its admin and the predefined data templates
+through `platform/seed` (as `seed` and `cmd/seed-admin` do), inserts the
+members with **one** argon2id hash computed once (every member shares the demo
+password — hashing is deliberately slow), and then, in **one transaction bound
+to the tenant** (`app.tenant_id` set, the escape-hatch pattern), inserts
+entities → grants → obligation types → entity obligations → workflows → task
+templates → task instances as `INSERT … SELECT FROM unnest(…)` over parallel
+arrays in batches of 5,000 rows. Ids are generated in Go, so no child waits on
+`RETURNING`; the parent tables are addressed, never a partition.
+`completed_at` / `submitted_at` / `approved_at` are set directly to the
+instants the demo seeder's escape hatch would have written, and `created_at`
+is back-dated to each workflow's fiscal-year start so `sort=createdAt` orders
+eight years of history the way a real tenant's would.
+
+### What it deliberately omits
+
+- **Documents** — none are uploaded; the documents list stays empty.
+- **API-driven writes** — no validation, authorization, SoD or approval rule
+  ran for these rows. The demo dataset is what proves those.
+- **Audit entries** — `audit_log` is append-only and hash-chained
+  (ADR-0007/0008), so the fixture's history simply has no trail. The scale
+  tenant's audit page is empty; that is correct, not a bug.
+- **Non-standard calendars, project workflows, bi-annual periodicity, MFA** —
+  the engine's unit tests and the demo dataset cover those.
+
+---
+
+## Bench
+
+`seed-demo bench` is the ADR-0021 rule 7 measurement. It signs in as the
+tenant's admin, resolves the ids it needs (the current fiscal year, one VAT
+workflow), and hits each target sequentially: `--warmup` requests discarded,
+`--n` requests timed on the client's wall clock (request sent → body fully
+read, no JSON decoding), then p50 / p95 / max against the target's p95 budget.
+
+```sh
+/tmp/seed-demo bench --api http://localhost:3000            # tenant scale, 3 warm-ups + 30 timed requests
+/tmp/seed-demo bench --tenant acme-demo --n 10 --json       # a demo tenant, machine-readable
+```
+
+Flags: `--api`, `--tenant` (slug, default `scale`), `--n` (30), `--warmup`
+(3), `--page-size` (50), `--deep-page` (200 → offset 9,950), `--json` (print
+the JSON report instead of the table), `--out F` (also write the JSON report
+to a file), `--no-fail` (exit 0 even on a miss), `--email` / `--password`
+(sign in as someone else; by default the scale admin or the dataset tenant's
+admin).
+
+| Target | Budget (p95) |
+|---|---|
+| Task feed page 1 and page 200, `sort=dueDate:asc` and `sort=createdAt:asc` (`/reports/task-instances`) | 500 ms |
+| `/reports/task-summary` | 500 ms |
+| `/reports/workflow-stats` | 500 ms |
+| `/entities?search=Mül&limit=20` | 500 ms |
+| One VAT workflow's instances (`/task-instances?workflowId=…&limit=50`) | 500 ms |
+| `/reports/compliance-heatmap?year=<current FY>&viewMode=period` | 2,000 ms |
+| `/reports/compliance-status?limit=50&offset=0` | 2,000 ms |
+| `/reports/tax-financial?groupBy=entity` | 2,000 ms |
+
+**Reading the table.** One row per target: `N` timed samples, `P50 MS` /
+`P95 MS` / `MAX MS`, the `BUDGET` and the `RESULT`. `PASS` is p95 ≤ budget,
+`FAIL` is a miss (p50 and max are context, not gates), `SKIP` means the route
+does not exist on this API build (`/reports/task-summary` lands in increment 1
+— a 404 there is expected until then), `ERROR` is any other failure. Notes
+under the table explain a caveat: in particular, the query validator silently
+drops parameters it does not model, so before increment 5 the entity search
+measures the *unfiltered* first page and the note says so (detected by
+comparing the search total with the unfiltered total). The exit status is
+non-zero on any `FAIL` or `ERROR` unless `--no-fail`.
+
+The first run on a fresh fixture is the **baseline** and is expected to miss;
+it documents the defect the pagination increments fix. Record it (STATUS.md,
+`docs/testing/perf-<date>.md`) — do not tune the fixture to pass. Numbers are
+only comparable on the same machine with the same stack; a > 25 % p95
+regression on an unchanged endpoint is the review trigger.
 
 ---
 

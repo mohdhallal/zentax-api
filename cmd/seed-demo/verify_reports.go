@@ -169,13 +169,22 @@ func (r *verifyRun) checkComplianceStatusFilter(key string) {
 		c.errf("%v", err)
 		return
 	}
-	params["limit"] = strconv.Itoa(verifyReportLimit)
 
-	var payload verifyCompliancePayload
-	path := verifyQuery("/reports/compliance-status", params)
-	if err := r.client.api.GET(r.ctx, path, nil, &payload); err != nil {
-		c.errf("GET %s: %v", path, err)
+	// The rows are walked to exhaustion (one page under the cap, twenty for
+	// the scale fixture); the first page's summary describes the whole set.
+	pages, err := verifyReportPages(r, "compliance-status ["+key+"]", "/reports/compliance-status", params,
+		func(p *verifyCompliancePayload) (int, int) { return len(p.Rows), p.TotalCount })
+	if err != nil {
+		c.errf("%v", err)
 		return
+	}
+	payload := pages[0]
+	gotRows := make([]verifyComplianceRow, 0, len(payload.Rows)*len(pages))
+	for i, page := range pages {
+		if i > 0 {
+			c.equal("totalCount@page="+strconv.Itoa(i+1), "", payload.TotalCount, page.TotalCount)
+		}
+		gotRows = append(gotRows, page.Rows...)
 	}
 
 	want := r.tenant.compliance(fk.oracleFilters())
@@ -190,14 +199,14 @@ func (r *verifyRun) checkComplianceStatusFilter(key string) {
 	status := fk.Params["status"]
 	rows := want.rowsWithClass(status)
 	c.equal("totalCount", "", len(rows), payload.TotalCount)
-	c.equal("rowsReturned", "", len(rows), len(payload.Rows))
+	c.equal("rowsReturned", "", len(rows), len(gotRows))
 
 	byInstance := make(map[*oracleInstance]*oracleComplianceRow, len(rows))
 	for _, row := range rows {
 		byInstance[row.Instance] = row
 	}
 	seen := map[*oracleInstance]bool{}
-	for _, got := range payload.Rows {
+	for _, got := range gotRows {
 		inst, ok := r.byLiveID[got.TaskInstanceID]
 		if !ok {
 			c.diff("row", got.Period+"/"+got.ObligationName, "a known task instance", got.TaskInstanceID)
@@ -235,10 +244,11 @@ func (r *verifyRun) checkComplianceStatusFilter(key string) {
 		}
 	}
 
-	// Row order: entity name, then obligation name, then period code.
+	// Row order: entity name, then obligation name, then period code — across
+	// page boundaries too.
 	order := r.check("compliance-status/order", key)
 	prev := ""
-	for _, got := range payload.Rows {
+	for _, got := range gotRows {
 		current := got.EntityName + "\x00" + got.ObligationName + "\x00" + got.Period
 		if prev != "" && current < prev {
 			order.diff("order", got.TaskInstanceID, "not before "+strings.ReplaceAll(prev, "\x00", " / "),
@@ -249,11 +259,21 @@ func (r *verifyRun) checkComplianceStatusFilter(key string) {
 	}
 }
 
+// verifyCompliancePagingSize is the page the paging proof walks at — small,
+// so a demo tenant makes several pages of it.
+const verifyCompliancePagingSize = 100
+
 // checkCompliancePaging walks the unfiltered set in pages: the union must be
-// the whole set, with no duplicates and a stable totalCount.
+// the whole set, with no duplicates and a stable totalCount. A tenant past
+// the endpoints' cap pages at the cap instead (twenty pages for the scale
+// fixture, not a thousand): still a paging proof, in a sensible time.
 func (r *verifyRun) checkCompliancePaging() {
-	c := r.check("compliance-status/paging", "limit=100")
 	want := r.tenant.compliance(oracleFilters{})
+	size := verifyCompliancePagingSize
+	if len(want.Rows) > verifyReportLimit {
+		size = verifyReportLimit
+	}
+	c := r.check("compliance-status/paging", "limit="+strconv.Itoa(size))
 	if len(want.Rows) == 0 {
 		c.skip("the tenant has no classified instance to page")
 		return
@@ -261,10 +281,13 @@ func (r *verifyRun) checkCompliancePaging() {
 
 	seen := map[string]bool{}
 	total := -1
-	for offset := 0; ; offset += 100 {
+	// The offset advances by the rows actually received, not by the size
+	// asked for: a page shorter than the limit anywhere but at the end would
+	// otherwise skip rows silently instead of being caught by rowsAcrossPages.
+	for offset, pageNo := 0, 1; ; pageNo++ {
 		var payload verifyCompliancePayload
 		path := verifyQuery("/reports/compliance-status", map[string]string{
-			"limit": "100", "offset": strconv.Itoa(offset),
+			"limit": strconv.Itoa(size), "offset": strconv.Itoa(offset),
 		})
 		if err := r.client.api.GET(r.ctx, path, nil, &payload); err != nil {
 			c.errf("GET %s: %v", path, err)
@@ -280,7 +303,11 @@ func (r *verifyRun) checkCompliancePaging() {
 			}
 			seen[row.TaskInstanceID] = true
 		}
-		if len(payload.Rows) == 0 || offset+len(payload.Rows) >= payload.TotalCount {
+		if pageCount := (payload.TotalCount + size - 1) / size; pageCount > 1 {
+			r.progress.step("compliance-status/paging page %d/%d", pageNo, pageCount)
+		}
+		offset += len(payload.Rows)
+		if len(payload.Rows) == 0 || offset >= payload.TotalCount {
 			break
 		}
 	}
@@ -312,13 +339,22 @@ func (r *verifyRun) checkTaxFinancialFilter(key, groupBy string) {
 		return
 	}
 	params["groupBy"] = groupBy
-	params["limit"] = strconv.Itoa(verifyReportLimit)
 
-	var payload verifyFinancialPayload
-	path := verifyQuery("/reports/tax-financial", params)
-	if err := r.client.api.GET(r.ctx, path, nil, &payload); err != nil {
-		c.errf("GET %s: %v", path, err)
+	// The roll-ups come from one aggregate over the whole set on every page;
+	// the detail rows are walked to exhaustion (9k on the scale fixture).
+	pages, err := verifyReportPages(r, "tax-financial ["+key+" groupBy="+groupBy+"]", "/reports/tax-financial", params,
+		func(p *verifyFinancialPayload) (int, int) { return len(p.Rows), p.TotalCount })
+	if err != nil {
+		c.errf("%v", err)
 		return
+	}
+	payload := pages[0]
+	gotRowPayloads := make([]verifyFinancialRow, 0, len(payload.Rows)*len(pages))
+	for i, page := range pages {
+		if i > 0 {
+			c.equal("totalCount@page="+strconv.Itoa(i+1), "", payload.TotalCount, page.TotalCount)
+		}
+		gotRowPayloads = append(gotRowPayloads, page.Rows...)
 	}
 
 	want := r.tenant.financial(fk.oracleFilters(), groupBy)
@@ -383,8 +419,8 @@ func (r *verifyRun) checkTaxFinancialFilter(key, groupBy string) {
 			row.EntityKey, row.Country, row.TaxType, row.ObligationCode, row.Period, row.FinancialYear,
 			verifyFiguresText(row.Figures)))
 	}
-	gotRows := make([]string, 0, len(payload.Rows))
-	for _, row := range payload.Rows {
+	gotRows := make([]string, 0, len(gotRowPayloads))
+	for _, row := range gotRowPayloads {
 		figures := make([]string, 0, len(oracleFigureFields))
 		for _, field := range oracleFigureFields {
 			figures = append(figures, verifyNumberText(row.field(field)))
@@ -478,7 +514,6 @@ func (r *verifyRun) checkExportRawFilter(key string) {
 	}
 	delete(params, "viewMode")
 	params["dataset"] = dataset
-	params["limit"] = strconv.Itoa(verifyReportLimit)
 
 	filters, err := fk.exportFilters(seedDates)
 	if err != nil {
@@ -486,13 +521,23 @@ func (r *verifyRun) checkExportRawFilter(key string) {
 		return
 	}
 
-	var payload verifyExportPayload
-	path := verifyQuery("/reports/export-raw", params)
-	if err := r.client.api.GET(r.ctx, path, nil, &payload); err != nil {
-		c.errf("GET %s: %v", path, err)
+	// The export is walked to exhaustion: the tasks dataset is every instance
+	// (twenty pages on the scale fixture).
+	pages, err := verifyReportPages(r, "export-raw ["+key+"]", "/reports/export-raw", params,
+		func(p *verifyExportPayload) (int, int) { return len(p.Rows), p.TotalCount })
+	if err != nil {
+		c.errf("%v", err)
 		return
 	}
+	payload := pages[0]
 	c.equal("dataset", "", dataset, payload.Dataset)
+	gotRowPayloads := make([]map[string]any, 0, len(payload.Rows)*len(pages))
+	for i, page := range pages {
+		if i > 0 {
+			c.equal("totalCount@page="+strconv.Itoa(i+1), "", payload.TotalCount, page.TotalCount)
+		}
+		gotRowPayloads = append(gotRowPayloads, page.Rows...)
+	}
 
 	var wantRows []string
 	switch dataset {
@@ -511,10 +556,10 @@ func (r *verifyRun) checkExportRawFilter(key string) {
 	}
 
 	c.equal("totalCount", "", len(wantRows), payload.TotalCount)
-	c.equal("rowsReturned", "", len(wantRows), len(payload.Rows))
+	c.equal("rowsReturned", "", len(wantRows), len(gotRowPayloads))
 
-	gotRows := make([]string, 0, len(payload.Rows))
-	for _, row := range payload.Rows {
+	gotRows := make([]string, 0, len(gotRowPayloads))
+	for _, row := range gotRowPayloads {
 		switch dataset {
 		case oracleDatasetWorkflows:
 			gotRows = append(gotRows, verifyExportRowKey(row,
@@ -622,6 +667,78 @@ func verifyCompareMultisets(c *verifyCheck, field string, want, got []string) {
 			continue
 		}
 		c.diff(field, key, "not in the expected set", fmt.Sprintf("%d occurrence(s)", -counts[key]))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// task-summary
+// ---------------------------------------------------------------------------
+
+// verifyTaskSummaryPayload is GET /reports/task-summary: the dashboard tiles
+// computed on the server, in one aggregate, against the tenant's civil today.
+type verifyTaskSummaryPayload struct {
+	Today            dateonly.Date  `json:"today"`
+	Total            int            `json:"total"`
+	Completed        int            `json:"completed"`
+	Active           int            `json:"active"`
+	Overdue          int            `json:"overdue"`
+	DueToday         int            `json:"dueToday"`
+	DueThisWeek      int            `json:"dueThisWeek"`
+	AwaitingApproval int            `json:"awaitingApproval"`
+	CompletionRate   int            `json:"completionRate"`
+	ByStatus         map[string]int `json:"byStatus"`
+}
+
+// verifyTaskStatuses are the six stored statuses byStatus must always carry.
+var verifyTaskStatuses = []string{
+	oracleStatusNotStarted, oracleStatusInProgress, oracleStatusInReview,
+	oracleStatusPendingApproval, oracleStatusCompleted, oracleStatusBlocked,
+}
+
+// checkTaskSummary diffs GET /reports/task-summary against the oracle's
+// dashboard — the same numbers checkDashboard derives from the rows, now
+// answered by one server-side aggregate, so a tenant past any page cap gets
+// exact tiles. today is diffed too: a summary evaluated on the wrong day moves
+// every due window.
+func (r *verifyRun) checkTaskSummary() {
+	c := r.check("task-summary", "")
+	want := r.tenant.dashboard()
+
+	var got verifyTaskSummaryPayload
+	if err := r.client.api.GET(r.ctx, "/reports/task-summary", nil, &got); err != nil {
+		c.errf("GET /reports/task-summary: %v", err)
+		return
+	}
+	c.equal("today", "", want.Today, got.Today)
+	c.equal("total", "", want.TotalInstances, got.Total)
+	c.equal("completed", "", want.Completed, got.Completed)
+	c.equal("active", "", want.Active, got.Active)
+	c.equal("overdue", "", want.Overdue, got.Overdue)
+	c.equal("dueToday", "", want.DueToday, got.DueToday)
+	c.equal("dueThisWeek", "", want.ThisWeek, got.DueThisWeek)
+	c.equal("awaitingApproval", "", want.AwaitingApproval, got.AwaitingApproval)
+	c.equal("completionRate", "", want.CompletionRate, got.CompletionRate)
+
+	// byStatus: the six keys are always present, at the oracle's counts.
+	for _, status := range verifyTaskStatuses {
+		n, ok := got.ByStatus[status]
+		if !ok {
+			c.diff("byStatus", status, want.ByStatus[status], "missing")
+			continue
+		}
+		c.equal("byStatus", status, want.ByStatus[status], n)
+	}
+	for status, n := range got.ByStatus {
+		known := false
+		for _, s := range verifyTaskStatuses {
+			if s == status {
+				known = true
+				break
+			}
+		}
+		if !known {
+			c.diff("byStatus", status, "no such status", n)
+		}
 	}
 }
 

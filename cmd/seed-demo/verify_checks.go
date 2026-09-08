@@ -225,7 +225,8 @@ func verifyOptional(s string) any {
 // the oracle's plan, for every workflow — started or not. This is the check
 // that fails when the date engine changes under the dataset.
 func (r *verifyRun) checkPreviews() {
-	for _, w := range r.tenant.workflows {
+	for i, w := range r.tenant.workflows {
+		r.progress.every("workflow-preview", i+1, len(r.tenant.workflows))
 		c := r.check("workflow-preview", w.spec.Key)
 		id, ok := r.ids.workflowID[w.spec.Key]
 		if !ok {
@@ -295,7 +296,8 @@ func (r *verifyRun) checkPeriods() {
 		}
 	}
 
-	for _, cb := range combos {
+	for i, cb := range combos {
+		r.progress.every("entity-periods", i+1, len(combos))
 		filter := fmt.Sprintf("%s %s %s", cb.entity, cb.periodicity, cb.year)
 		c := r.check("entity-periods", filter)
 		id, ok := r.ids.entityID[cb.entity]

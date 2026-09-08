@@ -23,12 +23,14 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/mohamadhallal/zentax-api/seed/demo/scale"
 	"github.com/mohamadhallal/zentax-api/seed/demo/spec"
 	"github.com/mohamadhallal/zentax-api/shared/apiclient"
 	"github.com/mohamadhallal/zentax-api/shared/dateonly"
@@ -251,6 +253,16 @@ type verifyFake struct {
 	// Corrupt is called with the request path and the payload about to be
 	// written; it may mutate the payload in place.
 	Corrupt func(path string, payload any)
+	// ReportPageCap, when positive, caps the page the three row-level reports
+	// (compliance-status, tax-financial, export-raw) honour, so a test can
+	// make verify walk pages on a fixture far under the real cap.
+	ReportPageCap int
+
+	// requests counts the requests served per path, and offsets the distinct
+	// offsets asked of it — what a paging test asserts on.
+	mu       sync.Mutex
+	requests map[string]int
+	offsets  map[string]map[int]bool
 }
 
 func verifyNewFake(t *testing.T, world *oracleWorld) *verifyFake {
@@ -259,7 +271,8 @@ func verifyNewFake(t *testing.T, world *oracleWorld) *verifyFake {
 	f := &verifyFake{
 		t: t, world: world, tenant: world.tenants[0],
 		ids: map[string]string{}, instIDs: map[*oracleInstance]string{},
-		created: time.Date(2026, 9, 6, 8, 30, 0, 0, time.UTC),
+		created:  time.Date(2026, 9, 6, 8, 30, 0, 0, time.UTC),
+		requests: map[string]int{}, offsets: map[string]map[int]bool{},
 	}
 	n := 0
 	id := func(key string) string {
@@ -331,6 +344,7 @@ func (f *verifyFake) server() *httptest.Server {
 	mux.HandleFunc("/workflows", f.handleWorkflows)
 	mux.HandleFunc("/workflows/", f.handlePreview)
 	mux.HandleFunc("/reports/task-instances", f.handleInstances)
+	mux.HandleFunc("/reports/task-summary", f.handleTaskSummary)
 	mux.HandleFunc("/reports/workflow-stats", f.handleWorkflowStats)
 	mux.HandleFunc("/reports/compliance-heatmap", f.handleHeatmap)
 	mux.HandleFunc("/reports/compliance-status", f.handleCompliance)
@@ -341,6 +355,13 @@ func (f *verifyFake) server() *httptest.Server {
 
 // write emits the success envelope, giving Corrupt the last word.
 func (f *verifyFake) write(w http.ResponseWriter, r *http.Request, data any, pagination map[string]any) {
+	f.mu.Lock()
+	f.requests[r.URL.Path]++
+	if f.offsets[r.URL.Path] == nil {
+		f.offsets[r.URL.Path] = map[int]bool{}
+	}
+	f.offsets[r.URL.Path][verifyTestInt(r, "offset", 0)] = true
+	f.mu.Unlock()
 	if f.Corrupt != nil {
 		f.Corrupt(r.URL.Path, data)
 	}
@@ -375,6 +396,36 @@ func verifyTestInt(r *http.Request, name string, fallback int) int {
 		return fallback
 	}
 	return value
+}
+
+// reportPage reads a report request's limit and offset, applying the fake's
+// page cap on top of what the client asked for.
+func (f *verifyFake) reportPage(r *http.Request) (limit, offset int) {
+	limit, offset = verifyTestInt(r, "limit", 1000), verifyTestInt(r, "offset", 0)
+	if f.ReportPageCap > 0 && limit > f.ReportPageCap {
+		limit = f.ReportPageCap
+	}
+	return limit, offset
+}
+
+// reportSlice cuts one page out of a report's rows.
+func reportSlice(rows []map[string]any, limit, offset int) []map[string]any {
+	if offset > len(rows) {
+		offset = len(rows)
+	}
+	end := offset + limit
+	if end > len(rows) {
+		end = len(rows)
+	}
+	return rows[offset:end]
+}
+
+// pagesSeen reports how many requests a path served and how many distinct
+// offsets it was asked for.
+func (f *verifyFake) pagesSeen(path string) (requests, offsets int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.requests[path], len(f.offsets[path])
 }
 
 func (f *verifyFake) handleEntities(w http.ResponseWriter, r *http.Request) {
@@ -530,6 +581,21 @@ func (f *verifyFake) handleWorkflowStats(w http.ResponseWriter, r *http.Request)
 	f.write(w, r, out, nil)
 }
 
+// handleTaskSummary serves /reports/task-summary from the oracle's dashboard.
+func (f *verifyFake) handleTaskSummary(w http.ResponseWriter, r *http.Request) {
+	d := f.tenant.dashboard()
+	byStatus := map[string]any{}
+	for _, status := range verifyTaskStatuses {
+		byStatus[status] = d.ByStatus[status]
+	}
+	f.write(w, r, map[string]any{
+		"today": d.Today.String(), "total": d.TotalInstances, "completed": d.Completed,
+		"active": d.Active, "overdue": d.Overdue, "dueToday": d.DueToday,
+		"dueThisWeek": d.ThisWeek, "awaitingApproval": d.AwaitingApproval,
+		"completionRate": d.CompletionRate, "byStatus": byStatus,
+	}, nil)
+}
+
 // filtersFrom translates the query the client sent back into dataset keys, so
 // the fake can answer with the oracle.
 func (f *verifyFake) filtersFrom(r *http.Request) oracleFilters {
@@ -605,7 +671,7 @@ func (f *verifyFake) handleHeatmap(w http.ResponseWriter, r *http.Request) {
 func (f *verifyFake) handleCompliance(w http.ResponseWriter, r *http.Request) {
 	compliance := f.tenant.compliance(f.filtersFrom(r))
 	rows := compliance.rowsWithClass(r.URL.Query().Get("status"))
-	limit, offset := verifyTestInt(r, "limit", 1000), verifyTestInt(r, "offset", 0)
+	limit, offset := f.reportPage(r)
 
 	out := []map[string]any{}
 	for i, row := range rows {
@@ -686,8 +752,9 @@ func (f *verifyFake) handleFinancial(w http.ResponseWriter, r *http.Request) {
 			"totalAmount":  oracleRatFloat(&point.Figures.TotalAmount),
 		})
 	}
+	limit, offset := f.reportPage(r)
 	f.write(w, r, map[string]any{
-		"rows": rows, "aggregated": aggregated, "chartData": chart,
+		"rows": reportSlice(rows, limit, offset), "aggregated": aggregated, "chartData": chart,
 		"summary": map[string]any{
 			"totalOutputVat":      oracleRatFloat(&financial.Summary.OutputVat),
 			"totalInputVat":       oracleRatFloat(&financial.Summary.InputVat),
@@ -780,7 +847,8 @@ func (f *verifyFake) handleExport(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
-	f.write(w, r, map[string]any{"dataset": dataset, "rows": rows, "totalCount": len(rows)}, nil)
+	limit, offset := f.reportPage(r)
+	f.write(w, r, map[string]any{"dataset": dataset, "rows": reportSlice(rows, limit, offset), "totalCount": len(rows)}, nil)
 }
 
 // ---------------------------------------------------------------------------
@@ -789,6 +857,13 @@ func (f *verifyFake) handleExport(w http.ResponseWriter, r *http.Request) {
 
 // verifyTestRun writes the fixture, starts the fake and runs verify against it.
 func verifyTestRun(t *testing.T, corrupt func(path string, payload any), options ...func(*VerifyDeps)) (string, error) {
+	t.Helper()
+	return verifyTestRunWith(t, func(f *verifyFake) { f.Corrupt = corrupt }, options...)
+}
+
+// verifyTestRunWith is verifyTestRun with the fake handed to the test before
+// the run (to cap its pages, and to read its request counts afterwards).
+func verifyTestRunWith(t *testing.T, configure func(*verifyFake), options ...func(*VerifyDeps)) (string, error) {
 	t.Helper()
 	dir := t.TempDir()
 	specPath := filepath.Join(dir, "dataset.json")
@@ -800,7 +875,9 @@ func verifyTestRun(t *testing.T, corrupt func(path string, payload any), options
 	require.NoError(t, err)
 
 	fake := verifyNewFake(t, world)
-	fake.Corrupt = corrupt
+	if configure != nil {
+		configure(fake)
+	}
 	server := fake.server()
 	defer server.Close()
 
@@ -930,6 +1007,22 @@ func TestVerifyReportsEveryKindOfDifference(t *testing.T) {
 			expect: []string{"completedAt"},
 		},
 		{
+			name: "a task-summary overdue count",
+			path: "/reports/task-summary",
+			corrupt: func(payload any) {
+				payload.(map[string]any)["overdue"] = 99
+			},
+			expect: []string{"task-summary", "overdue", "got 99"},
+		},
+		{
+			name: "a task-summary byStatus key that is missing",
+			path: "/reports/task-summary",
+			corrupt: func(payload any) {
+				delete(payload.(map[string]any)["byStatus"].(map[string]any), oracleStatusBlocked)
+			},
+			expect: []string{"task-summary", "byStatus", "blocked", "got missing"},
+		},
+		{
 			name: "a workflow-stats next due date",
 			path: "/reports/workflow-stats",
 			corrupt: func(payload any) {
@@ -1008,7 +1101,7 @@ func TestVerifyJSONOutput(t *testing.T) {
 	for _, want := range []string{
 		"tenant-registry", "task-instances", "workflow-preview", "entity-periods",
 		"compliance-heatmap", "compliance-status", "tax-financial", "export-raw",
-		"workflow-stats", "dashboard", "project-participation",
+		"workflow-stats", "dashboard", "task-summary", "project-participation",
 	} {
 		assert.True(t, names[want], "the run must cover %s", want)
 	}
@@ -1021,6 +1114,7 @@ func TestVerifyFlagsAreParsedFromArgs(t *testing.T) {
 	require.NoError(t, fs.Parse([]string{
 		"--spec", "other.json", "--api", "http://api:3000", "--in", "ids.json",
 		"--only", "globex", "--today", "2026-09-10", "--json", "--strict-static",
+		"--scale", "--scale-config", "record.json",
 	}))
 	assert.Equal(t, "other.json", deps.Spec)
 	assert.Equal(t, "http://api:3000", deps.API)
@@ -1029,6 +1123,133 @@ func TestVerifyFlagsAreParsedFromArgs(t *testing.T) {
 	assert.Equal(t, "2026-09-10", deps.Today)
 	assert.True(t, deps.JSON)
 	assert.True(t, deps.StrictStatic)
+	assert.True(t, deps.Scale)
+	assert.Equal(t, "record.json", deps.ScaleConfig)
+}
+
+// --scale addresses the fixture's one tenant; it refuses --only, before any
+// file or API is touched, and defaults the record path to what `scale` wrote.
+func TestVerifyScaleAndOnlyDoNotCombine(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	err := runVerify(context.Background(), VerifyDeps{
+		API: "http://127.0.0.1:1", Stdout: &out, Stderr: &out,
+		Args: []string{"--scale", "--only", "scale"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--scale and --only do not combine")
+
+	deps := VerifyDeps{}
+	deps.applyDefaults()
+	assert.Equal(t, DefaultScaleOutputPath, deps.ScaleConfig)
+
+	// A missing record is named, not silently replaced by the defaults.
+	err = runVerify(context.Background(), VerifyDeps{
+		API: "http://127.0.0.1:1", Stdout: &out, Stderr: &out, Scale: true,
+		ScaleConfig: filepath.Join(t.TempDir(), "absent.json"),
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--scale-config")
+}
+
+// verifyScaleTestRun regenerates a small scale fixture, serves it from the
+// fake (which answers from the oracle over that same spec) and runs verify
+// --scale against it, with a generation record the test may adjust first.
+func verifyScaleTestRun(t *testing.T, adjust func(*scaleOutput)) (string, error) {
+	t.Helper()
+	cfg := scale.Config{Seed: 3, Entities: 7, Years: 1, AsOf: dateonly.New(2026, 9, 8)}.WithDefaults()
+	generated, err := scale.Spec(cfg)
+	require.NoError(t, err)
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	world, err := buildOracleWorld(generated, now, cfg.AsOf)
+	require.NoError(t, err)
+
+	fake := verifyNewFake(t, world)
+	server := fake.server()
+	defer server.Close()
+
+	record := newScaleOutput(now, cfg, scaleCounts{
+		TenantID: fake.ids["tenant:"+cfg.Slug], AdminID: "user-1",
+		Entities: cfg.Entities, ObligationTypes: len(generated.Tenants[0].ObligationTypes),
+		EntityObligations: len(generated.Tenants[0].EntityObligations),
+		Workflows:         scale.WorkflowsFor(cfg.Entities, cfg.Years),
+		Instances:         scale.InstancesFor(cfg.Entities, cfg.Years),
+	})
+	if adjust != nil {
+		adjust(&record)
+	}
+	path := filepath.Join(t.TempDir(), "seed-demo-scale.json")
+	require.NoError(t, writeScaleOutput(path, record))
+
+	var out bytes.Buffer
+	err = runVerify(context.Background(), VerifyDeps{
+		Scale: true, ScaleConfig: path, API: server.URL, Today: cfg.AsOf.String(),
+		Stdout: &out, Stderr: &out, Client: apiclient.New(server.URL),
+		Now: func() time.Time { return now },
+	})
+	return out.String(), err
+}
+
+// verify --scale recomputes the fixture from the record and accepts a server
+// that answers from that recomputation; what it cannot check on a generated
+// fixture it lists as skipped, and it narrates its progress.
+func TestVerifyScaleAcceptsACorrectServer(t *testing.T) {
+	t.Parallel()
+	out, err := verifyScaleTestRun(t, nil)
+	require.NoError(t, err, "a server answering from the oracle must produce no differences:\n%s", out)
+	assert.Contains(t, out, "verify --scale:")
+	assert.Contains(t, out, "seed 3, 7 entities, 1 years, asOf 2026-09-08")
+	assert.Contains(t, out, "tenant scale")
+	assert.Contains(t, out, fmt.Sprintf("instances: expected %d, live %d",
+		scale.InstancesFor(7, 1), scale.InstancesFor(7, 1)))
+	assert.Contains(t, out, "0 failed")
+	assert.Contains(t, out, "0 differences")
+	assert.NotContains(t, out, "DIFFERENCES (")
+
+	// The two families that cannot run are named, never dropped.
+	assert.Contains(t, out, "SKIPPED (2)")
+	assert.Contains(t, out, "scale static-expectations []: the scale fixture is generated, not declared")
+	assert.Contains(t, out, "scale project-participation []: the tenant has no project workflow")
+
+	// Progress went to stderr (the same buffer here).
+	assert.Contains(t, out, "scale: signed in as admin@scale.test")
+	assert.Contains(t, out, "scale: workflow-preview")
+	assert.Contains(t, out, "scale: task-instances:")
+}
+
+// A record that does not describe the live tenant — a stale file, a re-run
+// with other counts — fails on the scale-record check with both values.
+func TestVerifyScaleReportsAStaleRecord(t *testing.T) {
+	t.Parallel()
+	out, err := verifyScaleTestRun(t, func(record *scaleOutput) {
+		record.Counts.Instances++
+		record.TenantID = "00000000-0000-4000-8000-000000009999"
+	})
+	require.Error(t, err, "output was:\n%s", out)
+	assert.Contains(t, err.Error(), "checks failed")
+	assert.Contains(t, out, "scale scale-record")
+	assert.Contains(t, out, "counts.instances expected "+strconv.Itoa(scale.InstancesFor(7, 1)+1))
+	assert.Contains(t, out, "tenantId expected 00000000-0000-4000-8000-000000009999")
+}
+
+// The row-level reports are walked page by page: with the fake capping every
+// report page at ONE row (the fixture's tax-financial set is two rows), verify
+// still sees the whole set (0 differences) and the fake has served several
+// offsets of each report.
+func TestVerifyWalksReportPages(t *testing.T) {
+	t.Parallel()
+	var fake *verifyFake
+	out, err := verifyTestRunWith(t, func(f *verifyFake) {
+		f.ReportPageCap = 1
+		fake = f
+	})
+	require.NoError(t, err, "paged reports must still add up to the whole set:\n%s", out)
+	assert.Contains(t, out, "0 differences")
+	for _, path := range []string{"/reports/compliance-status", "/reports/tax-financial", "/reports/export-raw"} {
+		requests, offsets := fake.pagesSeen(path)
+		assert.Greater(t, offsets, 1, "%s must have been read at more than one offset", path)
+		assert.Greater(t, requests, offsets, "%s: every filter walks its own pages", path)
+	}
 }
 
 func TestVerifyRejectsABadTodayAndAnUnknownTenant(t *testing.T) {

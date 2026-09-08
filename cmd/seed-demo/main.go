@@ -3,7 +3,12 @@
 //
 //	seed-demo seed   [--spec F] [--api URL] [--database-url DSN] [--out F] [--only KEYS] [--dry-run] [--reset --admin-dsn DSN --yes]
 //	seed-demo verify [--spec F] [--api URL] [--in F] [--only KEYS] [--today D] [--json] [--strict-static]
-//	seed-demo reset  [--spec F] [--database-url DSN] [--admin-dsn DSN] [--only KEYS] --yes
+//	seed-demo reset  [--spec F] [--database-url DSN] [--admin-dsn DSN] [--only KEYS | --scale] --yes
+//	seed-demo scale  [--database-url DSN] [--seed N] [--entities N] [--years N] [--as-of D] [--dry-run] --yes
+//	seed-demo bench  [--api URL] [--tenant SLUG] [--n N] [--warmup N] [--page-size N] [--deep-page N] [--json] [--out F] [--no-fail]
+//
+// scale and bench belong to the scale fixture (seed/demo/scale): a generated
+// 10⁵-instance tenant and the ADR-0021 rule 7 measurement over it.
 //
 // The two DSNs are not interchangeable in either direction. --database-url is
 // the APPLICATION role: the tenant bootstrap's idempotency checks are scoped by
@@ -45,6 +50,7 @@ import (
 	"github.com/mohamadhallal/zentax-api/logger"
 	"github.com/mohamadhallal/zentax-api/platform/database"
 	platformseed "github.com/mohamadhallal/zentax-api/platform/seed"
+	"github.com/mohamadhallal/zentax-api/seed/demo/scale"
 	"github.com/mohamadhallal/zentax-api/seed/demo/spec"
 	"github.com/mohamadhallal/zentax-api/shared/apiclient"
 )
@@ -67,10 +73,11 @@ usage:
   seed-demo seed   [flags]      create every tenant in the dataset
   seed-demo verify [flags]      recompute the expected reports and diff them against the live API
   seed-demo reset  [flags] --yes   delete the dataset's tenants (local databases only)
+  seed-demo scale  [flags] --yes   generate and bulk-write the scale fixture tenant (seed/demo/scale)
+  seed-demo bench  [flags]         measure the ADR-0021 rule 7 targets against a tenant
 
-verify parses its own arguments (--spec --api --in --only --today --json
---strict-static); run "seed-demo verify -h" for those. The flags below belong
-to seed and reset:
+verify, scale and bench parse their own arguments; run "seed-demo <cmd> -h"
+for those. The flags below belong to seed and reset:
 `
 
 // deps is everything a subcommand needs. verify.go (owned by the verifier)
@@ -136,13 +143,21 @@ func run(ctx context.Context, args []string, out, errOut io.Writer) error {
 	}
 	sub := args[0]
 	switch sub {
-	case "seed", "verify", "reset":
+	case "seed", "verify", "reset", "scale", "bench":
 	case "-h", "--help", "help":
 		fmt.Fprint(out, usage)
 		return nil
 	default:
 		fmt.Fprint(errOut, usage)
-		return fmt.Errorf("unknown subcommand %q (want seed, verify or reset)", sub)
+		return fmt.Errorf("unknown subcommand %q (want seed, verify, reset, scale or bench)", sub)
+	}
+
+	// The scale fixture's two subcommands parse their own arguments too.
+	switch sub {
+	case "scale":
+		return runScale(ctx, ScaleDeps{Stdout: out, Stderr: errOut, Now: time.Now, Args: args[1:]})
+	case "bench":
+		return runBench(ctx, BenchDeps{Stdout: out, Stderr: errOut, Now: time.Now, Args: args[1:]})
 	}
 
 	// `verify` parses its own arguments: it carries three options this flag set
@@ -176,6 +191,8 @@ func run(ctx context.Context, args []string, out, errOut io.Writer) error {
 	dryRun := fs.Bool("dry-run", false, "seed only: validate the dataset and print the plan, writing nothing")
 	yes := fs.Bool("yes", false, "confirm a destructive operation (required by reset)")
 	reset := fs.Bool("reset", false, "seed only: delete the dataset's tenants first (needs --yes)")
+	scaleOnly := fs.Bool("scale", false, "reset only: delete the scale fixture tenant (see --scale-slug) instead of the dataset's tenants")
+	scaleSlug := fs.String("scale-slug", scale.DefaultSlug, "reset --scale: the scale fixture's tenant slug")
 	fs.Usage = func() {
 		fmt.Fprint(errOut, usage)
 		fs.PrintDefaults()
@@ -189,14 +206,30 @@ func run(ctx context.Context, args []string, out, errOut io.Writer) error {
 	if sub != "seed" && (*dryRun || *reset) {
 		return fmt.Errorf("--dry-run and --reset apply to `seed-demo seed`, not to %q", sub)
 	}
-
-	dataset, err := spec.LoadAndValidate(*specPath)
-	if err != nil {
-		return err
+	if sub != "reset" && *scaleOnly {
+		return fmt.Errorf("--scale applies to `seed-demo reset`, not to %q", sub)
 	}
-	tenants, err := selectTenants(dataset, *only)
-	if err != nil {
-		return err
+
+	var (
+		dataset *spec.Spec
+		tenants []spec.Tenant
+	)
+	if *scaleOnly {
+		// The scale fixture is not in the dataset: reset addresses it by slug
+		// alone, never together with the dataset's tenants, and does not need
+		// the dataset file at all.
+		if strings.TrimSpace(*only) != "" {
+			return errors.New("--scale and --only do not combine: reset either the scale fixture or dataset tenants")
+		}
+		tenants = []spec.Tenant{{Key: *scaleSlug, Slug: *scaleSlug}}
+	} else {
+		var err error
+		if dataset, err = spec.LoadAndValidate(*specPath); err != nil {
+			return err
+		}
+		if tenants, err = selectTenants(dataset, *only); err != nil {
+			return err
+		}
 	}
 
 	d := &deps{
