@@ -584,7 +584,8 @@ green on both the main module and `acceptance/`.
 Migrations (sqitch): `tenants`, `entities`, `obligation_types`, `entity_obligations`,
 `workflows`, `workflow_tasks`, `task_instances`, `task_instance_approvals`, `actor_columns`,
 `audit_log`, `service_accounts`, `entity_obligation_details`, `reporting_indexes`, `invite_tokens`,
-`documents`, `data_templates`, `fiscal_calendar`, `tenant_timezone`, `canonical_tax_keys`
+`documents`, `data_templates`, `fiscal_calendar`, `tenant_timezone`, `canonical_tax_keys`,
+`pagination_indexes`
 (+ boilerplate `appschema`, `internal_api_keys`, `nexus_accounts_api_keys`).
 
 **Auth / identity (Increments A + B):** first-party email/password + server-side sessions + TOTP MFA
@@ -603,6 +604,25 @@ Commits: `4cdcd4e` scaffold · `2851179` tenancy+entities · `d074780` obligatio
 ## What is missing / remaining
 
 ### 🟠 Auth & authorization
+- **List contracts (2026-09-08, ADR-0026 increment 2).** Every list `ORDER BY` now ends in a unique
+  column, in the primary sort's direction: the generic repository (`shared/repositories`) appends an
+  `id` tie-breaker (`due_date ASC, id ASC`; `created_at DESC, id DESC`); the audit log orders by `seq`
+  alone (assigned under the same per-tenant lock as `occurred_at`, so identical order, and served by
+  `idx_audit_log_tenant_seq`). Migration **`20260908000022_pagination_indexes`** adds
+  `task_instances (tenant_id, due_date, order_index, id)` and the same columns `WHERE status <>
+  'completed'`, and drops the tenant-less `(due_date)` and `(status)` — on a hash partition shared by
+  many tenants an index without `tenant_id` reads other tenants' rows before RLS discards them.
+  Measured on a 100,000-row scratch DB: the transaction took 134 ms; the deep-page feed plan went from
+  an index scan filtering `tenant_id` to a range scan on the tenant's own index; the five-soonest-open
+  query became a four-buffer partial-index scan with no sort. The paginated envelope gains `hasMore`;
+  repeatable query filters bind to `[]string` (`col = ANY($n)`) with a `none` sentinel declared per
+  nullable column (workflows: `status`, `financialYear`); a blank element is a 400. **Standing rule:**
+  a new list endpoint declares its tie-breaker (default `id`) and gets a tenant-prefixed index in the
+  same migration that introduces its order; index migrations stay plain and transactional until a
+  cell's `task_instances` passes ~10⁶ rows or a build exceeds 30 s, then use `ON ONLY` +
+  per-partition `CONCURRENTLY` + `ATTACH` in a non-transactional file. Acceptance: a dense-tie fixture
+  (144 instances, 12 per due date) walked under every sort and page size — no duplicates, no gaps,
+  byte-identical repeat walks — plus an identical-name entities walk and multi-value filter totals.
 - **Authentication + sessions — DONE (Increment A, ADR-0011).** First-party email/password
   (argon2id) + server-side sessions (httpOnly + SameSite=Strict cookie, token stored hashed,
   rotation on login/MFA, idle + absolute TTLs, failed-attempt lockout) + **TOTP MFA**
