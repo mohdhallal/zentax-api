@@ -65,17 +65,98 @@ const (
 	SortByCreatedAt = "created_at"
 )
 
+// Pseudo-values a task filter accepts on top of the stored ones.
+const (
+	// StatusOpen selects every instance that is not completed — the "open
+	// work" the dashboard and the tasks page reason about.
+	StatusOpen = "open"
+	// FinancialYearNone selects instances whose workflow carries no financial
+	// year (workflows.financial_year IS NULL), so project workflows can always
+	// be kept inside a year scope.
+	FinancialYearNone = "none"
+)
+
+// TaskFilters are the filters the task feed and the task summary share. nil /
+// empty means "any". Status is a stored status or StatusOpen; FinancialYears is
+// a set (OR-ed) that may contain FinancialYearNone. The repository assembles a
+// predicate ONLY for the filters that are set, so the statement shape (and
+// the planner's use of the indexes) follows the request rather than a generic
+// `($n IS NULL OR …)` plan.
+type TaskFilters struct {
+	WorkflowID       *string
+	EntityID         *string
+	AssigneeID       *string
+	FinancialYears   []string
+	Status           *string
+	WorkflowCategory *string
+}
+
 // ListTaskInstancesArgs are the validated filters + paging for the enriched
-// task-instance list. nil filters mean "any". SortColumn must be one of the
-// Sort* constants (the repository falls back to due_date otherwise).
+// task-instance list. SortColumn must be one of the Sort* constants (the
+// repository falls back to due_date otherwise).
 type ListTaskInstancesArgs struct {
-	WorkflowID *string
-	EntityID   *string
-	Status     *string
+	TaskFilters
 	SortColumn string
 	SortDesc   bool
 	Limit      int
 	Offset     int
+}
+
+// Task-instance statuses, as stored. StatusRank orders them the way the task
+// board reads (open work first, completed, then blocked).
+const (
+	StatusNotStarted      = "not_started"
+	StatusInProgress      = "in_progress"
+	StatusInReview        = "in_review"
+	StatusPendingApproval = "pending_approval"
+	StatusCompleted       = "completed"
+	StatusBlocked         = "blocked"
+)
+
+// TaskStatuses is every stored status, in rank order — the byStatus keys the
+// summary always carries.
+var TaskStatuses = []string{
+	StatusNotStarted, StatusInProgress, StatusInReview, StatusPendingApproval, StatusCompleted, StatusBlocked,
+}
+
+// TaskSummary is the exact tile set of the dashboard / tasks page over the
+// filtered instance set, computed in ONE aggregate statement against the
+// tenant's civil "today" (ADR-0023 §6): Overdue / DueToday / DueThisWeek count
+// open instances only (a completed instance is never bucketed), and the week
+// ends on Saturday. Today is that civil date (zero only when the tenant
+// registry row is missing, which an authenticated request cannot reach).
+type TaskSummary struct {
+	Today            dateonly.Date `db:"today"`
+	Total            int           `db:"total"`
+	Completed        int           `db:"completed"`
+	Active           int           `db:"active"`
+	Overdue          int           `db:"overdue"`
+	DueToday         int           `db:"due_today"`
+	DueThisWeek      int           `db:"due_this_week"`
+	AwaitingApproval int           `db:"awaiting_approval"`
+	NotStarted       int           `db:"not_started"`
+	InProgress       int           `db:"in_progress"`
+	InReview         int           `db:"in_review"`
+	PendingApproval  int           `db:"pending_approval"`
+	Blocked          int           `db:"blocked"`
+}
+
+// ByStatus is the count per stored status, every key present (0 when none).
+func (s TaskSummary) ByStatus() map[string]int {
+	return map[string]int{
+		StatusNotStarted:      s.NotStarted,
+		StatusInProgress:      s.InProgress,
+		StatusInReview:        s.InReview,
+		StatusPendingApproval: s.PendingApproval,
+		StatusCompleted:       s.Completed,
+		StatusBlocked:         s.Blocked,
+	}
+}
+
+// CompletionRate is Completed/Total as a rounded integer percentage — the same
+// rounding as WorkflowStats.CompletionPercent — and 0 when there is nothing.
+func (s TaskSummary) CompletionRate() int {
+	return roundedPercent(s.Completed, s.Total)
 }
 
 // WorkflowStats is the per-workflow completion summary. NextDueDate is the
@@ -91,11 +172,16 @@ type WorkflowStats struct {
 // CompletionPercent is completed/total rounded to the nearest integer, 0 when
 // the workflow has no instances.
 func (s WorkflowStats) CompletionPercent() int {
-	if s.TotalTasks <= 0 {
+	return roundedPercent(s.CompletedTasks, s.TotalTasks)
+}
+
+// roundedPercent is part/total × 100 rounded half-up to an integer, 0 when
+// total is 0. Integer arithmetic only, so it cannot drift: (2·p·100 + t) / 2t.
+func roundedPercent(part, total int) int {
+	if total <= 0 {
 		return 0
 	}
-	// Integer rounding without float drift: (2*c*100 + t) / (2*t).
-	return (2*s.CompletedTasks*100 + s.TotalTasks) / (2 * s.TotalTasks)
+	return (2*part*100 + total) / (2 * total)
 }
 
 // ---------------------------------------------------------------------------
@@ -388,6 +474,9 @@ type Reader interface {
 	// ListTaskInstances returns one page of enriched instances plus the total
 	// number of rows matching the filters.
 	ListTaskInstances(ctx context.Context, args ListTaskInstancesArgs) ([]TaskInstanceRow, int, error)
+	// TaskSummary returns the exact tile counts over the instances matching
+	// the filters — one aggregate statement, never a row walk.
+	TaskSummary(ctx context.Context, filters TaskFilters) (*TaskSummary, error)
 	// WorkflowStats returns one entry per workflow in the tenant, including
 	// workflows with no instances yet.
 	WorkflowStats(ctx context.Context) ([]WorkflowStats, error)

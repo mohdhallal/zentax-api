@@ -12,6 +12,7 @@ import (
 func RegisterRoutes(router *routing.Router, reader domain.Reader) {
 	router.Group("/reports", func(r *routing.Router) {
 		routing.RegisterRoute(r, handlers.NewTaskInstancesReportHandler(reader))
+		routing.RegisterRoute(r, handlers.NewTaskSummaryHandler(reader))
 		routing.RegisterRoute(r, handlers.NewWorkflowStatsHandler(reader))
 		// Compliance / financial reports (ADR-0021): SQL aggregations, capped
 		// row lists, legacy parameter names + response shapes.

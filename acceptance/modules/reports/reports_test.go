@@ -218,6 +218,12 @@ func (s *ReportsSuite) TestTaskInstancesReport() {
 	s.Require().Len(rows, 3)
 	s.Require().Equal(pagination{Total: 4, Limit: 3, Offset: 0}, pg)
 
+	// The pseudo-status `open` = everything not completed (all four, so far).
+	rows = nil
+	pg = s.decodePaginated(s.As(tenant).GET(s.T(), "/reports/task-instances?status=open"), &rows)
+	s.Require().Len(rows, 4)
+	s.Require().Equal(4, pg.Total)
+
 	rows = nil
 	pg = s.decodePaginated(s.As(tenant).GET(s.T(), "/reports/task-instances?limit=3&offset=3"), &rows)
 	s.Require().Len(rows, 1)
@@ -314,6 +320,18 @@ func (s *ReportsSuite) TestWorkflowStats() {
 	s.decodePaginated(s.As(tenant).GET(s.T(), "/reports/task-instances?status=completed"), &rows)
 	s.Require().Len(rows, 1)
 	s.Require().NotNil(rows[0].CompletedAt)
+
+	// `status=open` is the complement — the dashboard's priority list is the
+	// five soonest-due open instances: `status=open&sort=dueDate:asc&limit=5`.
+	rows = nil
+	pg := s.decodePaginated(s.As(tenant).GET(s.T(), "/reports/task-instances?status=open&sort=dueDate:asc&limit=5"), &rows)
+	s.Require().Equal(pagination{Total: 3, Limit: 5, Offset: 0}, pg)
+	s.Require().Len(rows, 3)
+	s.Require().Equal("2025-02-10", rows[0].DueDate, "the completed Feb 2 instance is no longer open")
+	for _, row := range rows {
+		s.Require().NotEqual("completed", row.Status)
+		s.Require().Nil(row.CompletedAt)
+	}
 
 	// Any tenant member may read (workflow:read).
 	s.AsRole(tenant, "viewer").GET(s.T(), "/reports/workflow-stats").AssertStatus(s.T(), http.StatusOK)

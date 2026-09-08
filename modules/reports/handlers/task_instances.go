@@ -14,7 +14,10 @@ import (
 // TaskInstancesReportHandler serves GET /reports/task-instances: task
 // instances enriched with workflow / entity / obligation-type context and the
 // assignee's display name — what the frontend's task views render without a
-// waterfall of per-row lookups.
+// waterfall of per-row lookups. Filters are the set shared with
+// /reports/task-summary (`status=open` = not completed), so the dashboard's
+// priority list is `status=open&sort=dueDate:asc&limit=5` over the same
+// population its tiles count.
 type TaskInstancesReportHandler struct {
 	reader domain.Reader
 }
@@ -53,12 +56,10 @@ func (h *TaskInstancesReportHandler) Execute(
 	query, _ := input.Query.(*dto.ListTaskInstancesQuery)
 
 	args := domain.ListTaskInstancesArgs{
-		WorkflowID: query.WorkflowID,
-		EntityID:   query.EntityID,
-		Status:     query.Status,
-		SortColumn: domain.SortByDueDate, // contract default: dueDate:asc
-		Limit:      query.Limit,
-		Offset:     query.Offset,
+		TaskFilters: taskFilters(query.TaskFilterQuery),
+		SortColumn:  domain.SortByDueDate, // contract default: dueDate:asc
+		Limit:       query.Limit,
+		Offset:      query.Offset,
 	}
 	// The pagination plumbing has already mapped the validated sort key to a
 	// column through DefineSortColumns; a single key is honored.

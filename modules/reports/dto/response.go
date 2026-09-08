@@ -72,6 +72,30 @@ func WorkflowStatsToJSON(stats []domain.WorkflowStats) map[string]any {
 	return out
 }
 
+// TaskSummaryToJSON renders the dashboard tile set. Every key is always
+// present — byStatus carries all six stored statuses at 0 when none — so a
+// consumer never has to defend against a missing counter; today is the
+// tenant's civil date the due windows were evaluated against (null only when
+// the tenant registry row is missing).
+func TaskSummaryToJSON(s *domain.TaskSummary) map[string]any {
+	var today any
+	if !s.Today.IsZero() {
+		today = s.Today
+	}
+	return map[string]any{
+		"today":            today,
+		"total":            s.Total,
+		"completed":        s.Completed,
+		"active":           s.Active,
+		"overdue":          s.Overdue,
+		"dueToday":         s.DueToday,
+		"dueThisWeek":      s.DueThisWeek,
+		"awaitingApproval": s.AwaitingApproval,
+		"completionRate":   s.CompletionRate(),
+		"byStatus":         s.ByStatus(),
+	}
+}
+
 func formatInstant(t *time.Time) any {
 	if t == nil {
 		return nil

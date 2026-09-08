@@ -26,6 +26,39 @@ const tenantToday = `(NOW() AT TIME ZONE ` + tenantZone + `)::date`
 // instance was completed — the same notion of "day" the missed rule uses.
 const tenantCompletedDate = `(ti.completed_at AT TIME ZONE ` + tenantZone + `)::date`
 
+// tenantWeekEnd is the SATURDAY that ends the tenant's current week (weeks run
+// Sunday–Saturday, DOW 0–6): the "this week" boundary of the dashboard and the
+// tasks page, matching the UI's task-metrics.ts. Every occurrence of the
+// tenantToday sub-select is uncorrelated, so the planner evaluates it once per
+// statement (an InitPlan), never per row.
+const tenantWeekEnd = `(` + tenantToday + ` + (6 - EXTRACT(DOW FROM ` + tenantToday + `))::int)`
+
+// taskOpen is "open work": every instance that is not completed. The three
+// due-window predicates below are guarded by it — a completed instance is
+// never overdue, due today or due this week, whatever its due date.
+const taskOpen = `ti.status <> 'completed'`
+
+// dueOverdue / dueToday / dueThisWeek are the dashboard's due-window tiles,
+// evaluated against the tenant's civil day (ADR-0023 §6) — one definition for
+// the summary and, later, for the feed's `due=` filter.
+const (
+	dueOverdue  = taskOpen + ` AND ti.due_date < ` + tenantToday
+	dueToday    = taskOpen + ` AND ti.due_date = ` + tenantToday
+	dueThisWeek = taskOpen + ` AND ti.due_date > ` + tenantToday + ` AND ti.due_date <= ` + tenantWeekEnd
+)
+
+// statusRank orders instances the way the task board reads: open work by
+// stage, then completed, then blocked. Unknown values sort last.
+const statusRank = `CASE ti.status
+    WHEN 'not_started' THEN 0
+    WHEN 'in_progress' THEN 1
+    WHEN 'in_review' THEN 2
+    WHEN 'pending_approval' THEN 3
+    WHEN 'completed' THEN 4
+    WHEN 'blocked' THEN 5
+    ELSE 6
+END`
+
 // complianceClassTemplate classifies task instance `ti` against a DATE column
 // (%[1]s: ti.filing_deadline or ti.due_date) — ONE definition shared by the
 // heatmap and the compliance-status report (ADR-0021 rule 5):
