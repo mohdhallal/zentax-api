@@ -82,7 +82,7 @@ func (s *ReportsSuite) TestProjectWorkflowsStayOutOfTheComplianceReports() {
 	// ---- the three compliance / financial reports: recurring only.
 	var hm heatmapData
 	s.getJSON(tenant, "/reports/compliance-heatmap", &hm)
-	s.Require().Equal([]idLabel{{"M1", "M1"}}, hm.Cols)
+	s.Require().Equal([]idLabel{{"2025:M1", "M1 (FY2025)"}}, hm.Cols) // no year selected: FY-qualified (ADR-0026 §7)
 	s.Require().Len(hm.Cells, 1)
 	s.Require().Equal([]string{recurring}, hm.Cells[0].WorkflowIDs)
 	s.getJSON(tenant, "/reports/compliance-heatmap?entityId="+entity+"&year=2025&viewMode=tax-type", &hm)

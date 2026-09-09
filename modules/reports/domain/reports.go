@@ -251,6 +251,30 @@ const (
 	ViewModeTaxType = "tax-type"
 )
 
+// MaxHeatmapCells bounds the grid (ADR-0026 decision 7): a heatmap is
+// entities × columns × (years, when none is selected), and eight years of a
+// large tenant would otherwise return tens of thousands of cells. The
+// repository fetches MaxHeatmapCells+1 rows so the handler can tell "full"
+// from "over" and answer 400 with ErrHeatmapTooLarge.
+const MaxHeatmapCells = 5000
+
+// ErrHeatmapTooLarge is the message of the 400 a grid above MaxHeatmapCells
+// gets — the fix is a narrower request, never a partial grid.
+const ErrHeatmapTooLarge = "the heatmap has more than 5000 cells; narrow it by year or entity"
+
+// HeatmapColumnID / HeatmapColumnLabel are the period-view column identity
+// when NO financial year is selected (ADR-0026 decision 7): "2019:M1" and
+// "M1 (FY2019)", so M1 of FY2019 and M1 of FY2026 are two columns, never one.
+// With a year selected the column stays the bare period code. The SQL builds
+// the same strings; these exist for the JSON renderer's tests and callers.
+func HeatmapColumnID(financialYear, periodCode string) string {
+	return financialYear + ":" + periodCode
+}
+
+func HeatmapColumnLabel(financialYear, periodCode string) string {
+	return periodCode + " (FY" + financialYear + ")"
+}
+
 // Cell / instance classifications, as the SQL yields them.
 const (
 	ComplianceOnTime = "on_time"
@@ -264,15 +288,20 @@ const (
 	CellGrey  = "grey"
 )
 
+// HeatmapArgs: Limit caps the number of cells the repository returns (the
+// handler passes MaxHeatmapCells+1 and treats the extra row as "too large").
 type HeatmapArgs struct {
 	ReportFilters
 	ViewMode string // ViewModePeriod | ViewModeTaxType
+	Limit    int
 }
 
 // HeatmapCell is one (entity × period|obligation-type) aggregate: counts by
 // status plus the distinct workflow ids feeding the cell (comma-joined by the
 // SQL string_agg; see WorkflowIDList). Cells only exist where instances exist,
-// so TotalTasks is never 0 in practice — Status still handles it.
+// so TotalTasks is never 0 in practice — Status still handles it. In period
+// view ColID is the bare period code when a financial year is selected and
+// HeatmapColumnID(year, code) otherwise (ColLabel likewise).
 type HeatmapCell struct {
 	RowID           string `db:"row_id"`
 	RowLabel        string `db:"row_label"`
@@ -524,7 +553,8 @@ type Reader interface {
 	WorkflowStats(ctx context.Context, filters WorkflowStatsFilters) ([]WorkflowStats, error)
 
 	// ComplianceHeatmap returns one aggregate cell per (entity, column), sorted
-	// by (row label, column id) — one GROUP BY statement.
+	// by (row label, first period end, column id) — one GROUP BY statement,
+	// at most args.Limit cells.
 	ComplianceHeatmap(ctx context.Context, args HeatmapArgs) ([]HeatmapCell, error)
 	// ComplianceStatus returns one page of classified instances (status-filtered,
 	// with its exact total) plus the summary of the whole classified set.

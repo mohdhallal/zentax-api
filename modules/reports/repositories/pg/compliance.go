@@ -19,15 +19,22 @@ LEFT JOIN obligation_types ot ON ot.id = w.obligation_type_id
 WHERE ` + participatingWorkflows + reportFiltersWhere
 
 // heatmapSQL: one GROUP BY over the filtered instances. $4 is the view mode:
-// columns are period codes ('period') or obligation types ('tax-type'). The
-// classification against due_date is the shared expression (ADR-0021 rule 5).
+// columns are period codes ('period') or obligation types ('tax-type'). In
+// period view the column is the bare period code while a financial year is
+// selected ($1) and "<financialYear>:<periodCode>" (label "M1 (FY2019)") when
+// none is — ADR-0026 decision 7: M1 of FY2019 and M1 of FY2026 must never
+// merge into one column. $5 caps the cells (domain.MaxHeatmapCells + 1: the
+// handler turns the extra row into a 400). The classification against
+// due_date is the shared expression (ADR-0021 rule 5).
 var heatmapSQL = `
 SELECT COALESCE(e.id::text, 'unknown') AS row_id,
        COALESCE(e.name, 'Unknown Entity') AS row_label,
-       CASE WHEN $4::text = '` + domain.ViewModeTaxType + `'
-            THEN COALESCE(ot.id::text, 'unknown') ELSE ti.period_code END AS col_id,
-       CASE WHEN $4::text = '` + domain.ViewModeTaxType + `'
-            THEN COALESCE(ot.name || ' (' || ot.code || ')', 'Unknown') ELSE ti.period_code END AS col_label,
+       CASE WHEN $4::text = '` + domain.ViewModeTaxType + `' THEN COALESCE(ot.id::text, 'unknown')
+            WHEN $1::varchar IS NULL THEN COALESCE(w.financial_year, '') || ':' || ti.period_code
+            ELSE ti.period_code END AS col_id,
+       CASE WHEN $4::text = '` + domain.ViewModeTaxType + `' THEN COALESCE(ot.name || ' (' || ot.code || ')', 'Unknown')
+            WHEN $1::varchar IS NULL THEN ti.period_code || ' (FY' || COALESCE(w.financial_year, '') || ')'
+            ELSE ti.period_code END AS col_label,
        COUNT(*)::int AS total_tasks,
        COUNT(*) FILTER (WHERE ti.status = 'completed')::int AS completed_tasks,
        COUNT(*) FILTER (WHERE (` + complianceClass("ti.due_date") + `) = 'missed')::int AS overdue_tasks,
@@ -37,11 +44,12 @@ SELECT COALESCE(e.id::text, 'unknown') AS row_id,
        MIN(ti.period_end_date) AS first_period_end` +
 	complianceFrom + `
 GROUP BY 1, 2, 3, 4
-ORDER BY row_label, first_period_end, col_id, row_id` // calendar order, not "M10" before "M2"
+ORDER BY row_label, first_period_end, col_id, row_id
+LIMIT $5` // calendar order, not "M10" before "M2"
 
 func (r *ReportsRepo) ComplianceHeatmap(ctx context.Context, args domain.HeatmapArgs) ([]domain.HeatmapCell, error) {
 	cells := []domain.HeatmapCell{}
-	params := append(filterArgs(args.ReportFilters), args.ViewMode)
+	params := append(filterArgs(args.ReportFilters), args.ViewMode, args.Limit)
 	if err := r.db.SelectContext(ctx, &cells, heatmapSQL, params...); err != nil {
 		return nil, err
 	}

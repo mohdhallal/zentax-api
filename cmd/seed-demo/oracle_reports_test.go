@@ -253,7 +253,8 @@ func oracleTestReportTenant(t *testing.T) *oracleTenant {
 func TestOracleHeatmapCellsColoursAndColumnOrder(t *testing.T) {
 	t.Parallel()
 	tenant := oracleTestReportTenant(t)
-	heatmap := tenant.heatmap(oracleFilters{}, oracleViewPeriod)
+	// A selected year keys the columns by bare period code.
+	heatmap := tenant.heatmap(oracleFilters{Year: "2026"}, oracleViewPeriod)
 
 	require.Equal(t, 3, heatmap.Summary.TotalCells, "only the participating workflow's cells")
 	assert.Equal(t, 0, heatmap.Summary.Green)
@@ -286,6 +287,7 @@ func TestOracleHeatmapCellsColoursAndColumnOrder(t *testing.T) {
 			assert.Equal(t, tc.completedLate, cell.CompletedLate, "completedLate")
 			assert.Equal(t, tc.inProgressTasks, cell.InProgressTasks, "inProgressTasks")
 			assert.Equal(t, tc.status, cell.status(), "status")
+			assert.Equal(t, cell.ColKey, cell.ColLabel, "a selected year: bare period code, label = code")
 		})
 	}
 
@@ -293,11 +295,103 @@ func TestOracleHeatmapCellsColoursAndColumnOrder(t *testing.T) {
 		"columns follow the calendar, not period-code text (which would put M10 before M2)")
 	assert.Equal(t, []string{"e.de"}, heatmap.RowOrder)
 
+	// No year selected: the same cells, keyed "<financialYear>:<periodCode>"
+	// and labelled "M1 (FY2026)" (ADR-0026 decision 7).
+	allYears := tenant.heatmap(oracleFilters{}, oracleViewPeriod)
+	require.Equal(t, 3, allYears.Summary.TotalCells)
+	assert.Equal(t, []string{"2026:M1", "2026:M2", "2026:M10"}, allYears.ColOrder)
+	for _, code := range []string{"M1", "M2", "M10"} {
+		require.Contains(t, allYears.Cells, "e.de|2026:"+code)
+		cell := allYears.Cells["e.de|2026:"+code]
+		assert.Equal(t, code+" (FY2026)", cell.ColLabel)
+		assert.Equal(t, heatmap.Cells["e.de|"+code].TotalTasks, cell.TotalTasks)
+		assert.Equal(t, heatmap.Cells["e.de|"+code].status(), cell.status())
+	}
+	assert.Equal(t, allYears.ColOrder, tenant.heatmap(oracleFilters{Year: "all"}, oracleViewPeriod).ColOrder,
+		"the legacy 'all' is no year")
+	assert.False(t, allYears.exceedsCap())
+
 	byTaxType := tenant.heatmap(oracleFilters{}, oracleViewTaxType)
-	assert.Equal(t, []string{"o.vat"}, byTaxType.ColOrder)
+	assert.Equal(t, []string{"o.vat"}, byTaxType.ColOrder, "the tax-type view never qualifies by year")
 	require.Contains(t, byTaxType.Cells, "e.de|o.vat")
 	assert.Equal(t, "Value Added Tax (VAT)", byTaxType.Cells["e.de|o.vat"].ColLabel)
 	assert.Equal(t, 6, byTaxType.Cells["e.de|o.vat"].TotalTasks)
+}
+
+// Two fiscal years with the same period code: with no year selected they are
+// two columns in calendar order (FY2025 before FY2026), each fed by its own
+// workflow; the legacy keying (the dataset's static tables) folds them into
+// one cell whose counts are the sums and whose colour reads off the sums.
+func TestOracleHeatmapQualifiesYearsAndTheLegacyKeyingFoldsThem(t *testing.T) {
+	t.Parallel()
+	tenant := oracleTestTwoYearTenant(t)
+
+	qualified := tenant.heatmap(oracleFilters{}, oracleViewPeriod)
+	assert.Equal(t, []string{"2025:M1", "2025:M2", "2026:M1", "2026:M2", "2026:M10"}, qualified.ColOrder)
+	assert.Equal(t, 5, qualified.Summary.TotalCells)
+	require.Contains(t, qualified.Cells, "e.de|2025:M1")
+	require.Contains(t, qualified.Cells, "e.de|2026:M1")
+	prior, current := qualified.Cells["e.de|2025:M1"], qualified.Cells["e.de|2026:M1"]
+	assert.Equal(t, "M1 (FY2025)", prior.ColLabel)
+	assert.Equal(t, "M1 (FY2026)", current.ColLabel)
+	assert.Equal(t, 1, prior.TotalTasks)
+	assert.Equal(t, 2, current.TotalTasks)
+	assert.Equal(t, map[string]bool{"w4": true}, prior.WorkflowKeys)
+	assert.Equal(t, map[string]bool{"w1": true}, current.WorkflowKeys)
+	assert.Equal(t, oracleCellGreen, prior.status(), "FY2025 M1: completed on time")
+	assert.Equal(t, oracleCellRed, current.status(), "FY2026 M1: one completed late")
+
+	folded := tenant.heatmapKeyed(oracleFilters{}, oracleViewPeriod, false)
+	assert.Equal(t, []string{"M1", "M2", "M10"}, folded.ColOrder, "bare codes, first-seen calendar order")
+	assert.Equal(t, 3, folded.Summary.TotalCells)
+	merged := folded.Cells["e.de|M1"]
+	require.NotNil(t, merged)
+	assert.Equal(t, 3, merged.TotalTasks, "the sums of both years")
+	assert.Equal(t, 3, merged.CompletedTasks)
+	assert.Equal(t, 1, merged.CompletedLate)
+	assert.Equal(t, oracleCellRed, merged.status(), "the colour reads off the sums")
+	assert.Equal(t, map[string]bool{"w1": true, "w4": true}, merged.WorkflowKeys)
+
+	// A selected year: bare codes, that year only — unchanged by the decision.
+	assert.Equal(t, []string{"M1", "M2"}, tenant.heatmap(oracleFilters{Year: "2025"}, oracleViewPeriod).ColOrder)
+	assert.Equal(t, 2, tenant.heatmap(oracleFilters{Year: "2025"}, oracleViewPeriod).Summary.TotalCells)
+}
+
+// oracleTestTwoYearTenant is oracleTestReportTenant plus a second
+// participating workflow for the same entity and obligation in FY2025, with
+// periods M1 and M2 (both completed on time).
+func oracleTestTwoYearTenant(t *testing.T) *oracleTenant {
+	t.Helper()
+	prior := spec.Workflow{
+		Key: "w4", Name: "DE VAT 2025", Category: spec.CategoryRecurring,
+		Entity: oracleTestString("e.de"), ObligationType: oracleTestString("o.vat"),
+		EntityObligation: oracleTestString("eo.de-vat"),
+		FinancialYear:    "2025", Periodicity: oracleTestString("monthly"),
+		SelectedPeriods: []string{"M1", "M2"},
+		DueDateRule: spec.DueDateRule{
+			Reference: "period_end", OffsetUnit: "days", OffsetValue: 2,
+			OffsetDirection: "after", WeekendAdjustment: "none",
+		},
+		StartDate: dateonly.New(2025, 1, 1), EndDate: dateonly.New(2025, 12, 31),
+		Writer: "t.prep", Approver: "t.admin",
+		Lifecycle: spec.Lifecycle{Start: true, FinalStatus: "active"},
+		Templates: []spec.TaskTemplate{
+			{Key: "prepare", Name: "Prepare return", TaskType: "preparation", OrderIndex: 0,
+				DueDateReference: "period_end", DueDateOffsetValue: 2,
+				DueDateOffsetUnit: "days", DueDateOffsetDirection: "after"},
+		},
+		Instances: []spec.Instance{
+			{Period: "M1", Task: "prepare", Status: oracleStatusCompleted, Via: "put",
+				Assignee: "t.prep", CompletedOn: dateonly.New(2025, 2, 1)},
+			{Period: "M2", Task: "prepare", Status: oracleStatusCompleted, Via: "put",
+				Assignee: "t.prep", CompletedOn: dateonly.New(2025, 3, 1)},
+		},
+	}
+	base := oracleTestReportTenant(t)
+	workflows := make([]spec.Workflow, 0, len(base.spec.Workflows)+1)
+	workflows = append(workflows, base.spec.Workflows...)
+	workflows = append(workflows, prior)
+	return oracleTestBuild(t, oracleTestSpec("Europe/Berlin", workflows...), "2026-09-06")
 }
 
 func TestOracleHeatmapFilters(t *testing.T) {

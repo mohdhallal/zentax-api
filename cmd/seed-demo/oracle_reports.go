@@ -22,6 +22,32 @@ const (
 	oracleViewTaxType = "tax-type"
 )
 
+// oracleMaxHeatmapCells mirrors domain.MaxHeatmapCells (ADR-0026 decision 7):
+// a grid above it is refused with a 400. Declared here rather than imported
+// because the oracle is an independent recomputation of the contract — a
+// drift between the two is a difference verify must report, not absorb.
+const oracleMaxHeatmapCells = 5000
+
+// oracleHeatmapTooLarge is the message that 400 carries.
+const oracleHeatmapTooLarge = "the heatmap has more than 5000 cells; narrow it by year or entity"
+
+// oracleHeatmapQualifiesYears says whether the period columns are keyed
+// "<financialYear>:<periodCode>" (label "M1 (FY2019)"): period view with no
+// year selected — ADR-0026 decision 7, so M1 of two fiscal years never merge
+// into one column. A selected year keeps the bare period code; the tax-type
+// view keys columns by obligation type whatever the year.
+func oracleHeatmapQualifiesYears(f oracleFilters, viewMode string) bool {
+	return viewMode != oracleViewTaxType && !oracleFilterSet(f.Year)
+}
+
+func oracleHeatmapColumnKey(financialYear, periodCode string) string {
+	return financialYear + ":" + periodCode
+}
+
+func oracleHeatmapColumnLabel(financialYear, periodCode string) string {
+	return periodCode + " (FY" + financialYear + ")"
+}
+
 // Tax-financial groupings.
 const (
 	oracleGroupEntity     = "entity"
@@ -131,9 +157,22 @@ type oracleHeatmap struct {
 // oracleHeatmapCellKey is the key a difference names a cell by.
 func oracleHeatmapCellKey(rowKey, colKey string) string { return rowKey + "|" + colKey }
 
-// heatmap recomputes one heatmap: cells per entity × (period | obligation
-// type), classified on the DUE DATE.
+// exceedsCap says whether the API refuses this grid (ADR-0026 decision 7).
+func (h *oracleHeatmap) exceedsCap() bool { return len(h.Cells) > oracleMaxHeatmapCells }
+
+// heatmap recomputes one heatmap the way the API keys it: cells per entity ×
+// (period | obligation type), classified on the DUE DATE, period columns
+// qualified by financial year when no year is selected.
 func (t *oracleTenant) heatmap(f oracleFilters, viewMode string) *oracleHeatmap {
+	return t.heatmapKeyed(f, viewMode, oracleHeatmapQualifiesYears(f, viewMode))
+}
+
+// heatmapKeyed is heatmap with the column keying chosen by the caller.
+// qualify=false is the pre-ADR-0026 keying — bare period codes, so the same
+// code of several fiscal years folds into ONE cell whose counts are the sums
+// — kept only for the dataset's static expectedAsOf tables, which were
+// written under that contract (see verifyStaticTables).
+func (t *oracleTenant) heatmapKeyed(f oracleFilters, viewMode string, qualify bool) *oracleHeatmap {
 	h := &oracleHeatmap{Cells: map[string]*oracleHeatmapCell{}}
 	for _, inst := range t.participating(f) {
 		rowKey, rowLabel := oracleUnknownKey, "Unknown Entity"
@@ -141,6 +180,10 @@ func (t *oracleTenant) heatmap(f oracleFilters, viewMode string) *oracleHeatmap 
 			rowKey, rowLabel = inst.workflow.entity.Key, inst.workflow.entity.Name
 		}
 		colKey, colLabel := inst.PeriodCode, inst.PeriodCode
+		if qualify {
+			fy := inst.workflow.spec.FinancialYear
+			colKey, colLabel = oracleHeatmapColumnKey(fy, inst.PeriodCode), oracleHeatmapColumnLabel(fy, inst.PeriodCode)
+		}
 		if viewMode == oracleViewTaxType {
 			colKey, colLabel = oracleUnknownKey, "Unknown"
 			if ot := inst.workflow.obligation; ot != nil {

@@ -11,6 +11,7 @@ package main
 
 import (
 	"fmt"
+	"github.com/mohamadhallal/zentax-api/shared/apiclient"
 	"math"
 	"strconv"
 
@@ -540,9 +541,27 @@ func (r *verifyRun) checkProjectParticipation() {
 	}
 
 	// Absent from the heatmap, which names the workflows feeding each cell.
+	// With no year selected the grid is capped (ADR-0026 decision 7): a tenant
+	// above 5,000 cells answers 400, so on that answer the check narrows to one
+	// request per entity and unions the cells — the exclusion is still proven
+	// over the whole tenant, just fetched in slices the cap allows.
 	var heatmap verifyHeatmapPayload
-	if err := r.client.api.GET(r.ctx, verifyQuery("/reports/compliance-heatmap",
-		map[string]string{"viewMode": oracleViewPeriod}), nil, &heatmap); err != nil {
+	err := r.client.api.GET(r.ctx, verifyQuery("/reports/compliance-heatmap",
+		map[string]string{"viewMode": oracleViewPeriod}), nil, &heatmap)
+	if apiErr, ok := apiclient.AsAPIError(err); ok && apiErr.Status == 400 && apiErr.Message == oracleHeatmapTooLarge {
+		heatmap = verifyHeatmapPayload{}
+		for _, e := range r.ids.entities {
+			var slice verifyHeatmapPayload
+			if err := r.client.api.GET(r.ctx, verifyQuery("/reports/compliance-heatmap",
+				map[string]string{"viewMode": oracleViewPeriod, "entityId": e.ID}), nil, &slice); err != nil {
+				c.errf("GET /reports/compliance-heatmap?entityId=%s: %v", e.ID, err)
+				return
+			}
+			heatmap.Cells = append(heatmap.Cells, slice.Cells...)
+		}
+		err = nil
+	}
+	if err != nil {
 		c.errf("GET /reports/compliance-heatmap: %v", err)
 		return
 	}

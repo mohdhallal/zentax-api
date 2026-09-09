@@ -317,16 +317,20 @@ func (s *ReportsSuite) TestComplianceReports() {
 	f := s.seedFixture(tenant)
 
 	// ---- heatmap before any completion: FY2025 cells overdue (red), M12 amber.
+	// No year selected → period columns are qualified by financial year
+	// (ADR-0026 decision 7): "<fy>:<code>", labelled "M1 (FY2025)".
 	var hm heatmapData
 	s.getJSON(tenant, "/reports/compliance-heatmap", &hm)
 	s.Require().Equal([]idLabel{{f.alpha, "Acme Alpha"}, {f.beta, "Acme Beta"}}, hm.Rows)
-	s.Require().Equal([]idLabel{{"M1", "M1"}, {"M2", "M2"}, {"M12", "M12"}}, hm.Cols)
+	s.Require().Equal([]idLabel{
+		{"2025:M1", "M1 (FY2025)"}, {"2025:M2", "M2 (FY2025)"}, {"2026:M12", "M12 (FY2026)"},
+	}, hm.Cols)
 	s.Require().Len(hm.Cells, 5)
 	s.Require().Equal(5, hm.Summary.TotalCells)
 	s.Require().Equal(4, hm.Summary.Red)
 	s.Require().Equal(1, hm.Summary.Amber)
 	s.Require().Equal(0, hm.Summary.Green)
-	c := hm.cell(f.alpha, "M1")
+	c := hm.cell(f.alpha, "2025:M1")
 	s.Require().NotNil(c)
 	s.Require().Equal("red", c.Status)
 	s.Require().Equal(4, c.TotalTasks)
@@ -334,7 +338,7 @@ func (s *ReportsSuite) TestComplianceReports() {
 	s.Require().Equal(4, c.OverdueTasks)
 	s.Require().Equal(0, c.InProgressTasks)
 	s.Require().Equal(sortedCopy([]string{f.alphaVAT, f.alphaCIT}), sortedCopy(c.WorkflowIDs))
-	c = hm.cell(f.beta, "M12")
+	c = hm.cell(f.beta, "2026:M12")
 	s.Require().NotNil(c)
 	s.Require().Equal("amber", c.Status)
 	s.Require().Equal(1, c.TotalTasks)
@@ -343,9 +347,9 @@ func (s *ReportsSuite) TestComplianceReports() {
 	// Cells arrive sorted by row label, then by the calendar (M2 before M12 —
 	// never period-code text order).
 	s.Require().Equal("Acme Alpha", hm.Cells[0].RowLabel)
-	s.Require().Equal("M1", hm.Cells[0].ColID)
+	s.Require().Equal("2025:M1", hm.Cells[0].ColID)
 	s.Require().Equal("Acme Beta", hm.Cells[4].RowLabel)
-	s.Require().Equal("M12", hm.Cells[4].ColID)
+	s.Require().Equal("2026:M12", hm.Cells[4].ColID)
 
 	// ---- completions + tax data (PUT /task-instances/{id}).
 	put := func(id string, body map[string]any) {
@@ -382,13 +386,15 @@ func (s *ReportsSuite) TestComplianceReports() {
 	s.Require().Equal(4, hm.Summary.Red)
 	s.Require().Equal(0, hm.Summary.Amber)
 	s.Require().Equal(1, hm.Summary.Green)
-	c = hm.cell(f.alpha, "M1")
+	c = hm.cell(f.alpha, "2025:M1")
+	s.Require().NotNil(c)
 	s.Require().Equal("red", c.Status)
 	s.Require().Equal(4, c.TotalTasks)
 	s.Require().Equal(1, c.CompletedTasks)
 	s.Require().Equal(3, c.OverdueTasks)
 	s.Require().Equal(1, c.InProgressTasks)
-	c = hm.cell(f.beta, "M12")
+	c = hm.cell(f.beta, "2026:M12")
+	s.Require().NotNil(c)
 	s.Require().Equal("green", c.Status)
 	s.Require().Equal(1, c.CompletedTasks)
 	s.Require().Equal(0, c.OverdueTasks)
@@ -416,13 +422,18 @@ func (s *ReportsSuite) TestComplianceReports() {
 	s.Require().Equal(1, hm.Summary.Green)
 	s.Require().Equal(3, hm.Summary.Red)
 
-	// Filters.
+	// Filters. A selected year keeps the bare period code as the column id.
 	s.getJSON(tenant, "/reports/compliance-heatmap?year=2025", &hm)
 	s.Require().Len(hm.Cells, 4)
 	s.Require().Equal([]idLabel{{"M1", "M1"}, {"M2", "M2"}}, hm.Cols)
+	s.getJSON(tenant, "/reports/compliance-heatmap?year=2026", &hm)
+	s.Require().Equal([]idLabel{{"M12", "M12"}}, hm.Cols)
 	s.getJSON(tenant, "/reports/compliance-heatmap?entityId="+f.beta, &hm)
 	s.Require().Equal([]idLabel{{f.beta, "Acme Beta"}}, hm.Rows)
 	s.Require().Len(hm.Cells, 3)
+	s.Require().Equal([]idLabel{
+		{"2025:M1", "M1 (FY2025)"}, {"2025:M2", "M2 (FY2025)"}, {"2026:M12", "M12 (FY2026)"},
+	}, hm.Cols, "an entity filter without a year is still every year: qualified")
 	s.getJSON(tenant, "/reports/compliance-heatmap?obligationTypeId="+f.cit+"&viewMode=tax-type", &hm)
 	s.Require().Len(hm.Cells, 2)
 	s.Require().Equal([]idLabel{{f.cit, "Corporate Tax (CIT-R)"}}, hm.Cols)

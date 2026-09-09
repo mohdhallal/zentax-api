@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/mohamadhallal/zentax-api/seed/demo/spec"
+	"github.com/mohamadhallal/zentax-api/shared/apiclient"
 	"github.com/mohamadhallal/zentax-api/shared/dateonly"
 )
 
@@ -77,14 +78,33 @@ func (r *verifyRun) checkHeatmap(key string) {
 	}
 	params["viewMode"] = viewMode
 
+	want := r.tenant.heatmap(fk.oracleFilters(), viewMode)
 	var payload verifyHeatmapPayload
 	path := verifyQuery("/reports/compliance-heatmap", params)
-	if err := r.client.api.GET(r.ctx, path, nil, &payload); err != nil {
+	err = r.client.api.GET(r.ctx, path, nil, &payload)
+	if want.exceedsCap() {
+		// ADR-0026 decision 7: above the cap the endpoint refuses the grid
+		// with a 400 and the "narrow it" message — a grid, full or cut, is
+		// the difference.
+		over := fmt.Sprintf("%d cells > %d", len(want.Cells), oracleMaxHeatmapCells)
+		if err == nil {
+			c.diff("status", over, 400, fmt.Sprintf("200 with %d cells", len(payload.Cells)))
+			return
+		}
+		apiErr, ok := apiclient.AsAPIError(err)
+		if !ok {
+			c.errf("GET %s: %v", path, err)
+			return
+		}
+		c.equal("status", over, 400, apiErr.Status)
+		c.equal("error.message", over, oracleHeatmapTooLarge, apiErr.Message)
+		return
+	}
+	if err != nil {
 		c.errf("GET %s: %v", path, err)
 		return
 	}
 
-	want := r.tenant.heatmap(fk.oracleFilters(), viewMode)
 	c.equal("summary.totalCells", "", want.Summary.TotalCells, payload.Summary.TotalCells)
 	c.equal("summary.green", "", want.Summary.Green, payload.Summary.Green)
 	c.equal("summary.amber", "", want.Summary.Amber, payload.Summary.Amber)
@@ -787,7 +807,15 @@ func verifyStaticTables(report *verifyReport, loaded *spec.Spec, tenantKey strin
 		if viewMode == "" {
 			viewMode = oracleViewPeriod
 		}
-		got := tenant.heatmap(fk.oracleFilters(), viewMode)
+		// The static tables predate ADR-0026 decision 7: their year=all period
+		// grids are keyed by bare period code with the fiscal years folded
+		// into one cell ((FR, Q1) "10/10", colOrder Q1 … M12), and dataset.json
+		// is not rewritten for the API change. The oracle therefore evaluates
+		// them in that legacy keying — the folded view is the qualified grid
+		// summed per period code, with the colour rule read off the sums — so
+		// the tables remain the dataset's internal-consistency check. The live
+		// checks (checkHeatmap) compare the qualified keys the API now serves.
+		got := tenant.heatmapKeyed(fk.oracleFilters(), viewMode, false)
 		prefix := "heatmap[" + key + "]."
 		verifyStaticInt(record, prefix+"summary.totalCells", "", want.Summary.TotalCells, got.Summary.TotalCells)
 		verifyStaticInt(record, prefix+"summary.green", "", want.Summary.Green, got.Summary.Green)

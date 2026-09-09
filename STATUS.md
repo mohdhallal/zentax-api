@@ -680,6 +680,19 @@ cell in AWS (the M1 is far faster than db.t4g.small — local PASS is necessary,
 ## What is missing / remaining
 
 ### 🟠 Auth & authorization
+- **Heatmap with years of history (2026-09-09, ADR-0026 increment 6, API side).** With no year
+  selected, period-view columns are keyed `<financialYear>:<periodCode>` and labelled `M1 (FY2019)`,
+  so the same period code in two fiscal years never merges (a selected year keeps the bare code —
+  every existing year=2025/2026 expectation holds; tax-type view unaffected). Columns stay in
+  calendar order by first period end. The grid is bounded: `domain.MaxHeatmapCells = 5000`, the
+  query fetches max+1 and the handler answers **400 VALIDATION "the heatmap has more than 5000
+  cells; narrow it by year or entity"** above it (exactly 5,000 is a full grid). Acceptance: two
+  fiscal years × same codes → qualified columns and every cell; the cap proven with a real
+  5,001-cell tenant; project workflows confirmed absent (recurring-only, and a recurring workflow
+  cannot start without a year). Oracle: `verify` keys the year=all grid the new way and expects the
+  400 wherever its own grid exceeds the cap (scale: 6,521 cells); the dataset's static year=all
+  tables stay in the legacy merged keying and are evaluated through a fold, so no static drift;
+  `checkProjectParticipation` narrows per entity when the unfiltered request hits the cap.
 - **Search and named workflow rows (2026-09-09, ADR-0026 increment 5, API side).** `search` (≤ 200
   chars, trimmed, blank = no filter) on `/entities` (name, legal name), `/workflows` (name),
   `/obligation-types` (name, code) and `/members` (name, email): case-insensitive `ILIKE` with `%`,
