@@ -74,6 +74,17 @@ func (m *SessionRepositoryMock) CompleteMFA(ctx context.Context, id, newTokenHas
 	return m.Called(ctx, id, newTokenHash, idleExpiresAt, absoluteExpiresAt).Error(0)
 }
 
+func (m *SessionRepositoryMock) ConsumeMFAAttempt(
+	ctx context.Context, id string, threshold int,
+) (bool, int, error) {
+	args := m.Called(ctx, id, threshold)
+	return args.Bool(0), args.Int(1), args.Error(2)
+}
+
+func (m *SessionRepositoryMock) ClearMFAAttempts(ctx context.Context, id string) error {
+	return m.Called(ctx, id).Error(0)
+}
+
 func (m *SessionRepositoryMock) Revoke(ctx context.Context, id string) error {
 	return m.Called(ctx, id).Error(0)
 }

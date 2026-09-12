@@ -18,7 +18,7 @@ func RegisterRoutes(
 		routing.RegisterRoute(r, handlers.NewLoginHandler(uc, cookie))
 		routing.RegisterRoute(r, handlers.NewMfaVerifyHandler(uc, cookie))
 		routing.RegisterRoute(r, handlers.NewMfaEnrollHandler(uc))
-		routing.RegisterRoute(r, handlers.NewMfaEnableHandler(uc))
+		routing.RegisterRoute(r, handlers.NewMfaEnableHandler(uc, cookie))
 		routing.RegisterRoute(r, handlers.NewLogoutHandler(uc, cookie))
 		routing.RegisterRoute(r, handlers.NewLogoutAllHandler(uc, cookie))
 		routing.RegisterRoute(r, handlers.NewMeHandler(uc, tenants))

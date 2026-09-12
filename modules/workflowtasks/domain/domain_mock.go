@@ -30,6 +30,12 @@ func (m *WorkflowTaskRepositoryMock) Update(ctx context.Context, id WorkflowTask
 	return workflowTaskOrNil(args.Get(0)), args.Error(1)
 }
 
+func (m *WorkflowTaskRepositoryMock) CountDependents(ctx context.Context, id WorkflowTaskID) (WorkflowTaskDependents, error) {
+	args := m.Called(ctx, id)
+	dep, _ := args.Get(0).(WorkflowTaskDependents)
+	return dep, args.Error(1)
+}
+
 func (m *WorkflowTaskRepositoryMock) Delete(ctx context.Context, id WorkflowTaskID) (bool, error) {
 	args := m.Called(ctx, id)
 	return args.Bool(0), args.Error(1)

@@ -15,6 +15,11 @@
 //     as several users at once: Login returns a *Session (a Client bound to
 //     that token) and Client.WithSession makes a shallow copy bound to any
 //     token. A Client is safe for concurrent use.
+//   - Backpressure. The API rate-limits per client address and per principal
+//     (delivery/httpkit/middlewares/ratelimit) and answers a shed request 429
+//     with Retry-After. A shed request never reaches the handler, so waiting
+//     and re-sending it is safe — see roundTrip, the one narrow exception to
+//     the client's otherwise strict one-request-per-call rule.
 //   - No Origin header. The API's CSRF check is CrossOriginGuard
 //     (delivery/httpkit/middlewares/csrf.go): it rejects a mutation whose Origin
 //     host differs from the request host. It is wired in the route builder
@@ -35,6 +40,7 @@ import (
 	"net/http"
 	"net/textproto"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -54,15 +60,30 @@ const (
 	// bodySnippetMax bounds how much of an unexpected response body is kept
 	// on an error (enough to diagnose, small enough to log).
 	bodySnippetMax = 512
+
+	// DefaultThrottleRetries is how many times a 429 is waited out and the
+	// request re-sent. A sweep of the reporting routes (cmd/seed-demo verify
+	// makes several hundred calls as ONE principal, as fast as the API will
+	// answer) legitimately spends the per-principal budget, and the limiter
+	// then hands back a Retry-After of a second or so; without this the tool
+	// reports the control firing as if the data were wrong.
+	DefaultThrottleRetries = 5
+
+	// ThrottleFallbackWait is used when a 429 carries no usable Retry-After,
+	// and ThrottleMaxWait caps what a server can make the client wait — a
+	// misconfigured Retry-After of an hour must not hang a deploy check.
+	ThrottleFallbackWait = time.Second
+	ThrottleMaxWait      = 10 * time.Second
 )
 
 // Client talks to one ZenTax API base URL, optionally bound to one session.
 // The zero value is not usable — build one with New.
 type Client struct {
-	baseURL   string
-	http      *http.Client
-	session   string // zentax_session value; "" = anonymous
-	userAgent string
+	baseURL         string
+	http            *http.Client
+	session         string // zentax_session value; "" = anonymous
+	userAgent       string
+	throttleRetries int
 }
 
 // Option customises a Client at construction.
@@ -97,13 +118,26 @@ func WithUserAgent(ua string) Option {
 	}
 }
 
+// WithThrottleRetries overrides DefaultThrottleRetries. Zero (or negative)
+// disables the 429 backoff, so a shed response reaches the caller as a
+// *APIError on the first try — what a test asserting the limiter wants.
+func WithThrottleRetries(n int) Option {
+	return func(c *Client) {
+		if n < 0 {
+			n = 0
+		}
+		c.throttleRetries = n
+	}
+}
+
 // New builds a Client for baseURL (e.g. "http://localhost:3000" — the Go API
 // serves no /api prefix; that belongs to the Express proxy).
 func New(baseURL string, opts ...Option) *Client {
 	c := &Client{
-		baseURL:   strings.TrimRight(baseURL, "/"),
-		http:      &http.Client{Timeout: DefaultTimeout},
-		userAgent: DefaultUserAgent,
+		baseURL:         strings.TrimRight(baseURL, "/"),
+		http:            &http.Client{Timeout: DefaultTimeout},
+		userAgent:       DefaultUserAgent,
+		throttleRetries: DefaultThrottleRetries,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -286,9 +320,85 @@ type rawResponse struct {
 
 func (r *rawResponse) requestID() string { return r.header.Get("X-Request-Id") }
 
-// roundTrip sends one request. It returns an error only for transport-level
+// roundTrip sends the request, waiting out a 429 and re-sending it up to
+// throttleRetries times. It returns an error only for transport-level
 // failures; any HTTP status reaches the caller in rawResponse.
+//
+// This is the client's only retry besides WaitReady, and it is narrow on
+// purpose. The rule it bends — one request per call, so a repeated POST cannot
+// duplicate a row and a repeated GET cannot paper over a flapping API — exists
+// because a retried request may ALREADY have been executed. A 429 from
+// ratelimit is the one status that proves the opposite: the limiter sheds
+// before the handler, before the transaction, before the body is even read, so
+// nothing happened and re-sending is the behaviour the Retry-After header asks
+// for. Any other status, 5xx included, still reaches the caller untouched.
+//
+// A body that cannot be rewound (the multipart buffer) is never re-sent; that
+// 429 surfaces to the caller instead of being silently truncated.
 func (c *Client) roundTrip(
+	ctx context.Context, method, path string, body io.Reader, contentType string,
+) (*rawResponse, error) {
+	rewind, rewindable := bodyRewinder(body)
+	for attempt := 0; ; attempt++ {
+		raw, err := c.sendOnce(ctx, method, path, body, contentType)
+		if err != nil {
+			return nil, err
+		}
+		if raw.statusCode != http.StatusTooManyRequests || attempt >= c.throttleRetries || !rewindable {
+			return raw, nil
+		}
+		select {
+		case <-ctx.Done():
+			// Hand back the 429 itself: the caller's error then names the real
+			// reason the call failed rather than the deadline it ran into.
+			return raw, nil
+		case <-time.After(retryAfter(raw.header)):
+		}
+		if err := rewind(); err != nil {
+			return raw, nil
+		}
+	}
+}
+
+// retryAfter reads the Retry-After of a shed response, clamped into
+// [ThrottleFallbackWait, ThrottleMaxWait]. Both RFC 9110 forms are accepted:
+// delta-seconds (what ratelimit.Shed sends) and an HTTP-date.
+func retryAfter(header http.Header) time.Duration {
+	raw := strings.TrimSpace(header.Get("Retry-After"))
+	wait := ThrottleFallbackWait
+	if secs, err := strconv.Atoi(raw); err == nil {
+		wait = time.Duration(secs) * time.Second
+	} else if when, err := http.ParseTime(raw); err == nil {
+		wait = time.Until(when)
+	}
+	if wait < ThrottleFallbackWait {
+		return ThrottleFallbackWait
+	}
+	if wait > ThrottleMaxWait {
+		return ThrottleMaxWait
+	}
+	return wait
+}
+
+// bodyRewinder reports whether body can be sent a second time, and returns the
+// func that resets it. A nil body needs nothing; *bytes.Reader (every JSON
+// body) seeks; *bytes.Buffer (the multipart upload) is consumed by the first
+// send and cannot.
+func bodyRewinder(body io.Reader) (func() error, bool) {
+	if body == nil {
+		return func() error { return nil }, true
+	}
+	if seeker, ok := body.(io.Seeker); ok {
+		return func() error {
+			_, err := seeker.Seek(0, io.SeekStart)
+			return err
+		}, true
+	}
+	return nil, false
+}
+
+// sendOnce performs exactly one HTTP exchange.
+func (c *Client) sendOnce(
 	ctx context.Context, method, path string, body io.Reader, contentType string,
 ) (*rawResponse, error) {
 	req, err := http.NewRequestWithContext(ctx, method, c.url(path), body)

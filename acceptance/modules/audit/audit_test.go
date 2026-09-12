@@ -9,7 +9,14 @@ import (
 
 	"github.com/mohamadhallal/zentax-api/acceptance"
 	"github.com/mohamadhallal/zentax-api/platform/audit"
+	"github.com/mohamadhallal/zentax-api/platform/database"
 )
+
+// sqlstateInsufficientPrivilege is Postgres' insufficient_privilege. A
+// prod-shaped database refuses a write to audit_log with this before RLS is
+// ever consulted, because deployment/docker/migrate.sh revokes UPDATE and
+// DELETE on audit_log from the app role.
+const sqlstateInsufficientPrivilege = "42501"
 
 // AuditSuite proves the ADR-0008 application audit trail end to end: every
 // domain mutation appends a PII-free, actor-attributed entry; the per-tenant
@@ -117,17 +124,37 @@ func (s *AuditSuite) TestTrailChainAttributionAndAppendOnly() {
 		s.Require().Equal(entries[0].ActorID, createdBy)
 	})
 
-	// ---- Append-only: UPDATE/DELETE match no RLS policy → zero rows. ----
-	s.inTenant(tenant, func(tx *sqlx.Tx) {
-		res, err := tx.Exec(`UPDATE audit_log SET action = 'tampered' WHERE seq = 1`)
-		s.Require().NoError(err)
-		n, _ := res.RowsAffected()
-		s.Require().Zero(n, "audit entries must not be updatable")
+	// ---- Append-only: the app cannot rewrite history. ----
+	// Two independent defences cover this and a prod-shaped database has both:
+	// the app role holds no UPDATE/DELETE privilege on audit_log (migrate.sh
+	// revokes them, so the statement is refused with 42501 before RLS is
+	// consulted), and audit_log carries no policy FOR UPDATE or FOR DELETE (so
+	// a role that did hold the privilege would still match zero rows). Either
+	// refusal satisfies the guarantee; a statement that succeeds does not.
+	// Each statement gets its own transaction, since a privilege error aborts
+	// the transaction it was issued on.
+	refuse := func(stmt string) {
+		s.inTenant(tenant, func(tx *sqlx.Tx) {
+			res, err := tx.Exec(stmt)
+			if err != nil {
+				pgErr := database.IsPgError(err)
+				s.Require().NotNil(pgErr, "unexpected error for %q: %v", stmt, err)
+				s.Require().Equal(sqlstateInsufficientPrivilege, pgErr.Code,
+					"audit entries must not be mutable, refused for the wrong reason: %v", err)
+				return
+			}
+			n, _ := res.RowsAffected()
+			s.Require().Zero(n, "audit entries must not be mutable: %s", stmt)
+		})
+	}
+	refuse(`UPDATE audit_log SET action = 'tampered' WHERE seq = 1`)
+	refuse(`DELETE FROM audit_log WHERE seq = 1`)
 
-		res, err = tx.Exec(`DELETE FROM audit_log WHERE seq = 1`)
-		s.Require().NoError(err)
-		n, _ = res.RowsAffected()
-		s.Require().Zero(n, "audit entries must not be deletable")
+	// ...and whichever defence refused it, the entry is provably untouched.
+	s.inTenant(tenant, func(tx *sqlx.Tx) {
+		var action string
+		s.Require().NoError(tx.Get(&action, `SELECT action FROM audit_log WHERE seq = 1`))
+		s.Require().Equal(wantActions[0], action)
 	})
 
 	// ---- Tenant isolation: the other tenant's view of the trail is empty. ----

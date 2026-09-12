@@ -151,6 +151,8 @@ func TestEntityDelete_NotFound(t *testing.T) {
 	repo := new(domain.EntityRepositoryMock)
 	uc := NewUseCases(repo)
 
+	repo.On("CountDependents", ctx, "missing").Return(domain.EntityDependents{}, nil).Once()
+	repo.On("QueueBlobReclaim", ctx, "missing").Return(0, nil).Once()
 	repo.On("Delete", ctx, "missing").Return(false, nil).Once()
 
 	err := uc.Delete(ctx, "missing")
@@ -164,11 +166,35 @@ func TestEntityDelete_Success(t *testing.T) {
 	repo := new(domain.EntityRepositoryMock)
 	uc := NewUseCases(repo)
 
+	repo.On("CountDependents", ctx, "e1").
+		Return(domain.EntityDependents{Workflows: 1, TaskInstances: 3}, nil).Once()
+	repo.On("QueueBlobReclaim", ctx, "e1").Return(2, nil).Once()
 	repo.On("Delete", ctx, "e1").Return(true, nil).Once()
 
 	err := uc.Delete(ctx, "e1")
 	require.NoError(t, err)
 	repo.AssertExpectations(t)
+}
+
+// ADR-0018: approved work anywhere under the entity makes the delete a
+// conflict, and nothing is queued or deleted — the census is the only call
+// that happens.
+func TestEntityDelete_RefusedWhenApprovedWorkExists(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	repo := new(domain.EntityRepositoryMock)
+	uc := NewUseCases(repo)
+
+	repo.On("CountDependents", ctx, "e1").
+		Return(domain.EntityDependents{ApprovedTaskInstances: 14, Workflows: 4}, nil).Once()
+
+	err := uc.Delete(ctx, "e1")
+	require.IsType(t, &apperrors.ConflictError{}, err)
+	assert.Contains(t, err.Error(), "14 approved task instance(s) across 4 workflow(s)")
+	assert.Contains(t, err.Error(), "archive")
+	repo.AssertExpectations(t)
+	repo.AssertNotCalled(t, "Delete", ctx, "e1")
+	repo.AssertNotCalled(t, "QueueBlobReclaim", ctx, "e1")
 }
 
 func TestEntityList_Aggregates(t *testing.T) {

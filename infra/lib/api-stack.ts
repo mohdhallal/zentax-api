@@ -58,6 +58,23 @@ export function apiPublicEnvironment(cfg: EnvConfig): Record<string, string> {
 }
 
 /**
+ * Whose `X-Forwarded-For` the api believes — `RATE_LIMIT_TRUSTED_PROXIES`, the
+ * Go config's `rateLimit.trustedProxies`.
+ *
+ * The api's default is to trust nothing and charge every request to its socket
+ * peer, because a broad private-range default turned out to be a bypass: any
+ * caller that could reach the port was inside the trusted range and had its own
+ * forged header believed. Here the cell names its own VPC, which is exactly the
+ * set of hops in front of the api: the ALB, which APPENDS the real client
+ * address on the right of anything the caller wrote, and the web tasks. So a
+ * per-browser budget keys per browser, and a header forged from the internet is
+ * ignored because its packets arrive from outside this range.
+ */
+export function apiTrustedProxyEnvironment(cfg: EnvConfig): Record<string, string> {
+  return { RATE_LIMIT_TRUSTED_PROXIES: cfg.cidr };
+}
+
+/**
  * ZenTax-<Env>-Api: the Go api as a Fargate service on the Cluster stack's
  * cluster, registered as `api` in its Cloud Map namespace, with its task and
  * execution roles, the documents-bucket / KMS grants and its running-task
@@ -111,6 +128,7 @@ export class ApiStack extends cdk.Stack {
         // configured, not referenced — see EnvConfig.corsAllowedOrigins.
         ...apiStorageEnvironment(cfg, props.documentsBucket, cfg.corsAllowedOrigins),
         ...apiPublicEnvironment(cfg),
+        ...apiTrustedProxyEnvironment(cfg),
       },
       secrets: apiDbSecrets(props.appDbSecret, props.authEncryptionKeySecret),
       logging: ecs.LogDrivers.awsLogs({ logGroup: props.logGroups.api, streamPrefix: 'api' }),

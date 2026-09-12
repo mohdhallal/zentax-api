@@ -11,6 +11,7 @@ import (
 	"github.com/mohamadhallal/zentax-api/delivery/httpkit/httperr"
 	"github.com/mohamadhallal/zentax-api/delivery/httpkit/metric"
 	"github.com/mohamadhallal/zentax-api/delivery/httpkit/middlewares"
+	"github.com/mohamadhallal/zentax-api/delivery/httpkit/middlewares/ratelimit"
 	"github.com/mohamadhallal/zentax-api/delivery/httpkit/routing"
 	"github.com/mohamadhallal/zentax-api/delivery/httpkit/swagger"
 	"github.com/mohamadhallal/zentax-api/delivery/httpkit/types"
@@ -116,6 +117,19 @@ func New(cfg *config.Config, mode types.ServerMode) (*App, error) {
 		AbsoluteTTL: time.Duration(cfg.Auth.SessionAbsoluteTTLHours) * time.Hour,
 	}
 
+	// Rate limiting (delivery/httpkit/middlewares/ratelimit): the limiter is
+	// per-application state — the acceptance suite stands up several apps in one
+	// process — so the global chain PROVIDES it on the request context and the
+	// route builder wraps the per-route middlewares that read it back. Nothing
+	// here is a package-level variable; when the limiter is absent (rate
+	// limiting off, or a router a unit test built directly) every one of those
+	// middlewares is a pass-through.
+	limiter, err := newRateLimiter(cfg.RateLimit)
+	if err != nil {
+		_ = dbConn.Close()
+		return nil, err
+	}
+
 	chiRouter := gochi.NewRouter()
 
 	chiRouter.Use(middlewares.CORSMiddleware(cfg.CORS))
@@ -123,6 +137,12 @@ func New(cfg *config.Config, mode types.ServerMode) (*App, error) {
 	chiRouter.Use(middlewares.RecoveryMiddleware)
 	chiRouter.Use(middlewares.MetricsMiddleware(metricsRecorder.HTTP()))
 	chiRouter.Use(middlewares.RequestLoggerMiddleware)
+	// After the logger and the metrics recorder, so a shed request is still
+	// counted and logged as the 429 it is — the limiter must be observable, and
+	// a burst it absorbs must not look like a gap in the traffic.
+	if limiter != nil {
+		chiRouter.Use(ratelimit.Provide(limiter))
+	}
 
 	router := routing.NewRouter(chiRouter, mode, authValidator, identityUC, cfg.Auth.SessionCookieName, grantRepo, db)
 
@@ -167,4 +187,48 @@ func New(cfg *config.Config, mode types.ServerMode) (*App, error) {
 		Metrics:   metricsRecorder,
 		db:        dbConn,
 	}, nil
+}
+
+// newRateLimiter builds the application's rate limiter from configuration, or
+// returns nil when rate limiting is switched off (config.RateLimitConfig.Active
+// — which a Config assembled in code, rather than through config.Load, leaves
+// off until it calls ApplyDefaults).
+//
+// The store is the in-memory one: correct for a single process, and behind an
+// interface precisely so a shared (Redis) implementation can replace it when a
+// cell runs several API tasks — see the MemoryStore doc comment for what that
+// implementation owes.
+func newRateLimiter(cfg config.RateLimitConfig) (*ratelimit.Limiter, error) {
+	if !cfg.Active() {
+		return nil, nil
+	}
+
+	resolver, err := ratelimit.NewAddressResolver(cfg.TrustedProxies, cfg.ForwardedHeader)
+	if err != nil {
+		return nil, err
+	}
+
+	return ratelimit.New(
+		ratelimit.NewMemoryStore(),
+		ratelimit.NewGate(
+			cfg.Verification.MaxConcurrent,
+			cfg.Verification.MaxQueued,
+			cfg.Verification.MaxWait(),
+		),
+		resolver,
+		ratelimit.Settings{
+			Anonymous:     rateLimitRule(cfg.Anonymous),
+			Authenticated: rateLimitRule(cfg.Authenticated),
+			Verify:        cfg.Verification.Paths,
+			Exempt:        cfg.ExemptPaths,
+		},
+	), nil
+}
+
+func rateLimitRule(rule config.RateLimitRuleConfig) ratelimit.Rule {
+	return ratelimit.Rule{
+		Limit:  rule.Requests,
+		Burst:  rule.Burst,
+		Window: rule.Window(),
+	}
 }

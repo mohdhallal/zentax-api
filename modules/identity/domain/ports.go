@@ -50,8 +50,35 @@ type SessionRepository interface {
 	Create(ctx context.Context, input CreateSessionInput) (*Session, error)
 	GetByTokenHash(ctx context.Context, tokenHash string) (*Session, error)
 	Touch(ctx context.Context, id string, idleExpiresAt time.Time) error
-	// CompleteMFA clears mfa_pending and rotates the token (fixation defense).
+	// CompleteMFA clears mfa_pending, rotates the token (fixation defense) AND
+	// clears the second-factor attempt budget — a verification that succeeds
+	// leaves no debt behind, in the same statement that completes it.
 	CompleteMFA(ctx context.Context, id, newTokenHash string, idleExpiresAt, absoluteExpiresAt time.Time) error
+	// ConsumeMFAAttempt spends one attempt from this session's second-factor
+	// budget and reports whether THIS attempt was inside it, plus the count
+	// after the charge. It is the MFA twin of ConsumeLoginAttempt and exists
+	// for the same reason: ONE statement, evaluated under the row lock that
+	// also updates the row, so the counter and the decision can never disagree
+	// and concurrent guesses cannot each read a pre-threshold row and be
+	// admitted together.
+	//
+	//   - below the threshold: the counter increments and the attempt is
+	//     allowed. The attempt that REACHES the threshold is still allowed — it
+	//     is the last one of the budget, not the first one refused by it.
+	//   - at the threshold (the budget is already spent): the counter stays
+	//     saturated and the attempt is refused. The row is still rewritten, so
+	//     a refused attempt costs what a charged one costs.
+	//
+	// Callers MUST consume BEFORE validating the code, and MUST NOT be inside a
+	// request transaction when they do: the tx middleware rolls a request
+	// transaction back on any 4xx, which would discard the very charge the
+	// refusal depends on (the failure mode that once made the login lockout
+	// unreachable — see handlers.MfaVerifyHandler.DefineRoute).
+	ConsumeMFAAttempt(ctx context.Context, id string, threshold int) (allowed bool, spent int, err error)
+	// ClearMFAAttempts zeroes the second-factor budget of a session that is not
+	// completing MFA: enrolment confirmation's success, and the path that
+	// destroys a pending enrolment — both leave the session itself alive.
+	ClearMFAAttempts(ctx context.Context, id string) error
 	Revoke(ctx context.Context, id string) error
 	RevokeAllForUser(ctx context.Context, userID string) error
 }
@@ -166,7 +193,11 @@ type ServiceAccountUseCases interface {
 type AuthUseCases interface {
 	Login(ctx context.Context, input LoginInput) (*LoginResult, error)
 	MfaEnroll(ctx context.Context, userID string) (*MfaEnrollResult, error)
-	MfaEnable(ctx context.Context, userID, code string) error
+	// MfaEnable confirms an enrolment. It takes the session TOKEN rather than a
+	// user id because its route carries no ambient transaction (a budget charged
+	// inside one would be rolled back with the 401 it answers), so the session
+	// is resolved here instead of by the auth middleware.
+	MfaEnable(ctx context.Context, sessionToken, code string) error
 	MfaVerify(ctx context.Context, sessionToken, code string) (*LoginResult, error)
 	Logout(ctx context.Context, sessionToken string) error
 	LogoutAll(ctx context.Context, userID string) error

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -723,20 +724,39 @@ func TestAuthenticate_Revoked(t *testing.T) {
 	assert.IsType(t, &apperrors.UnauthorizedError{}, err)
 }
 
-func TestMfaVerify_Success_RotatesToken(t *testing.T) {
-	ctx := t.Context()
-	uc, users, sessions := newUC()
+// expectMFACharge stubs one charge against the session's second-factor budget:
+// `spent` is the count AFTER it, so spent == maxMFAAttempts is the last attempt
+// of the budget — the one whose failure destroys what was being guessed.
+func expectMFACharge(sessions *domain.SessionRepositoryMock, allowed bool, spent int, err error) {
+	sessions.On("ConsumeMFAAttempt", mock.Anything, "s1", maxMFAAttempts).
+		Return(allowed, spent, err).Once()
+}
 
+func pendingSession() *domain.Session {
+	now := time.Now()
+	return &domain.Session{ID: "s1", UserID: "u1", MFAPending: true,
+		IdleExpiresAt: now.Add(time.Hour), AbsoluteExpiresAt: now.Add(time.Hour)}
+}
+
+func enrolledSecret(t *testing.T) (*otp.Key, string) {
+	t.Helper()
 	key, err := totp.Generate(totp.GenerateOpts{Issuer: "ZenTax", AccountName: "a@b.com"})
 	require.NoError(t, err)
 	enc, err := crypto.Encrypt(testSettings().EncryptionKey, []byte(key.Secret()))
 	require.NoError(t, err)
+	return key, enc
+}
 
+func TestMfaVerify_Success_RotatesToken(t *testing.T) {
+	ctx := t.Context()
+	uc, users, sessions := newUC()
+
+	key, enc := enrolledSecret(t)
 	now := time.Now()
-	sess := &domain.Session{ID: "s1", UserID: "u1", MFAPending: true,
-		IdleExpiresAt: now.Add(time.Hour), AbsoluteExpiresAt: now.Add(time.Hour)}
-	sessions.On("GetByTokenHash", ctx, mock.Anything).Return(sess, nil).Once()
+	sessions.On("GetByTokenHash", ctx, mock.Anything).Return(pendingSession(), nil).Once()
+	expectMFACharge(sessions, true, 1, nil)
 	users.On("GetByID", ctx, "u1").Return(&domain.User{ID: "u1", TOTPSecretEnc: &enc}, nil).Once()
+	// CompleteMFA is what clears the budget the attempt just spent.
 	sessions.On("CompleteMFA", ctx, "s1", mock.Anything, mock.Anything, mock.Anything).Return(nil).Once()
 
 	code, err := totp.GenerateCode(key.Secret(), now)
@@ -749,20 +769,229 @@ func TestMfaVerify_Success_RotatesToken(t *testing.T) {
 	sessions.AssertExpectations(t)
 }
 
+// A correct code on the LAST attempt of the budget still completes the login:
+// the attempt that reaches the threshold is the final try, not the first
+// refusal, and nothing is destroyed on the way through.
+func TestMfaVerify_CorrectCodeOnTheLastAttempt_StillSucceeds(t *testing.T) {
+	ctx := t.Context()
+	uc, users, sessions := newUC()
+
+	key, enc := enrolledSecret(t)
+	sessions.On("GetByTokenHash", ctx, mock.Anything).Return(pendingSession(), nil).Once()
+	expectMFACharge(sessions, true, maxMFAAttempts, nil)
+	users.On("GetByID", ctx, "u1").Return(&domain.User{ID: "u1", TOTPSecretEnc: &enc}, nil).Once()
+	sessions.On("CompleteMFA", ctx, "s1", mock.Anything, mock.Anything, mock.Anything).Return(nil).Once()
+
+	code, err := totp.GenerateCode(key.Secret(), time.Now())
+	require.NoError(t, err)
+
+	_, err = uc.MfaVerify(ctx, "old-token", code)
+	require.NoError(t, err)
+	sessions.AssertExpectations(t)
+	sessions.AssertNotCalled(t, "Revoke", mock.Anything, "s1")
+}
+
+// A wrong code inside the budget is refused and the session SURVIVES — the
+// budget is five tries, not one.
 func TestMfaVerify_WrongCode(t *testing.T) {
 	ctx := t.Context()
 	uc, users, sessions := newUC()
 
-	key, _ := totp.Generate(totp.GenerateOpts{Issuer: "ZenTax", AccountName: "a@b.com"})
-	enc, _ := crypto.Encrypt(testSettings().EncryptionKey, []byte(key.Secret()))
-	now := time.Now()
-	sess := &domain.Session{ID: "s1", UserID: "u1", MFAPending: true,
-		IdleExpiresAt: now.Add(time.Hour), AbsoluteExpiresAt: now.Add(time.Hour)}
-	sessions.On("GetByTokenHash", ctx, mock.Anything).Return(sess, nil).Once()
+	_, enc := enrolledSecret(t)
+	sessions.On("GetByTokenHash", ctx, mock.Anything).Return(pendingSession(), nil).Once()
+	expectMFACharge(sessions, true, 1, nil)
 	users.On("GetByID", ctx, "u1").Return(&domain.User{ID: "u1", TOTPSecretEnc: &enc}, nil).Once()
 
 	_, err := uc.MfaVerify(ctx, "old-token", "000000")
 	assert.IsType(t, &apperrors.UnauthorizedError{}, err)
+	sessions.AssertNotCalled(t, "Revoke", mock.Anything, "s1")
+}
+
+// THE BLOCKER, at unit level: the wrong code that spends the last attempt of the
+// budget destroys the pending session, so there is nothing left to guess
+// against. Before the budget existed this path revoked nothing and a six-digit
+// code could be retried without limit.
+func TestMfaVerify_LastWrongCode_DestroysThePendingSession(t *testing.T) {
+	ctx := t.Context()
+	uc, users, sessions := newUC()
+
+	_, enc := enrolledSecret(t)
+	sessions.On("GetByTokenHash", ctx, mock.Anything).Return(pendingSession(), nil).Once()
+	expectMFACharge(sessions, true, maxMFAAttempts, nil)
+	users.On("GetByID", ctx, "u1").Return(&domain.User{ID: "u1", TOTPSecretEnc: &enc}, nil).Once()
+	sessions.On("Revoke", mock.MatchedBy(func(c context.Context) bool {
+		return c.Err() == nil // destruction must not be cancellable by the caller
+	}), "s1").Return(nil).Once()
+
+	_, err := uc.MfaVerify(ctx, "old-token", "000000")
+	assert.IsType(t, &apperrors.UnauthorizedError{}, err)
+	sessions.AssertExpectations(t)
+}
+
+// Past the budget nothing is validated at all: the charge refuses, the session
+// is destroyed again (idempotently, in case an earlier destroy did not stick),
+// and the user record is never even read — so a correct code arriving after the
+// budget is spent cannot mint a session either.
+func TestMfaVerify_PastTheBudget_ValidatesNothing(t *testing.T) {
+	ctx := t.Context()
+	uc, users, sessions := newUC()
+
+	key, _ := enrolledSecret(t)
+	sessions.On("GetByTokenHash", ctx, mock.Anything).Return(pendingSession(), nil).Once()
+	expectMFACharge(sessions, false, maxMFAAttempts, nil)
+	sessions.On("Revoke", mock.Anything, "s1").Return(nil).Once()
+
+	code, err := totp.GenerateCode(key.Secret(), time.Now())
+	require.NoError(t, err)
+
+	_, err = uc.MfaVerify(ctx, "old-token", code)
+	assert.IsType(t, &apperrors.UnauthorizedError{}, err)
+	users.AssertNotCalled(t, "GetByID", mock.Anything, "u1")
+	sessions.AssertNotCalled(t, "CompleteMFA", mock.Anything, "s1",
+		mock.Anything, mock.Anything, mock.Anything)
+	sessions.AssertExpectations(t)
+}
+
+// The charge FAILS CLOSED: a budget that cannot be written refuses the attempt
+// rather than admitting it uncharged, and still never validates the code.
+func TestMfaVerify_ChargeFailure_RefusesUncharged(t *testing.T) {
+	ctx := t.Context()
+	uc, users, sessions := newUC()
+
+	key, _ := enrolledSecret(t)
+	sessions.On("GetByTokenHash", ctx, mock.Anything).Return(pendingSession(), nil).Once()
+	expectMFACharge(sessions, false, 0, errors.New("database is unwell"))
+	sessions.On("Revoke", mock.Anything, "s1").Return(nil).Once()
+
+	code, err := totp.GenerateCode(key.Secret(), time.Now())
+	require.NoError(t, err)
+
+	_, err = uc.MfaVerify(ctx, "old-token", code)
+	assert.IsType(t, &apperrors.UnauthorizedError{}, err)
+	users.AssertNotCalled(t, "GetByID", mock.Anything, "u1")
+}
+
+// Every refusal is the same refusal: a session that is gone, one that was never
+// pending, and a wrong code are indistinguishable to the caller. A refusal that
+// said "your session is gone" would tell a script exactly where the budget ends.
+func TestMfaVerify_EveryRefusal_IsTheSameRefusal(t *testing.T) {
+	ctx := t.Context()
+	_, enc := enrolledSecret(t)
+	now := time.Now()
+
+	cases := []struct {
+		name  string
+		setup func(users *domain.UserRepositoryMock, sessions *domain.SessionRepositoryMock)
+	}{
+		{"no session at all", func(_ *domain.UserRepositoryMock, s *domain.SessionRepositoryMock) {
+			s.On("GetByTokenHash", ctx, mock.Anything).Return(nil, nil).Once()
+		}},
+		{"session already destroyed", func(_ *domain.UserRepositoryMock, s *domain.SessionRepositoryMock) {
+			revoked := now
+			s.On("GetByTokenHash", ctx, mock.Anything).Return(&domain.Session{ID: "s1", UserID: "u1",
+				MFAPending: true, RevokedAt: &revoked,
+				IdleExpiresAt: now.Add(time.Hour), AbsoluteExpiresAt: now.Add(time.Hour)}, nil).Once()
+		}},
+		{"session is not pending", func(_ *domain.UserRepositoryMock, s *domain.SessionRepositoryMock) {
+			s.On("GetByTokenHash", ctx, mock.Anything).Return(&domain.Session{ID: "s1", UserID: "u1",
+				IdleExpiresAt: now.Add(time.Hour), AbsoluteExpiresAt: now.Add(time.Hour)}, nil).Once()
+		}},
+		{"budget spent", func(_ *domain.UserRepositoryMock, s *domain.SessionRepositoryMock) {
+			s.On("GetByTokenHash", ctx, mock.Anything).Return(pendingSession(), nil).Once()
+			expectMFACharge(s, false, maxMFAAttempts, nil)
+			s.On("Revoke", mock.Anything, "s1").Return(nil).Once()
+		}},
+		{"wrong code", func(u *domain.UserRepositoryMock, s *domain.SessionRepositoryMock) {
+			s.On("GetByTokenHash", ctx, mock.Anything).Return(pendingSession(), nil).Once()
+			expectMFACharge(s, true, 1, nil)
+			u.On("GetByID", ctx, "u1").Return(&domain.User{ID: "u1", TOTPSecretEnc: &enc}, nil).Once()
+		}},
+		{"user has no enrolment", func(u *domain.UserRepositoryMock, s *domain.SessionRepositoryMock) {
+			s.On("GetByTokenHash", ctx, mock.Anything).Return(pendingSession(), nil).Once()
+			expectMFACharge(s, true, 1, nil)
+			u.On("GetByID", ctx, "u1").Return(&domain.User{ID: "u1"}, nil).Once()
+		}},
+	}
+
+	var baseline string
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			uc, users, sessions := newUC()
+			tc.setup(users, sessions)
+
+			_, err := uc.MfaVerify(ctx, "old-token", "000000")
+			require.IsType(t, &apperrors.UnauthorizedError{}, err)
+			if baseline == "" {
+				baseline = err.Error()
+			}
+			assert.Equal(t, baseline, err.Error(),
+				"every MFA-verify refusal must be byte-identical: %s", tc.name)
+		})
+	}
+	assert.Equal(t, domain.MsgInvalidMFACode, baseline)
+}
+
+// Enrolment confirmation carries the same budget, but spends it on the PENDING
+// ENROLMENT: the last wrong code discards the unconfirmed secret (the user
+// enrols again) and returns the session's counter, leaving the session itself
+// alive.
+func TestMfaEnable_LastWrongCode_DiscardsThePendingEnrollment(t *testing.T) {
+	ctx := t.Context()
+	uc, users, sessions := newUC()
+
+	_, enc := enrolledSecret(t)
+	now := time.Now()
+	full := &domain.Session{ID: "s1", UserID: "u1",
+		IdleExpiresAt: now.Add(time.Hour), AbsoluteExpiresAt: now.Add(time.Hour)}
+	sessions.On("GetByTokenHash", ctx, mock.Anything).Return(full, nil).Once()
+	sessions.On("Touch", ctx, "s1", mock.Anything).Return(nil).Once()
+	users.On("GetByID", ctx, "u1").
+		Return(&domain.User{ID: "u1", Status: "active", TOTPSecretEnc: &enc}, nil).Once()
+	expectMFACharge(sessions, true, maxMFAAttempts, nil)
+	users.On("SetTOTP", mock.Anything, "u1", (*string)(nil), false).Return(nil).Once()
+	sessions.On("ClearMFAAttempts", mock.Anything, "s1").Return(nil).Once()
+
+	err := uc.MfaEnable(ctx, "tok", "000000")
+	assert.IsType(t, &apperrors.UnauthorizedError{}, err)
+	users.AssertExpectations(t)
+	sessions.AssertExpectations(t)
+	sessions.AssertNotCalled(t, "Revoke", mock.Anything, "s1")
+}
+
+// An account that already has MFA on is refused BEFORE anything is charged or
+// decrypted, so no guessing loop can ever reach the secret protecting it — and
+// the discard path can never turn a protected account's MFA off.
+func TestMfaEnable_AlreadyEnabled_ChargesNothing(t *testing.T) {
+	ctx := t.Context()
+	uc, users, sessions := newUC()
+
+	_, enc := enrolledSecret(t)
+	now := time.Now()
+	sessions.On("GetByTokenHash", ctx, mock.Anything).Return(&domain.Session{ID: "s1", UserID: "u1",
+		IdleExpiresAt: now.Add(time.Hour), AbsoluteExpiresAt: now.Add(time.Hour)}, nil).Once()
+	sessions.On("Touch", ctx, "s1", mock.Anything).Return(nil).Once()
+	users.On("GetByID", ctx, "u1").Return(&domain.User{ID: "u1", Status: "active",
+		TOTPSecretEnc: &enc, TOTPEnabled: true}, nil).Once()
+
+	err := uc.MfaEnable(ctx, "tok", "000000")
+	assert.IsType(t, &apperrors.ConflictError{}, err)
+	sessions.AssertNotCalled(t, "ConsumeMFAAttempt", mock.Anything, "s1", maxMFAAttempts)
+	users.AssertNotCalled(t, "SetTOTP", mock.Anything, "u1", mock.Anything, mock.Anything)
+}
+
+// A pending session cannot confirm an enrolment: MfaEnable enforces what
+// RequireAuth enforced before the route left the middleware behind.
+func TestMfaEnable_PendingSession_IsRefused(t *testing.T) {
+	ctx := t.Context()
+	uc, users, sessions := newUC()
+
+	sessions.On("GetByTokenHash", ctx, mock.Anything).Return(pendingSession(), nil).Once()
+	sessions.On("Touch", ctx, "s1", mock.Anything).Return(nil).Once()
+	users.On("GetByID", ctx, "u1").Return(&domain.User{ID: "u1", Status: "active"}, nil).Once()
+
+	err := uc.MfaEnable(ctx, "tok", "000000")
+	assert.IsType(t, &apperrors.UnauthorizedError{}, err)
+	sessions.AssertNotCalled(t, "ConsumeMFAAttempt", mock.Anything, "s1", maxMFAAttempts)
 }
 
 func TestLogout(t *testing.T) {

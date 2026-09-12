@@ -13,6 +13,17 @@ import (
 // MfaVerifyHandler completes an mfa_pending session. Public (reads the pending
 // session cookie itself); the use case validates the code + pending state and
 // rotates the token.
+//
+// TRANSACTION DISCIPLINE — and why this route declares NO transaction, exactly
+// as /auth/login declares none (see LoginHandler.DefineRoute). Every refusal
+// here must leave a durable trace: the second-factor attempt budget is charged
+// BEFORE the code is validated, and spending it destroys the pending session.
+// The Transaction middleware rolls the request transaction back on any status
+// >= 400, so a charge written inside one would be discarded along with the 401
+// it answers — which is precisely the bug that once left the login lockout
+// unreachable. The use case therefore owns its writes and takes them
+// sequentially, so the request still holds at most one pooled connection at any
+// instant.
 type MfaVerifyHandler struct {
 	usecases domain.AuthUseCases
 	cookie   CookieConfig
@@ -27,7 +38,6 @@ func (h *MfaVerifyHandler) DefineRoute() types.RouteDefinition {
 		Method:   http.MethodPost,
 		Path:     "/mfa/verify",
 		Exposure: types.Exposures.External,
-		Tx:       true,
 	}
 }
 

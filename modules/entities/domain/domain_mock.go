@@ -31,6 +31,17 @@ func (m *EntityRepositoryMock) Update(ctx context.Context, id EntityID, input Up
 	return entityOrNil(args.Get(0)), args.Error(1)
 }
 
+func (m *EntityRepositoryMock) CountDependents(ctx context.Context, id EntityID) (EntityDependents, error) {
+	args := m.Called(ctx, id)
+	dep, _ := args.Get(0).(EntityDependents)
+	return dep, args.Error(1)
+}
+
+func (m *EntityRepositoryMock) QueueBlobReclaim(ctx context.Context, id EntityID) (int, error) {
+	args := m.Called(ctx, id)
+	return args.Int(0), args.Error(1)
+}
+
 func (m *EntityRepositoryMock) Delete(ctx context.Context, id EntityID) (bool, error) {
 	args := m.Called(ctx, id)
 	return args.Bool(0), args.Error(1)

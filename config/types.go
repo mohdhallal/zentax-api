@@ -20,6 +20,7 @@ type Config struct {
 	NexusInternalAPI NexusInternalAPIConfig `json:"nexusInternalApi"`
 	Auth             AuthConfig             `json:"auth"`
 	Storage          StorageConfig          `json:"storage"`
+	RateLimit        RateLimitConfig        `json:"rateLimit"`
 }
 
 // Storage drivers (ADR-0022): the filesystem adapter (self-host default, tests)

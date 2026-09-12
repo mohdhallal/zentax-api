@@ -126,6 +126,8 @@ func TestWorkflowDelete_NotFound(t *testing.T) {
 	repo := new(domain.WorkflowRepositoryMock)
 	uc := NewUseCases(repo)
 
+	repo.On("CountDependents", ctx, "missing").Return(domain.WorkflowDependents{}, nil).Once()
+	repo.On("QueueBlobReclaim", ctx, "missing").Return(0, nil).Once()
 	repo.On("Delete", ctx, "missing").Return(false, nil).Once()
 
 	err := uc.Delete(ctx, "missing")
@@ -139,11 +141,34 @@ func TestWorkflowDelete_Success(t *testing.T) {
 	repo := new(domain.WorkflowRepositoryMock)
 	uc := NewUseCases(repo)
 
+	repo.On("CountDependents", ctx, "wf1").
+		Return(domain.WorkflowDependents{TaskInstances: 4, WorkflowTasks: 2}, nil).Once()
+	repo.On("QueueBlobReclaim", ctx, "wf1").Return(0, nil).Once()
 	repo.On("Delete", ctx, "wf1").Return(true, nil).Once()
 
 	err := uc.Delete(ctx, "wf1")
 	require.NoError(t, err)
 	repo.AssertExpectations(t)
+}
+
+// ADR-0018: approved work below the workflow makes the delete a conflict, and
+// nothing is queued or deleted — the census is the only call that happens.
+func TestWorkflowDelete_RefusedWhenApprovedWorkExists(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	repo := new(domain.WorkflowRepositoryMock)
+	uc := NewUseCases(repo)
+
+	repo.On("CountDependents", ctx, "wf1").
+		Return(domain.WorkflowDependents{ApprovedTaskInstances: 24, TaskInstances: 108}, nil).Once()
+
+	err := uc.Delete(ctx, "wf1")
+	require.IsType(t, &apperrors.ConflictError{}, err)
+	assert.Contains(t, err.Error(), "24 approved task instance(s)")
+	assert.Contains(t, err.Error(), "archive")
+	repo.AssertExpectations(t)
+	repo.AssertNotCalled(t, "Delete", ctx, "wf1")
+	repo.AssertNotCalled(t, "QueueBlobReclaim", ctx, "wf1")
 }
 
 func TestWorkflowList_Aggregates(t *testing.T) {

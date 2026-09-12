@@ -18,9 +18,12 @@ const (
 // WaitReady blocks until GET /health/ready answers 200, or gives up after
 // WaitReadyAttempts tries WaitReadyInterval apart.
 //
-// This is the ONLY place the client retries. Every other method performs
-// exactly one request: a seeder that silently repeats a POST would create
-// duplicate rows, and a verifier that repeats a GET would hide a flapping API.
+// This is the only place the client retries a request the server ANSWERED.
+// Every other method performs exactly one request: a seeder that silently
+// repeats a POST would create duplicate rows, and a verifier that repeats a
+// GET would hide a flapping API. The single exception is a 429, which the
+// rate limiter returns without running the handler at all — roundTrip waits
+// out its Retry-After and re-sends, and says why there.
 func (c *Client) WaitReady(ctx context.Context) error {
 	return c.WaitReadyFor(ctx, WaitReadyAttempts, WaitReadyInterval)
 }

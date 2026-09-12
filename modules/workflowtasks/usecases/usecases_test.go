@@ -140,6 +140,7 @@ func TestWTDelete_NotFound(t *testing.T) {
 	repo := new(domain.WorkflowTaskRepositoryMock)
 	uc := NewUseCases(repo)
 
+	repo.On("CountDependents", ctx, "missing").Return(domain.WorkflowTaskDependents{}, nil).Once()
 	repo.On("Delete", ctx, "missing").Return(false, nil).Once()
 
 	err := uc.Delete(ctx, "missing")
@@ -153,11 +154,31 @@ func TestWTDelete_Success(t *testing.T) {
 	repo := new(domain.WorkflowTaskRepositoryMock)
 	uc := NewUseCases(repo)
 
+	repo.On("CountDependents", ctx, "wt1").
+		Return(domain.WorkflowTaskDependents{TaskInstances: 6}, nil).Once()
 	repo.On("Delete", ctx, "wt1").Return(true, nil).Once()
 
 	err := uc.Delete(ctx, "wt1")
 	require.NoError(t, err)
 	repo.AssertExpectations(t)
+}
+
+// ADR-0018: removing a template step that generated approved instances is a
+// conflict — the instances are attested evidence, not template detail.
+func TestWTDelete_RefusedWhenApprovedWorkExists(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	repo := new(domain.WorkflowTaskRepositoryMock)
+	uc := NewUseCases(repo)
+
+	repo.On("CountDependents", ctx, "wt1").
+		Return(domain.WorkflowTaskDependents{ApprovedTaskInstances: 3, TaskInstances: 12}, nil).Once()
+
+	err := uc.Delete(ctx, "wt1")
+	require.IsType(t, &apperrors.ConflictError{}, err)
+	assert.Contains(t, err.Error(), "3 approved task instance(s)")
+	repo.AssertExpectations(t)
+	repo.AssertNotCalled(t, "Delete", ctx, "wt1")
 }
 
 func TestWTList_Aggregates(t *testing.T) {

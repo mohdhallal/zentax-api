@@ -74,6 +74,19 @@ describe.each(ENVS)('ZenTax-%s-Api', (env) => {
     expect(() => synthEnvWith(env, { envOverrides: { corsAllowedOrigins: 'https://a.example/path' } })).toThrow(/corsAllowedOrigins/);
   });
 
+  test('RATE_LIMIT_TRUSTED_PROXIES is the cell\'s own VPC range, so a header forged from outside it is ignored', () => {
+    const byName = (t: import('aws-cdk-lib/assertions').Template) =>
+      Object.fromEntries(taskDefinition(t, '-api').Properties.ContainerDefinitions[0].Environment.map((e: any) => [e.Name, e.Value]));
+    // The api trusts nothing by default (a broad private-range default was a
+    // bypass: any caller reaching the port had its own forged header believed).
+    // In a cell the hops in front of it are the ALB, which appends the real
+    // client address, and the web tasks — exactly this range.
+    const cidr = byName(api).RATE_LIMIT_TRUSTED_PROXIES;
+    expect(cidr).toMatch(/^10\.\d+\.0\.0\/16$/);
+    const moved = synthEnvWith(env, { envOverrides: { cidr: '10.99.0.0/16' } });
+    expect(byName(moved.api).RATE_LIMIT_TRUSTED_PROXIES).toBe('10.99.0.0/16');
+  });
+
   test('PUBLIC_BASE_URL is https://<publicHostname> on the api task, and absent when no public hostname is configured', () => {
     const byName = (t: import('aws-cdk-lib/assertions').Template) =>
       Object.fromEntries(taskDefinition(t, '-api').Properties.ContainerDefinitions[0].Environment.map((e: any) => [e.Name, e.Value]));

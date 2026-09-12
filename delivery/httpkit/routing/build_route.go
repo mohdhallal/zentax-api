@@ -2,10 +2,12 @@ package routing
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/mohamadhallal/zentax-api/app"
 	"github.com/mohamadhallal/zentax-api/delivery/httpkit/httperr"
 	"github.com/mohamadhallal/zentax-api/delivery/httpkit/middlewares"
+	"github.com/mohamadhallal/zentax-api/delivery/httpkit/middlewares/ratelimit"
 	"github.com/mohamadhallal/zentax-api/delivery/httpkit/types"
 )
 
@@ -36,6 +38,7 @@ func RegisterRoute(router *Router, route types.Route) {
 
 func buildRoute(route types.Route, router *Router) http.HandlerFunc {
 	config := route.DefineRoute()
+	fullPath := fullRoutePath(router, config.Path)
 
 	var handler http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		input := &types.ValidatedInput{
@@ -85,12 +88,31 @@ func buildRoute(route types.Route, router *Router) http.HandlerFunc {
 		}
 	}
 
+	// The per-PRINCIPAL request budget sits between the transaction and
+	// RequireAuth, and that position is the whole point: it must run AFTER
+	// RequireAuth (it keys off the authenticated principal — keying an
+	// authenticated route by address would put a whole corporate NAT, or one
+	// user's several sessions, into a single budget) and BEFORE the transaction
+	// (a shed request must not first borrow a pooled connection and open a
+	// transaction, which is the resource the shedding is meant to protect).
+	if config.Tenant {
+		handler = ratelimit.ByPrincipal(fullPath)(handler)
+	}
+
 	// RequireAuth must wrap OUTSIDE Transaction so the credential-derived tenant
 	// (session cookie for humans, bearer API token for service accounts) is
 	// bound to the context before WithinTransaction opens the tx and sets the
 	// GUCs (ADR-0011 + machine identity B1).
 	if config.Tenant {
 		handler = middlewares.RequireAuth(router.SessionAuth, router.SessionCookieName)(handler)
+	}
+
+	// The verification bound (argon2id is 64 MiB per in-flight verification, and
+	// /auth/login pays that for an unknown address too) wraps OUTSIDE RequireAuth
+	// and the transaction, so a shed request holds nothing at all. Which paths it
+	// gates is configuration; every other route is a pass-through.
+	if router.Mode == types.ModeExternal {
+		handler = ratelimit.Verification(fullPath)(handler)
 	}
 
 	// CSRF (ADR-0011): every route of the EXTERNAL router is origin-checked here
@@ -124,7 +146,33 @@ func buildRoute(route types.Route, router *Router) http.HandlerFunc {
 		}
 	}
 
+	// The per-ADDRESS budget is the OUTERMOST middleware of an unauthenticated
+	// external route: a shed request must cost as little as possible, so it is
+	// answered before the origin check, before any body is parsed and long
+	// before a credential is read. Routes that declare a tenant are covered by
+	// the per-principal budget above instead.
+	//
+	// Wiring both here rather than in the handlers is deliberate, for the same
+	// reason the CSRF guard moved here: a new route cannot forget a control it
+	// never had to remember.
+	if router.Mode == types.ModeExternal && !config.Tenant {
+		handler = ratelimit.ByAddress(fullPath)(handler)
+	}
+
 	return handler.ServeHTTP
+}
+
+// fullRoutePath is the path a route is reachable at — the group prefix plus the
+// route's own path ("/auth" + "/login"). It repeats Router.addMeta's
+// construction because the two are computed at different moments for different
+// consumers (the OpenAPI registry there, the rate-limit policy here) and neither
+// file may reach into the other's.
+func fullRoutePath(router *Router, path string) string {
+	full := strings.TrimRight(router.prefix+"/"+strings.TrimLeft(path, "/"), "/")
+	if full == "" {
+		return "/"
+	}
+	return full
 }
 
 func validateInput(

@@ -186,6 +186,14 @@ func (c *Config) validate() error {
 	if err := c.Storage.validate(); err != nil {
 		return fmt.Errorf("invalid storage config: %w", err)
 	}
+	// Rate-limit defaults are code, not file: every environment that boots
+	// through Load gets the limits whether or not its config file mentions
+	// them. A control that only exists where someone remembered to write it
+	// down is a control the next cell ships without.
+	c.RateLimit.ApplyDefaults()
+	if err := c.RateLimit.validate(); err != nil {
+		return fmt.Errorf("invalid rate limit config: %w", err)
+	}
 	return nil
 }
 
@@ -316,6 +324,7 @@ func mergeEnvOverrides(conf *Config) {
 		}
 	}
 	mergeStorageEnvOverrides(&conf.Storage)
+	mergeRateLimitEnvOverrides(&conf.RateLimit)
 }
 
 // mergeAppEnvOverrides applies PUBLIC_BASE_URL over app.publicBaseUrl. An

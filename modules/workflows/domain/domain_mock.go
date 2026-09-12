@@ -30,6 +30,17 @@ func (m *WorkflowRepositoryMock) Update(ctx context.Context, id WorkflowID, inpu
 	return workflowOrNil(args.Get(0)), args.Error(1)
 }
 
+func (m *WorkflowRepositoryMock) CountDependents(ctx context.Context, id WorkflowID) (WorkflowDependents, error) {
+	args := m.Called(ctx, id)
+	dep, _ := args.Get(0).(WorkflowDependents)
+	return dep, args.Error(1)
+}
+
+func (m *WorkflowRepositoryMock) QueueBlobReclaim(ctx context.Context, id WorkflowID) (int, error) {
+	args := m.Called(ctx, id)
+	return args.Int(0), args.Error(1)
+}
+
 func (m *WorkflowRepositoryMock) Delete(ctx context.Context, id WorkflowID) (bool, error) {
 	args := m.Called(ctx, id)
 	return args.Bool(0), args.Error(1)
