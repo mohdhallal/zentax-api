@@ -89,8 +89,9 @@ func (m *SessionRepositoryMock) Revoke(ctx context.Context, id string) error {
 	return m.Called(ctx, id).Error(0)
 }
 
-func (m *SessionRepositoryMock) RevokeAllForUser(ctx context.Context, userID string) error {
-	return m.Called(ctx, userID).Error(0)
+func (m *SessionRepositoryMock) RevokeAllForUser(ctx context.Context, userID string) (int, error) {
+	args := m.Called(ctx, userID)
+	return args.Int(0), args.Error(1)
 }
 
 func sessionOrNil(v any) *Session {
@@ -135,9 +136,9 @@ func (m *TokenRepositoryMock) Revoke(ctx context.Context, id, tenantID string) (
 	return args.Bool(0), args.Error(1)
 }
 
-func (m *TokenRepositoryMock) RevokeAllForUser(ctx context.Context, userID string) error {
+func (m *TokenRepositoryMock) RevokeAllForUser(ctx context.Context, userID string) (int, error) {
 	args := m.Called(ctx, userID)
-	return args.Error(0)
+	return args.Int(0), args.Error(1)
 }
 
 func tokenOrNil(v any) *APIToken {

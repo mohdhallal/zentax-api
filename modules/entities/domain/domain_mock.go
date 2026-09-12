@@ -37,6 +37,12 @@ func (m *EntityRepositoryMock) CountDependents(ctx context.Context, id EntityID)
 	return dep, args.Error(1)
 }
 
+func (m *EntityRepositoryMock) ScopedGrants(ctx context.Context, id EntityID) ([]ScopedGrant, error) {
+	args := m.Called(ctx, id)
+	grants, _ := args.Get(0).([]ScopedGrant)
+	return grants, args.Error(1)
+}
+
 func (m *EntityRepositoryMock) QueueBlobReclaim(ctx context.Context, id EntityID) (int, error) {
 	args := m.Called(ctx, id)
 	return args.Int(0), args.Error(1)

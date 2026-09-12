@@ -193,7 +193,9 @@ func TestEntityDelete_Success(t *testing.T) {
 
 	repo.On("GetById", ctx, "e1").Return(sampleEntity(), nil).Once()
 	repo.On("CountDependents", ctx, "e1").
-		Return(domain.EntityDependents{Workflows: 1, TaskInstances: 3}, nil).Once()
+		Return(domain.EntityDependents{Workflows: 1, TaskInstances: 3, UserGrantsRevoked: 1}, nil).Once()
+	repo.On("ScopedGrants", ctx, "e1").
+		Return([]domain.ScopedGrant{{UserID: "u1", Role: "reviewer"}}, nil).Once()
 	repo.On("QueueBlobReclaim", ctx, "e1").Return(2, nil).Once()
 	repo.On("Delete", ctx, "e1").Return(true, nil).Once()
 

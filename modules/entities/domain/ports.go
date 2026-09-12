@@ -15,6 +15,11 @@ type EntityRepository interface {
 	// entity would cascade away (and the child entities it would detach). An
 	// entity that does not exist counts zero.
 	CountDependents(ctx context.Context, id EntityID) (EntityDependents, error)
+	// ScopedGrants reads the RBAC grants scoped to this entity — who holds
+	// access to its subtree, at which role — before the delete cascades them
+	// away. user_grants is hard-deleted, so this is the last moment they exist.
+	// Runs on the delete's own transaction.
+	ScopedGrants(ctx context.Context, id EntityID) ([]ScopedGrant, error)
 	// QueueBlobReclaim copies the storage key of every document version under
 	// the entity's workflows into the reclaim queue and returns how many were
 	// queued, so the purge job can still reach objects whose metadata rows the

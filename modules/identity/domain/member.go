@@ -133,3 +133,25 @@ type AcceptInviteInput struct {
 type AcceptInviteResult struct {
 	Email string
 }
+
+// CredentialRevocation is what a disable actually did to the principal's live
+// access: how many credentials of each kind it killed. Disabling a member ends
+// every session, every bearer token and every outstanding invite in one act,
+// and none of those rows carries any record of WHY it was tombstoned — so the
+// counts are the audit fact (ADR-0008, member.credentials_revoked).
+//
+// A kind whose count is zero is recorded as zero, not omitted: "no token was
+// live" is an answer an access review needs, and it is not the same answer as
+// "nobody looked".
+type CredentialRevocation struct {
+	Sessions  int
+	APITokens int
+	Invites   int
+}
+
+// RevocationTriggerDisabled names the act that ended the credentials, from the
+// closed vocabulary of acts that can. Today a disable is the only one — the
+// explicit token route writes api_token.revoked instead — and the constant
+// exists so a second trigger (a tenant suspension, a compromise response) is
+// added to the vocabulary rather than to the free text of an audit payload.
+const RevocationTriggerDisabled = "member.disabled"

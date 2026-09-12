@@ -62,9 +62,16 @@ func (r *InviteRepo) MarkAccepted(ctx context.Context, id string, at time.Time) 
 	return n > 0, err
 }
 
-func (r *InviteRepo) RevokeUnusedForUser(ctx context.Context, userID string) error {
-	_, err := r.db.ExecContext(ctx,
+// RevokeUnusedForUser kills every outstanding invite of a user and reports how
+// many. An accepted token is left alone (it is spent, not live), so the count
+// is the number of still-usable onboarding credentials this call ended.
+func (r *InviteRepo) RevokeUnusedForUser(ctx context.Context, userID string) (int, error) {
+	res, err := r.db.ExecContext(ctx,
 		`UPDATE invite_tokens SET revoked_at = NOW()
 		 WHERE user_id = $1 AND accepted_at IS NULL AND revoked_at IS NULL`, userID)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
 }

@@ -291,12 +291,44 @@ func (s *DocumentsSuite) TestUploadListDownloadVersioningAndMetadata() {
 	s.Require().Contains(actions, "document.created")
 	s.Require().Contains(actions, "document.version_added")
 	s.Require().Contains(actions, "document.updated")
-	s.Require().Equal("draft_return", actions["document.created"]["documentType"])
-	s.Require().Equal("compliance", actions["document.created"]["category"])
+
+	// ---- document.created: what the evidence IS, and what it hangs off. ----
+	// The link fields are the ones a workflow delete destroys: it hard-cascades
+	// documents and document_versions with no per-row entry, so after it runs
+	// these two entries are the only thing tying the upload to the workflow it
+	// documented. resource_id points at a row that is gone by then.
+	createdFields, ok := actions["document.created"]["fields"].(map[string]any)
+	s.Require().True(ok, "the upload must record a change set: %v", actions["document.created"])
+	s.Require().Equal(map[string]any{"to": "draft_return"}, createdFields["documentType"])
+	s.Require().Equal(map[string]any{"to": "compliance"}, createdFields["category"])
+	s.Require().Equal(map[string]any{"to": sd.WorkflowID}, createdFields["workflowId"],
+		"the workflow the evidence was filed against")
+	s.Require().Equal(map[string]any{"to": ti}, createdFields["taskInstanceId"],
+		"the step it was filed against — the ADR-0018 freeze boundary")
+	s.Require().Equal(map[string]any{"to": "set"}, createdFields["label"], "a label is dated, never quoted")
+	s.Require().Equal(map[string]any{"to": "set"}, createdFields["notes"])
+	// The version facts sit beside the change set: an upload is one-sided and a
+	// version is immutable, so none of them is a before/after value.
 	s.Require().EqualValues(1, actions["document.created"]["version"])
 	s.Require().EqualValues(len(pdfV1), actions["document.created"]["fileSize"])
+	s.Require().Equal(sha(pdfV1), actions["document.created"]["sha256"],
+		"the ledger must attest WHICH bytes were filed")
+
+	// ---- document.version_added: the same link, and the new bytes. ----
+	addedFields, ok := actions["document.version_added"]["fields"].(map[string]any)
+	s.Require().True(ok, "a new version must record what it belongs to: %v",
+		actions["document.version_added"])
+	s.Require().Equal(map[string]any{"to": sd.WorkflowID}, addedFields["workflowId"])
+	s.Require().Equal(map[string]any{"to": ti}, addedFields["taskInstanceId"])
+	s.Require().NotContains(addedFields, "documentType",
+		"a version add does not touch the metadata and must not claim it did")
+	s.Require().NotContains(addedFields, "category")
 	s.Require().EqualValues(2, actions["document.version_added"]["version"])
 	s.Require().EqualValues(len(pdfV2), actions["document.version_added"]["fileSize"])
+	s.Require().Equal(sha(pdfV2), actions["document.version_added"]["sha256"])
+	s.Require().NotEqual(actions["document.created"]["sha256"],
+		actions["document.version_added"]["sha256"],
+		"two different files must be distinguishable in the trail")
 
 	// The two updates are told apart, which is the point of the envelope: the
 	// first reclassified the document, the second only cleared the notes. The

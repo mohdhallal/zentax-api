@@ -5,6 +5,7 @@ import (
 
 	"github.com/mohamadhallal/zentax-api/app"
 	"github.com/mohamadhallal/zentax-api/modules/datatemplates/domain"
+	"github.com/mohamadhallal/zentax-api/platform/audit"
 	"github.com/mohamadhallal/zentax-api/platform/authz"
 )
 
@@ -30,22 +31,42 @@ func (uc *UseCases) SeedPredefined(ctx context.Context) ([]domain.DataTemplate, 
 		have[t.Name] = true
 	}
 
+	// Each insert is recorded as the schema it wrote, through the same
+	// data_template.created action and the same whitelist the custom route
+	// uses. A predefined template is not a lesser object: its numericValidation
+	// decides which figures the system will accept from every task instance
+	// that attaches it, and until now three of them entered a tenant behind a
+	// single {"inserted": 3} — the one shape the third pass over this envelope
+	// exists to remove, since a count made "the VAT schema arrived" identical
+	// to "some templates arrived". Recording each one also puts a real
+	// data_template id in resource_id, so the resource index finds a
+	// predefined template's history the way it finds a custom one's.
 	inserted := 0
 	for _, tpl := range domain.PredefinedTemplates() {
 		if have[tpl.Name] {
 			continue
 		}
-		if _, err := uc.repo.Create(ctx, tpl); err != nil {
+		created, err := uc.repo.Create(ctx, tpl)
+		if err != nil {
+			return nil, err
+		}
+		if err := uc.audit.Record(ctx, "data_template.created", "data_template", created.ID,
+			audit.Changes(nil, auditValues(created))); err != nil {
 			return nil, err
 		}
 		inserted++
 	}
 
-	// One entry per seeding that actually inserted something; the resource is
-	// the tenant's template registry, so the tenant id is the resource id
-	// (audit_log.resource_id is a NOT NULL uuid).
+	// Plus one entry for the seeding ACT, which the per-template entries cannot
+	// express: that these templates arrived together, in one call, and how many
+	// of the catalogue the tenant was missing. Its resource is the tenant — the
+	// registry that was seeded — and it now SAYS so. It used to declare
+	// resource_type "data_template" while passing the tenant id as resource_id,
+	// the only call site in the tree whose resource_id was not a row of its
+	// declared type, which put a non-template id into the resource index and
+	// made the entry unjoinable to anything.
 	if inserted > 0 {
-		if err := uc.audit.Record(ctx, "data_template.predefined_seeded", "data_template", app.GetTenantID(ctx),
+		if err := uc.audit.Record(ctx, "data_template.predefined_seeded", "tenant", app.GetTenantID(ctx),
 			map[string]any{"inserted": inserted}); err != nil {
 			return nil, err
 		}

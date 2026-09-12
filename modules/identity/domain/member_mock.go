@@ -91,9 +91,9 @@ func (m *InviteTokenRepositoryMock) MarkAccepted(ctx context.Context, id string,
 	return a.Bool(0), a.Error(1)
 }
 
-func (m *InviteTokenRepositoryMock) RevokeUnusedForUser(ctx context.Context, userID string) error {
+func (m *InviteTokenRepositoryMock) RevokeUnusedForUser(ctx context.Context, userID string) (int, error) {
 	a := m.Called(ctx, userID)
-	return a.Error(0)
+	return a.Int(0), a.Error(1)
 }
 
 func inviteOrNil(v any) *InviteToken {

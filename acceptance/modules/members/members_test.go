@@ -1,6 +1,7 @@
 package members_test
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -189,10 +190,218 @@ func (s *MembersSuite) TestInviteAcceptLogin() {
 	}
 	s.Require().Contains(actions, "member.invited")
 	s.Require().Contains(actions, "member.activated")
-	s.Require().Equal("preparer", actions["member.invited"]["role"])
-	s.Require().Equal(false, actions["member.invited"]["scoped"])
+	invited, hasFields := actions["member.invited"]["fields"].(map[string]any)
+	s.Require().True(hasFields, "an invite must record the member it created: %v", actions["member.invited"])
+	s.Require().Equal(map[string]any{"to": []any{map[string]any{"role": "preparer"}}},
+		invited["grants"], "the grant set, in the shape member.role_changed records")
+	s.Require().Equal(map[string]any{"to": "human"}, invited["kind"])
+	s.Require().Equal(map[string]any{"to": "invited"}, invited["status"])
+	s.Require().Equal(map[string]any{"to": "set"}, invited["email"], "dated, never quoted")
+	s.Require().Equal(map[string]any{"to": "set"}, invited["name"])
+	s.Require().NotEmpty(invited["inviteExpiresAt"], "the window of the credential it minted")
 	s.Require().NotContains(actions["member.invited"], "email")
 	s.Require().NotContains(actions["member.invited"], "name")
+}
+
+// TestInviteRecordsTheEntityAScopedMemberIsConfinedTo: a member invited with a
+// SCOPED grant used to be recorded as {"role": …, "scoped": true} — the role,
+// and the bare fact that a scope existed. The entity it named was in no row
+// anywhere: user_grants is hard-deleted, so replacing the grant left the
+// original access unreconstructable, while the identical grant to a machine
+// (service_account.created) had been recorded in full for a wave.
+func (s *MembersSuite) TestInviteRecordsTheScopeEntity() {
+	tenant := s.InsertTenant("mb-scope", "Members Tenant Scope").String()
+
+	var entity struct {
+		ID string `json:"id"`
+	}
+	r := s.As(tenant).POST(s.T(), "/entities", map[string]any{
+		"name": "Acme France SAS", "country": "France",
+		"financialYearEnd": "12-31", "fiscalCalendarPattern": "standard",
+	})
+	r.AssertStatus(s.T(), http.StatusCreated)
+	r.DecodeData(s.T(), &entity)
+
+	const email, name = "scoped.reviewer@acme.com", "Scoped Reviewer"
+	var inv struct {
+		Member struct {
+			ID string `json:"id"`
+		} `json:"member"`
+	}
+	r = s.As(tenant).POST(s.T(), "/members", map[string]any{
+		"email": email, "name": name, "role": "reviewer", "scopeEntityId": entity.ID,
+	})
+	r.AssertStatus(s.T(), http.StatusCreated)
+	r.DecodeData(s.T(), &inv)
+
+	// The grant is then REPLACED, which hard-deletes the scoped row. From here
+	// on the invite envelope is the only record that it ever existed.
+	s.As(tenant).PUT(s.T(), "/members/"+inv.Member.ID+"/role",
+		map[string]any{"role": "viewer"}).AssertStatus(s.T(), http.StatusOK)
+
+	var audit []struct {
+		Action  string         `json:"action"`
+		Details map[string]any `json:"details"`
+	}
+	s.As(tenant).GET(s.T(), "/audit-log?resourceId="+inv.Member.ID).DecodeData(s.T(), &audit)
+	actions := map[string]map[string]any{}
+	for _, a := range audit {
+		actions[a.Action] = a.Details
+	}
+
+	invited, ok := actions["member.invited"]["fields"].(map[string]any)
+	s.Require().True(ok, "the invite must record a change set: %v", actions["member.invited"])
+	scoped := []any{map[string]any{"role": "reviewer", "scopeEntityId": entity.ID}}
+	s.Require().Equal(map[string]any{"to": scoped}, invited["grants"],
+		"the entity a scoped human was confined to must be named")
+
+	// And the replacement reads against it: the trail now answers "what could
+	// this person do before?" from the invite forward, not just from the first
+	// grant edit.
+	changed, ok := actions["member.role_changed"]["fields"].(map[string]any)
+	s.Require().True(ok, "the replacement must record a change set: %v", actions["member.role_changed"])
+	s.Require().Equal(map[string]any{
+		"from": scoped, "to": []any{map[string]any{"role": "viewer"}},
+	}, changed["grants"])
+
+	raw, err := json.Marshal(audit)
+	s.Require().NoError(err)
+	for _, secret := range []string{email, name, "Acme France SAS"} {
+		s.Require().NotContains(string(raw), secret, "the trail quoted %q", secret)
+	}
+}
+
+// TestDisableRecordsTheCredentialsItKilled: disabling a principal kills every
+// live session, bearer token and outstanding invite in one act, and nothing
+// recorded it — the trail showed a status change while the security event went
+// unrecorded, so an auditor reading it concluded a token issued with a 90-day
+// life was still good. The revocation is now its own entry, beside the status
+// change that caused it, counting what fell and of which kind.
+func (s *MembersSuite) TestDisableRecordsTheCredentialRevocation() {
+	tenant := s.InsertTenant("mb-revoke", "Members Tenant Revoke").String()
+
+	// A human with a live session: invited, accepted, signed in.
+	inv := s.invite(tenant, "erin@acme.com", "Erin Preparer", "preparer")
+	s.accept(inv.InviteToken, "correct-horse-battery-staple").AssertStatus(s.T(), http.StatusOK)
+	s.login("erin@acme.com", "correct-horse-battery-staple").AssertStatus(s.T(), http.StatusOK)
+
+	s.As(tenant).PUT(s.T(), "/members/"+inv.Member.ID,
+		map[string]any{"name": "Erin Preparer", "status": "disabled"}).
+		AssertStatus(s.T(), http.StatusOK)
+
+	var audit []struct {
+		Action  string         `json:"action"`
+		Details map[string]any `json:"details"`
+	}
+	s.As(tenant).GET(s.T(), "/audit-log?resourceId="+inv.Member.ID).DecodeData(s.T(), &audit)
+	actions := map[string]map[string]any{}
+	for _, a := range audit {
+		actions[a.Action] = a.Details
+	}
+
+	// The status change is still recorded, and it is NOT where the revocation
+	// lives: a status change is reversible and belongs to the member row, a
+	// revocation is irreversible and happened to other rows entirely.
+	updated, ok := actions["member.updated"]["fields"].(map[string]any)
+	s.Require().True(ok, "the disable must record a change set: %v", actions["member.updated"])
+	s.Require().Equal(map[string]any{"from": "active", "to": "disabled"}, updated["status"])
+
+	s.Require().Contains(actions, "member.credentials_revoked",
+		"the security event must be its own fact: %v", actions)
+	revoked := actions["member.credentials_revoked"]
+	s.Require().Equal("human", revoked["principalKind"])
+	s.Require().Equal("member.disabled", revoked["trigger"])
+	counts, ok := revoked["credentialsRevoked"].(map[string]any)
+	s.Require().True(ok, "the revocation must count what fell, by kind: %v", revoked)
+	s.Require().EqualValues(1, counts["sessions"], "the live session it killed")
+	s.Require().EqualValues(0, counts["apiTokens"], "a human holds none")
+	s.Require().EqualValues(0, counts["invites"], "the invite was already spent")
+
+	// Killed for real: the session no longer authenticates.
+	s.login("erin@acme.com", "correct-horse-battery-staple").AssertStatus(s.T(), http.StatusUnauthorized)
+}
+
+// TestDisablingAServiceAccountRecordsTheTokensItKilled: the machine half of the
+// same event, and the sharper one — a bearer token is a STANDING credential
+// with a stated expiry, so the chain said "issued 90 days ago, good for 90
+// days" and nothing contradicted it. The explicit revoke route has always
+// written api_token.revoked; disabling the account wrote nothing, so the same
+// fact was visible through one door and invisible through the other.
+func (s *MembersSuite) TestDisablingAServiceAccountRecordsTheTokensItKilled() {
+	tenant := s.InsertTenant("mb-svc-revoke", "Members Tenant SVC").String()
+
+	var sa struct {
+		ID string `json:"id"`
+	}
+	r := s.As(tenant).POST(s.T(), "/service-accounts",
+		map[string]any{"name": "nightly-filer", "role": "preparer"})
+	r.AssertStatus(s.T(), http.StatusCreated)
+	r.DecodeData(s.T(), &sa)
+
+	var tok struct {
+		Token string `json:"token"`
+	}
+	for _, label := range []string{"primary", "rotation"} {
+		r = s.As(tenant).POST(s.T(), "/service-accounts/"+sa.ID+"/tokens",
+			map[string]any{"label": label, "expiresInDays": 90})
+		r.AssertStatus(s.T(), http.StatusCreated)
+		r.DecodeData(s.T(), &tok)
+	}
+	// The last one works before the disable.
+	machine := s.Client.External().WithBearer(tok.Token)
+	machine.GET(s.T(), "/entities").AssertStatus(s.T(), http.StatusOK)
+
+	s.As(tenant).PUT(s.T(), "/members/"+sa.ID,
+		map[string]any{"name": "nightly-filer", "status": "disabled"}).
+		AssertStatus(s.T(), http.StatusOK)
+
+	var audit []struct {
+		Action  string         `json:"action"`
+		Details map[string]any `json:"details"`
+	}
+	s.As(tenant).GET(s.T(), "/audit-log?resourceId="+sa.ID).DecodeData(s.T(), &audit)
+	actions := map[string]map[string]any{}
+	for _, a := range audit {
+		actions[a.Action] = a.Details
+	}
+
+	s.Require().Contains(actions, "member.credentials_revoked",
+		"a machine losing its standing credentials is a security event: %v", actions)
+	revoked := actions["member.credentials_revoked"]
+	s.Require().Equal("service", revoked["principalKind"],
+		"a machine and a person losing access are different events, and only the kind separates them")
+	s.Require().Equal("member.disabled", revoked["trigger"])
+	counts, ok := revoked["credentialsRevoked"].(map[string]any)
+	s.Require().True(ok, "the revocation must count what fell, by kind: %v", revoked)
+	s.Require().EqualValues(2, counts["apiTokens"], "both live tokens")
+	s.Require().EqualValues(0, counts["sessions"], "a machine holds none")
+	s.Require().EqualValues(0, counts["invites"])
+
+	// Killed for real.
+	machine.GET(s.T(), "/entities").AssertStatus(s.T(), http.StatusUnauthorized)
+
+	// And the disable is idempotent in the ledger's terms: nothing was live the
+	// second time, and the entry says so rather than going silent — the reader
+	// can tell "nothing to revoke" from "the revocation never ran".
+	s.As(tenant).PUT(s.T(), "/members/"+sa.ID,
+		map[string]any{"name": "nightly-filer", "status": "disabled"}).
+		AssertStatus(s.T(), http.StatusOK)
+
+	var again []struct {
+		Action  string         `json:"action"`
+		Details map[string]any `json:"details"`
+	}
+	s.As(tenant).GET(s.T(), "/audit-log?resourceId="+sa.ID).DecodeData(s.T(), &again)
+	var revocations []map[string]any
+	for _, a := range again {
+		if a.Action == "member.credentials_revoked" {
+			revocations = append(revocations, a.Details)
+		}
+	}
+	s.Require().Len(revocations, 2, "one entry per disable")
+	second, ok := revocations[0]["credentialsRevoked"].(map[string]any) // newest first
+	s.Require().True(ok)
+	s.Require().EqualValues(0, second["apiTokens"], "nothing was left to kill, and it is recorded as zero")
 }
 
 func (s *MembersSuite) TestReissueRotatesToken() {

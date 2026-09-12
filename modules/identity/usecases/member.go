@@ -108,13 +108,24 @@ func (uc *UseCases) Invite(ctx context.Context, input domain.CreateMemberInput) 
 		return nil, err
 	}
 
-	if err := uc.audit.Record(ctx, "member.invited", "user", user.ID,
-		map[string]any{"role": input.Role, "scoped": input.ScopeEntityID != nil}); err != nil {
+	member, err := uc.mustMember(ctx, tenantID, user.ID)
+	if err != nil {
 		return nil, err
 	}
 
-	member, err := uc.mustMember(ctx, tenantID, user.ID)
-	if err != nil {
+	// Creating a human principal is an access grant, and it used to be the one
+	// access event recorded as a summary rather than a state: {"role": …,
+	// "scoped": true} named the role and said only that a scope EXISTED, so the
+	// entity a scoped person was confined to was in no row anywhere —
+	// user_grants is hard-deleted, so once the grant is replaced the original
+	// is unreconstructable. The same grant to a MACHINE has been recorded in
+	// full since service_account.created, which made an invite the only door
+	// out of that record. Both doors now write the same envelope, field for
+	// field, off the member this call already had to load for its response —
+	// plus the window of the credential the invite just minted, so an invite
+	// and a re-issue (member.invite_reissued) also compare directly.
+	if err := uc.audit.Record(ctx, "member.invited", "user", member.ID,
+		audit.Changes(nil, auditInvitedValues(member, expiresAt))); err != nil {
 		return nil, err
 	}
 	return &domain.InviteResult{Member: member, RawToken: raw, ExpiresAt: expiresAt}, nil
@@ -134,7 +145,7 @@ func (uc *UseCases) ReissueInvite(ctx context.Context, memberID string) (*domain
 	if !member.IsInvited() || member.IsService() {
 		return nil, apperrors.NewConflict(domain.MsgMemberNotInvited)
 	}
-	if err := uc.invites.RevokeUnusedForUser(ctx, member.ID); err != nil {
+	if _, err := uc.invites.RevokeUnusedForUser(ctx, member.ID); err != nil {
 		return nil, err
 	}
 	raw, expiresAt, err := uc.issueInvite(ctx, member.ID, tenantID)
@@ -225,15 +236,22 @@ func (uc *UseCases) UpdateMember(ctx context.Context, memberID string, input dom
 		return nil, err
 	}
 
+	var revoked *domain.CredentialRevocation
 	if status == domain.StatusDisabled {
-		if err := uc.sessions.RevokeAllForUser(ctx, member.ID); err != nil {
+		sessions, err := uc.sessions.RevokeAllForUser(ctx, member.ID)
+		if err != nil {
 			return nil, err
 		}
-		if err := uc.tokens.RevokeAllForUser(ctx, member.ID); err != nil {
+		tokens, err := uc.tokens.RevokeAllForUser(ctx, member.ID)
+		if err != nil {
 			return nil, err
 		}
-		if err := uc.invites.RevokeUnusedForUser(ctx, member.ID); err != nil {
+		invites, err := uc.invites.RevokeUnusedForUser(ctx, member.ID)
+		if err != nil {
 			return nil, err
+		}
+		revoked = &domain.CredentialRevocation{
+			Sessions: sessions, APITokens: tokens, Invites: invites,
 		}
 		// Disabling the last tenant admin would orphan the tenant.
 		if err := uc.ensureTenantAdminRemains(ctx, tenantID); err != nil {
@@ -253,7 +271,59 @@ func (uc *UseCases) UpdateMember(ctx context.Context, memberID string, input dom
 		audit.Changes(auditMemberValues(member), auditMemberValues(updated))); err != nil {
 		return nil, err
 	}
+	if err := uc.recordCredentialRevocation(ctx, updated, revoked); err != nil {
+		return nil, err
+	}
 	return updated, nil
+}
+
+// recordCredentialRevocation writes the second half of a disable: the security
+// event, as its own entry, immediately after the status change that caused it.
+//
+// Why it is a separate entry rather than three more fields on member.updated.
+// A status change and a credential revocation are different facts with
+// different lifetimes and different readers. "status: active -> disabled" is a
+// change to the member ROW, and it is reversible — re-enabling restores it. The
+// revocation is not a change to any row this envelope describes: it is an
+// irreversible event on OTHER rows (sessions, api_tokens, invite_tokens), and
+// re-enabling the member does not bring a single killed credential back. Folding
+// counts into the member's change set would also break the one invariant
+// audit.Changes rests on — that `fields` is a before/after map of the resource's
+// whitelist — and would make the event unfindable: an access review that asks
+// "when did this token stop working?" can select on the action, which is
+// exactly how the explicit route's api_token.revoked is already found. Giving
+// the same fact two shapes depending on which door ended the credential is the
+// asymmetry the sweep exists to remove, and one entry per revocation, keyed by
+// its own action, is the shape the explicit door already uses.
+//
+// What it records is counts by credential KIND, not identifiers. Naming every
+// token would mean either a read-back of the rows the UPDATE just tombstoned or
+// a RETURNING clause threaded through three ports, and it would put a list of
+// credential ids in an append-only ledger for no additional answer: api_tokens
+// keeps revoked_at, so an auditor who needs the ids has the live table, joined
+// to the api_token.issued entries that already name each token as resource_id.
+// What the table cannot say is WHY they died, or that they died together, as
+// one act, by one actor, at one instant — which is precisely what this entry
+// carries. principalKind is on it because a machine losing its standing
+// credential and a person losing their sessions are different security events
+// and only the kind separates them in a trail keyed by user id.
+//
+// It is written even when every count is zero. "The revocation ran and nothing
+// was live" is an answer; silence is not, and silence is what a reader would
+// otherwise have to distinguish from "the revocation never ran".
+func (uc *UseCases) recordCredentialRevocation(ctx context.Context, member *domain.Member, revoked *domain.CredentialRevocation) error {
+	if revoked == nil {
+		return nil
+	}
+	return uc.audit.Record(ctx, "member.credentials_revoked", "user", member.ID, map[string]any{
+		"credentialsRevoked": map[string]any{
+			"sessions":  revoked.Sessions,
+			"apiTokens": revoked.APITokens,
+			"invites":   revoked.Invites,
+		},
+		"principalKind": member.Kind,
+		"trigger":       domain.RevocationTriggerDisabled,
+	})
 }
 
 // SetRole REPLACES every grant of the member with the given one.
@@ -420,6 +490,20 @@ func auditMemberValues(m *domain.Member) audit.Values {
 	}
 }
 
+// auditInvitedValues is that whitelist plus the invite window: the same fields
+// member.role_changed and service_account.created record — so the three
+// access-creation events compare field for field — and the expiry of the
+// credential that will activate the account, which is what member.invite_reissued
+// records for the second and later ones.
+func auditInvitedValues(m *domain.Member, inviteExpiresAt time.Time) audit.Values {
+	values := auditMemberValues(m)
+	if values == nil {
+		return nil
+	}
+	values["inviteExpiresAt"] = inviteExpiresAt
+	return values
+}
+
 // auditMemberGrants projects the grant set onto what an access review asks of
 // it: which role, and over which entity subtree (nothing for a tenant-wide
 // grant). The scope entity's NAME is deliberately absent — it is the entity's
@@ -533,7 +617,7 @@ func (uc *UseCases) AcceptInvite(ctx context.Context, input domain.AcceptInviteI
 			return invalid
 		}
 		// Any sibling tokens are spent too — one invite activates at most once.
-		if err := uc.invites.RevokeUnusedForUser(ctx, user.ID); err != nil {
+		if _, err := uc.invites.RevokeUnusedForUser(ctx, user.ID); err != nil {
 			return err
 		}
 		// The activation is a real transition and the user row that preceded it

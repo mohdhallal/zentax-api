@@ -214,17 +214,80 @@ func (s *DataTemplatesSuite) TestPredefinedSeedingAndListing() {
 	s.AsRole(tenant, "preparer").POST(s.T(), "/data-templates/predefined", nil).AssertStatus(s.T(), http.StatusForbidden)
 	s.AsRole(tenant, "manager").POST(s.T(), "/data-templates/predefined", nil).AssertStatus(s.T(), http.StatusOK)
 
-	// Exactly one seeding audit entry (the no-op second call records nothing).
+	// The seeding writes one entry per schema it wrote, plus one for the act —
+	// and the no-op second and third calls record nothing at all. A bare
+	// {"inserted": 3} made "the VAT schema arrived" identical to "some
+	// templates arrived", on the one resource whose change leaves no trace in
+	// the data it governs.
 	var actions []string
 	s.inTenant(tenant, func(tx *sqlx.Tx) {
 		s.Require().NoError(tx.Select(&actions, `SELECT action FROM audit_log WHERE action LIKE 'data_template.%' ORDER BY seq`))
 	})
-	s.Require().Equal([]string{"data_template.predefined_seeded"}, actions)
-	var inserted string
+	s.Require().Equal([]string{
+		"data_template.created", "data_template.created", "data_template.created",
+		"data_template.predefined_seeded",
+	}, actions)
+
+	// The summary entry names its real resource. It used to declare
+	// resource_type "data_template" while passing the tenant id as resource_id
+	// — the only call site in the tree whose resource_id was not a row of its
+	// declared type, which put a non-template id in the resource index.
+	var seeded struct {
+		ResourceType string `db:"resource_type"`
+		ResourceID   string `db:"resource_id"`
+		Inserted     string `db:"inserted"`
+	}
 	s.inTenant(tenant, func(tx *sqlx.Tx) {
-		s.Require().NoError(tx.Get(&inserted, `SELECT details->>'inserted' FROM audit_log WHERE action = 'data_template.predefined_seeded'`))
+		s.Require().NoError(tx.Get(&seeded,
+			`SELECT resource_type, resource_id, details->>'inserted' AS inserted
+			   FROM audit_log WHERE action = 'data_template.predefined_seeded'`))
 	})
-	s.Require().Equal("3", inserted)
+	s.Require().Equal("3", seeded.Inserted)
+	s.Require().Equal("tenant", seeded.ResourceType)
+	s.Require().Equal(tenant, seeded.ResourceID)
+
+	// And every per-template entry carries the SCHEMA — the numeric rules that
+	// decide which figures the system will accept — against the template's own
+	// id, in the same shape the custom create route records. The predefined
+	// names stay out: curated or not, a template name is a name.
+	type createdRow struct {
+		ResourceType string `db:"resource_type"`
+		ResourceID   string `db:"resource_id"`
+		Details      []byte `db:"details"`
+	}
+	var created []createdRow
+	s.inTenant(tenant, func(tx *sqlx.Tx) {
+		s.Require().NoError(tx.Select(&created,
+			`SELECT resource_type, resource_id, details FROM audit_log
+			  WHERE action = 'data_template.created' ORDER BY seq`))
+	})
+	s.Require().Len(created, 3)
+	byID := map[string]createdRow{}
+	for _, row := range created {
+		s.Require().Equal("data_template", row.ResourceType)
+		byID[row.ResourceID] = row
+	}
+	for _, tpl := range first {
+		row, ok := byID[tpl.ID]
+		s.Require().True(ok, "predefined template %s has no create entry", tpl.ID)
+		var payload struct {
+			Fields map[string]map[string]any `json:"fields"`
+		}
+		s.Require().NoError(json.Unmarshal(row.Details, &payload))
+		s.Require().Equal(tpl.TemplateType, payload.Fields["templateType"]["to"])
+		s.Require().Equal("set", payload.Fields["name"]["to"], "dated, never quoted")
+		schema, ok := payload.Fields["fields"]["to"].([]any)
+		s.Require().True(ok, "the schema must be recorded: %s", string(row.Details))
+		s.Require().Len(schema, len(tpl.Fields))
+		for i, f := range tpl.Fields {
+			entry, ok := schema[i].(map[string]any)
+			s.Require().True(ok)
+			s.Require().Equal(f.ID, entry["id"])
+			s.Require().Equal(f.FieldType, entry["fieldType"])
+		}
+	}
+	s.Require().NotContains(string(created[0].Details), "VAT Return",
+		"a template name stays out of the envelope")
 }
 
 // TestCustomTemplateCRUD: strict field validation, category never accepted,

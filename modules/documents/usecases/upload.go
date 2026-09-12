@@ -5,6 +5,7 @@ import (
 
 	apperrors "github.com/mohamadhallal/zentax-api/errors"
 	"github.com/mohamadhallal/zentax-api/modules/documents/domain"
+	"github.com/mohamadhallal/zentax-api/platform/audit"
 	"github.com/mohamadhallal/zentax-api/platform/authz"
 )
 
@@ -77,10 +78,12 @@ func (uc *UseCases) Create(ctx context.Context, input domain.CreateDocumentInput
 		uc.deleteBlob(ctx, key)
 		return nil, err
 	}
-	if err := uc.audit.Record(ctx, "document.created", "document", docID, map[string]any{
-		"documentType": input.DocumentType, "category": input.Category,
-		"version": 1, "fileSize": st.Size,
-	}); err != nil {
+	if err := uc.audit.Record(ctx, "document.created", "document", docID,
+		auditUploadDetails(audit.Changes(nil, auditValues(&domain.Document{
+			WorkflowID: doc.WorkflowID, TaskInstanceID: doc.TaskInstanceID,
+			Category: doc.Category, DocumentType: doc.DocumentType,
+			Label: doc.Label, Notes: doc.Notes,
+		})), ver.Version, ver.FileSize, ver.SHA256)); err != nil {
 		uc.deleteBlob(ctx, key)
 		return nil, err
 	}
@@ -137,11 +140,34 @@ func (uc *UseCases) AddVersion(ctx context.Context, id domain.DocumentID, input 
 		uc.deleteBlob(ctx, key)
 		return nil, err
 	}
-	if err := uc.audit.Record(ctx, "document.version_added", "document", id, map[string]any{
-		"version": version, "fileSize": st.Size,
-	}); err != nil {
+	if err := uc.audit.Record(ctx, "document.version_added", "document", id,
+		auditUploadDetails(audit.Changes(nil, audit.Values{
+			"workflowId":     doc.WorkflowID,
+			"taskInstanceId": doc.TaskInstanceID,
+		}), ver.Version, ver.FileSize, ver.SHA256)); err != nil {
 		uc.deleteBlob(ctx, key)
 		return nil, err
 	}
 	return uc.view(ctx, id)
+}
+
+// auditUploadDetails attaches the version facts to an upload entry: which
+// version this upload IS, how big it was, and the SHA-256 of the bytes that
+// were filed. They sit BESIDE the `fields` change set, the way a cascade census
+// does, because none of them is a before/after value — an upload is one-sided
+// and a version is immutable once written.
+//
+// The digest is the point of recording any of it. A document entry is evidence
+// that a file was filed; without the digest the ledger cannot attest WHICH
+// bytes, so a file swapped underneath the same version row would leave the
+// trail reading exactly as before. It is a hex digest of file content: no name,
+// no free text, no tax figure, and fixed in shape by construction.
+func auditUploadDetails(changes map[string]any, version int, fileSize int64, sha256 string) map[string]any {
+	if changes == nil {
+		changes = map[string]any{}
+	}
+	changes["version"] = version
+	changes["fileSize"] = fileSize
+	changes["sha256"] = sha256
+	return changes
 }

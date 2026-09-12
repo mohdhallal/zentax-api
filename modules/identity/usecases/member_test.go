@@ -127,9 +127,9 @@ func TestUpdateMember_DisableRevokesSessionsAndTokens(t *testing.T) {
 	m.members.On("GetByID", ctx, "t1", "u2").Return(member, nil).Twice()
 	m.members.On("LockAdminGuard", ctx, "t1").Return(nil).Once()
 	m.members.On("UpdateNameStatus", ctx, "t1", "u2", "Jane", domain.StatusDisabled).Return(true, nil).Once()
-	m.sessions.On("RevokeAllForUser", ctx, "u2").Return(nil).Once()
-	m.tokens.On("RevokeAllForUser", ctx, "u2").Return(nil).Once()
-	m.invites.On("RevokeUnusedForUser", ctx, "u2").Return(nil).Once()
+	m.sessions.On("RevokeAllForUser", ctx, "u2").Return(2, nil).Once()
+	m.tokens.On("RevokeAllForUser", ctx, "u2").Return(1, nil).Once()
+	m.invites.On("RevokeUnusedForUser", ctx, "u2").Return(0, nil).Once()
 	m.members.On("CountActiveTenantAdmins", ctx, "t1").Return(1, nil).Once()
 
 	_, err := m.uc.UpdateMember(ctx, "u2", domain.UpdateMemberInput{Name: "Jane", Status: domain.StatusDisabled})
@@ -251,7 +251,7 @@ func TestAcceptInvite_ActivatesInTokenTenant(t *testing.T) {
 		ok, _ := crypto.VerifyPassword("correct horse battery", hash)
 		return ok
 	}), (*string)(nil)).Return(true, nil).Once()
-	m.invites.On("RevokeUnusedForUser", inTenant, "u2").Return(nil).Once()
+	m.invites.On("RevokeUnusedForUser", inTenant, "u2").Return(0, nil).Once()
 
 	res, err := m.uc.AcceptInvite(ctx, domain.AcceptInviteInput{Token: raw, Password: "correct horse battery"})
 	require.NoError(t, err)

@@ -27,9 +27,13 @@ import (
 //   - documentType: the ten-value vocabulary in domain.DocumentTypes, enforced
 //     by a CHECK constraint. draft_return → final_return is a real assertion
 //     about what the file IS.
-//   - workflowId: what the evidence belongs to. Fixed at creation, so it shows
-//     up only on the one-sided delete envelope — which is exactly where it is
-//     needed, since the pointer back is otherwise lost from view.
+//   - workflowId: what the evidence belongs to, and the link an auditor
+//     follows. Fixed at creation, so it never MOVES — which is exactly why it
+//     is recorded on the one-sided envelopes at both ends of the document's
+//     life AND on every version added in between: a workflow delete
+//     hard-cascades documents and document_versions away without a per-row
+//     entry, so once it runs these envelopes are the only thing left saying
+//     which workflow the evidence was filed against.
 //   - taskInstanceId: which step it was filed against, or null for a
 //     workflow-level document. This is the ADR-0018 freeze boundary.
 //
@@ -37,10 +41,12 @@ import (
 // free text a user typed on the object closest to the filing, so both are
 // exactly where a taxpayer's name or an adviser's phone number gets typed.
 //
-// Left out by design: the file name, size, MIME type and SHA-256 (version
-// facts, already recorded by document.created / document.version_added and
-// immutable thereafter), the actor / timestamp columns (the envelope carries
-// those) and the id (that is resource_id).
+// Left out by design: the file name and MIME type (client-supplied strings, and
+// a file name carries a client's name as often as a label does), the size,
+// version number and SHA-256 (version facts, immutable once written, recorded
+// beside this change set by document.created / document.version_added — see
+// auditUploadDetails in upload.go), the actor / timestamp columns (the envelope
+// carries those) and the id (that is resource_id).
 func auditValues(d *domain.Document) audit.Values {
 	if d == nil {
 		return nil

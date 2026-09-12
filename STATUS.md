@@ -5,7 +5,7 @@
 > repository, `github.com/mohdhallal/zentax-ui`, formerly `TaxFlowReports`);
 > architecture decisions in `../zentax-ui/docs/adr/` (ADRs 0001–0026).
 
-**Last updated:** 2026-09-12 · **Toolchain:** Go 1.27 via gvm (`~/.gvm/gos/go1.27`;
+**Last updated:** 2026-09-13 · **Toolchain:** Go 1.27 via gvm (`~/.gvm/gos/go1.27`;
 the system `/usr/local/go` is a stale 1.19).
 
 **Gate** — from the repository root, main module then `acceptance/`:
@@ -35,17 +35,20 @@ Everything above *What is missing / remaining* is finished work. In rough order 
 would hurt first:
 
 1. **Holes in code that already shipped** — no rate limiting anywhere and no attempt counter on
-   `POST /auth/mfa/verify`; scoped grants narrow writes but not reads; deleting a workflow or an
-   entity cascades through approved records; the audit trail carries no before/after detail and no
-   authentication events; nothing ever verifies the hash chain; request URIs and their search terms
-   reach the logs in clear text. → *🔴 Holes in code that has already shipped*
+   `POST /auth/mfa/verify`; deleting a workflow or an
+   entity cascades through approved records; the audit trail now records what changed but still
+   records no authentication events beyond the credential lifecycle; nothing ever runs the chain
+   verifier on a schedule and there is no write-once export of the chain. (Log redaction landed
+   2026-09-13; request URIs and search terms no longer reach the logs.)
+   → *🔴 Holes in code that has already shipped*
 2. **No notifications, no e-mail, no scheduler** — invites are copy-paste and the reminder/digest
    feature does not exist server-side. → *🟠 Domain features still to build*
 3. **Credential recovery — brokered, not built (decided 2026-09-12).** Nothing exists today and a lost
    authenticator is a permanent lockout, but the fix is the WorkOS broker (Phase 2), not a first-party
    reset; a placeholder pass makes the absence visible meanwhile. A broker-less self-host is the one
    edition that still needs our own flow. → *🟠 Auth & authorization*
-4. **Read-side scope narrowing and the ADR-0018 amendment chain.** → *🟠 Auth & authorization*
+4. **The ADR-0018 amendment chain** (read-side scope narrowing landed 2026-09-13, `42ef6b7`).
+   → *🟠 Auth & authorization*
 5. **Deadline engine** — public holidays on top of the weekend adjustment; `additionalDeadlines`.
    → *🟠 Deadline engine*
 6. **Platform, mostly Phase 2 per the ADRs** — ADR-0006 envelope encryption, ADR-0015 observability
@@ -498,9 +501,13 @@ would hurt first:
    user renders as null, exactly as the ADR intends) and the **resolved** `workflowId`/`workflowName`
    (the event's own id for workflow events, the parent workflow for workflow_task / task_instance
    events via LEFT JOINs, null otherwise). Filters: `workflowId` (against the *resolved* id, so a
-   workflow's own + its templates' + its instances' events all match), `resourceType`, `resourceId`,
-   `action`, `from`/`to` (inclusive YYYY-MM-DD, half-open UTC day bounds on `occurred_at` so
-   partition pruning still applies); `occurred_at DESC, seq DESC`; paginated (100 / max 500).
+   workflow's own + its templates' + its instances' events all match), `resourceType` (all twelve
+   recorded types since 2026-09-13 — the enum is generated from `dto.ResourceTypes`, which
+   `dto/resource_types_test.go` pins to the `audit.Record` call sites), `resourceId`,
+   `action` (repeatable, OR-ed), `from`/`to` (inclusive YYYY-MM-DD, half-open UTC day bounds on
+   `occurred_at` so partition pruning still applies); ordered `seq DESC` (the per-tenant ledger
+   order, assigned under the same lock as `occurred_at`, so it is chronological by construction);
+   paginated (100 / max 500).
    Acceptance: full flow lists 6 events newest-first with `actorName` = the seeded user, workflow
    filter picks 4 (not the entity), type/id/action/date-window filters, paging totals, role gate, RLS.
 
@@ -674,7 +681,8 @@ Migrations (sqitch): `tenants`, `entities`, `obligation_types`, `entity_obligati
 `X-Tenant-ID` header is gone); `cmd/seed-admin` bootstraps the first tenant + admin. Plus **scoped RBAC**
 (`platform/authz`): a role→capability matrix + `RequireCapability` gate every domain route (B-1), and an
 `authz.Authorizer` narrows a scoped grant to its entity subtree on every write (B-2). The detail is the
-next subsection; what is *left* of auth — read-side scope, rate limiting, credential recovery (broker-owned;
+next subsection; read-side scope joined it on 2026-09-13 (the predicate now sits in the repositories,
+`42ef6b7`). What is *left* of auth — rate limiting, credential recovery (broker-owned;
 first-party only for a broker-less self-host), the ADR-0018 amendment chain, WorkOS — is under
 *What is missing / remaining*. (The submit/approve/reject
 actions this paragraph once listed as outstanding shipped with ADR-0018; see Domain modules.)
@@ -905,9 +913,14 @@ why that section read as if nothing was done; what is actually left of auth is i
   400 "invite is invalid or has expired". The handler carries no Tx flag — the use case resolves the token
   first, then runs the writes through `database.Exec.WithinTransaction` with the tenant **taken from the
   token row** and the activating user as requester, so `audit_log` (RLS'd) receives `member.activated`
-  in the right tenant chain. Audit actions (PII-free details): `member.invited {role, scoped}`,
-  `member.invite_reissued`, `member.updated {status}`, `member.role_changed {role, scoped, grants}`,
-  `member.activated`. **Task assignment:** `PUT /task-instances/{id}` with `assigneeId` now requires an
+  in the right tenant chain. Audit actions (PII-free details): six — `member.credentials_revoked`, which records the sessions and
+  tokens a disabling actually killed and is an event rather than a change set, plus `member.invited`,
+  `member.invite_reissued`, `member.activated`, `member.updated`, `member.role_changed` — carry the
+  `audit.Changes` envelope over the member whitelist: `kind`, `status`, `mfaEnabled` and the grant
+  list (role + scope entity id, never the scope entity's name), with `name` and `email` as
+  `set`/`empty` presence tokens; the two invite events add the credential window
+  (`inviteExpiresAt`) one-sidedly. `user_grants` is hard-deleted, so a replaced or removed grant
+  survives **only** in this trail. **Task assignment:** `PUT /task-instances/{id}` with `assigneeId` now requires an
   ACTIVE HUMAN user of the caller's tenant (400 "assignee is not an active member of this tenant") via a
   nil-safe `AssigneeChecker` port on the task-instance use cases, implemented in identity's pg repo (users
   pinned to the requester's tenant) and wired in the container; `/reports/task-instances` resolves such
@@ -936,7 +949,7 @@ why that section read as if nothing was done; what is actually left of auth is i
   of the invite link (the token is returned to the admin for now; the UI builds the link from its own
   origin — the API-side link, when it comes, is `app.publicBaseUrl` + `/accept-invite?token=`, see
   `PUBLIC_BASE_URL` above), invite expiry configurability,
-  read-side scope narrowing of the directory, rate limiting on `POST /auth/accept-invite`.
+  rate limiting on `POST /auth/accept-invite`.
 - **Machine identity — DONE (agentic-AI B1).** Service accounts are `users.kind='service'` rows (grants,
   audit actor_id, and created_by attribution reuse the same rails; synthetic internal email; login rejects
   them). Bearer **API tokens** (`ztx_...`, sha256-hashed at rest, mandatory expiry, revocation tombstones)
@@ -946,6 +959,13 @@ why that section read as if nothing was done; what is actually left of auth is i
   and machines cannot hold `member:manage` implicitly (no self-replication). Admin surface (gated by
   member:manage): `POST/GET /service-accounts`, `POST /service-accounts/{id}/tokens` (cleartext shown
   once), `POST /tokens/{id}/revoke`. Verified live incl. attribution, revocation, expiry, cross-tenant 404s.
+  **Audited since 2026-09-13** (`10fae3c`): `service_account.created` (kind, status and the grants,
+  projected through the same helper a human's grants use, so machine and human access are comparable
+  in the trail), `api_token.issued` (`serviceAccountId`, `expiresAt`, `ttlDays`, and the `ztx_` scheme
+  marker — never the secret, never its hash) and `api_token.revoked` (`revoked: false → true`); the
+  revoked token's owner is reached by joining its id to the matching `api_token.issued` entry. One gap
+  remains: disabling a service account through `PUT /members/{id}` kills every live credential at once
+  without writing an `api_token.revoked` entry per token, so which credential died is not dated.
   **Remaining:** OAuth 2.1 client credentials (MCP-aligned, Phase 2 with WorkOS); **per-principal rate
   limits** — also the missing piece for the two gaps the failed-login attempt budget explicitly does
   not close (an attacker holding a known address locked out at a threshold of requests per window, and
@@ -963,7 +983,9 @@ why that section read as if nothing was done; what is actually left of auth is i
   timezone: <value>`; `Local`, blank and padded names refused; `domain.ValidateTimezone` is the one rule)
   **and** is probed through Postgres `AT TIME ZONE` on the request tx, so a name only one tz database
   knows is a 400, never a broken report later. `GET /auth/me` now carries `tenant: {id, slug, name,
-  timezone}` next to every existing key. Audit `tenant.updated {timezone}` (never the name).
+  timezone}` next to every existing key. Audit `tenant.updated` records **both** zones (from → to)
+  and the rename as a `set`/`empty` presence token — the name's value never reaches the envelope,
+  but a rename-only PUT is dated rather than recorded as `{}`.
   `cmd/seed-admin --timezone <IANA>` (default `UTC`, same validation) writes it on the tenant INSERT and
   prints it in the summary. **Reports (ADR-0023 §6):** the compliance classification's "today" is
   `(NOW() AT TIME ZONE <tenants.timezone of app.tenant_id>)::date` — one Go const `tenantToday`, no
@@ -985,8 +1007,9 @@ why that section read as if nothing was done; what is actually left of auth is i
   taking the zone as input (no notification engine yet).
 - Consequence: the API is authenticated (humans **and machines**) + tenant-isolated + **role- and
   scope-authorized on writes**, with the **preparer→reviewer approval flow + SoD + immutable-approval
-  lock** in place and approval human-only. Reads remain tenant-wide (list-scope narrowing is a later
-  increment).
+  lock** in place and approval human-only. **Reads are scope-narrowed too since 2026-09-13**
+  (`42ef6b7`): the read predicate sits in the repositories beside the tenant predicate, so a scoped
+  grant lists, exports and downloads only its subtree; a tenant-wide grant is unaffected.
 
 ### Pagination, list contracts & the server-side task feed (ADR-0026)
 _Built, increments 2 and 4–6. Increments 0–1 (the scale fixture and the benchmark) are in
@@ -1158,21 +1181,26 @@ measured figures say so.
   with a **uniform** shed answer (uniform because a shed response that varies by address is the
   enumeration oracle again). Days.
 
-- **Scoped grants narrow writes only — every read stays tenant-wide.** All 29 `Ensure*` authorizer
-  call sites are on create / update / delete / submit / approve paths;
+- **Scoped grants narrow writes only — every read stays tenant-wide. → FIXED 2026-09-13
+  (`42ef6b7`).** The read predicate now sits in the repositories beside the tenant predicate —
+  `platform/authz/readscope.go` + `platform/authz/pg/resolver.go`, applied in the entities,
+  workflows, workflow-tasks, task-instances, entity-obligations, documents, reports, member and
+  **audit-log** `repositories/pg` packages — and a tenant-wide grant still reads the whole tenant
+  (its statement is unchanged). Pinned by `acceptance/modules/authz/read_scope_test.go` and
+  `read_scope_audit_test.go`. **The rest of this bullet is the state before that commit, kept for
+  the record.** All 29 `Ensure*` authorizer
+  call sites were on create / update / delete / submit / approve paths;
   `modules/entities/usecases/list.go` and `modules/documents/usecases/{read,download}.go` never
-  touch the authorizer, `modules/entities/handlers/list.go` declares only `Capability:
-  authz.EntityRead`, and `modules/entities/repositories/pg/sql.go`'s `Count`/`ListBase` carry no
-  scope predicate. Proven live: signed in as the seeded FR-scoped preparer
+  touched the authorizer, `modules/entities/handlers/list.go` declared only `Capability:
+  authz.EntityRead`, and `modules/entities/repositories/pg/sql.go`'s `Count`/`ListBase` carried no
+  scope predicate. Proven live at the time: signed in as the seeded FR-scoped preparer
   (`seed/demo/dataset.json`), `/api/entities` returned all five Acme entities, the compliance
   heatmap covered the German subsidiary, `export-raw` returned 243 whole-group rows, and
-  `/api/documents/{id}/download` streamed a German entity's PDF. ADR-0012's motivating case — a
-  scoped external advisor — is therefore not delivered, and `client/src/pages/settings.tsx` tells
-  the admin, on the screen where grants are issued, that "scoped members only see that entity's
-  data"; that copy is wrong today and should be corrected regardless of when the predicate lands.
+  `/api/documents/{id}/download` streamed a German entity's PDF — so ADR-0012's motivating case, a
+  scoped external advisor, was not delivered and `client/src/pages/settings.tsx`'s promise that
+  "scoped members only see that entity's data" was false. **Still open from this bullet:**
   `entity_closure` was built for exactly this and is still unpopulated (scope resolution does a
-  recursive parent-walk). Weeks: list/get across eight modules plus the reports SQL and the
-  pagination counts.
+  recursive parent-walk over `entities.parent_entity_id` on every scoped read).
 
 - **Deleting a workflow or an entity physically destroys approved task instances and their
   documents.** `modules/workflows/usecases/delete.go` and `modules/entities/usecases/delete.go`
@@ -1187,35 +1215,64 @@ measured figures say so.
   document, and left the blob on disk with no row pointing at it — the cascade reaches the database
   rows only, never the object store. `manager` holds `WorkflowWrite`, so a single subtree-scoped
   manager can erase every
-  filing in their subtree while ADR-0012 requires two people to approve one of them, and the only
-  trace is a `*.deleted` envelope with `nil` details. A refuse-if-approved guard on the three delete
+  filing in their subtree while ADR-0012 requires two people to approve one of them. Since 2026-09-13
+  the `*.deleted` envelope at least records what the row WAS beside how many rows cascaded (it used to
+  carry `nil` details), but a trail entry is not the row. A refuse-if-approved guard on the three delete
   use cases is days; retrofitting `deleted_at` + purge across the workflow chain is weeks.
 
-- **The audit trail records that something changed, never what — and records no authentication
-  events.** ADR-0008's envelope mandates before/after (non-PII) values and the migration comment
-  (`20260821000012_audit_log.sql:30-32`) restates the rule; in code the `details` argument is `nil`
-  for `entity.created/updated/deleted`, `workflow.*`, `workflow_task.*`, `entity_obligation.*`,
-  `obligation_type.deleted` and `data_template.deleted`, and the richest payload on the core object
-  is `map[string]any{"status": ti.Status}` (`modules/taskinstances/usecases/update.go:84`) — so an
-  edit to `tax_data`, the actual tax figures, is recorded identically to a status nudge. Live, every
-  `*.updated` row carries `{}`. No `*_history` table exists outside document versions, and a `PUT`
-  on an entity obligation replaces `deadline_rule` wholesale, destroying the only copy of the rule
-  that computed a statutory date. The approval chain is the exception and does carry from→to.
-  Separately, `audit.Record` is called **zero** times in
-  `modules/identity/usecases/{login,logout,mfa,session,service_account,token}.go`: login (the
-  handler says so outright), logout, MFA enrolment, session revocation and — the one that matters
-  most — **service-account creation and API-token issuance/revocation** leave no audit record at
-  all, while `member.*` next door writes five. Auth events are a signed-off Phase 2 deferral (the
-  centralized security stream); credential lifecycle is a stream-1 mutation that was simply missed.
-  The hash chain is genuine and well built — it is chaining envelopes with no evidentiary content.
-  Days per module for a diff helper over an explicit non-PII field whitelist; days for the
-  credential-lifecycle events.
+- **The audit trail: evidentiary content — FIXED (2026-09-12/13, `42ef6b7` + `10fae3c`); the
+  authentication stream is still missing.** *Before:* ADR-0008's envelope mandates before/after
+  (non-PII) values and the migration comment (`20260821000012_audit_log.sql:30-32`) restates the
+  rule, but the `details` argument was `nil` for `entity.created/updated/deleted`, `workflow.*`,
+  `workflow_task.*`, `entity_obligation.*`, `obligation_type.deleted` and `data_template.deleted`;
+  the richest payload on the core object was `map[string]any{"status": ti.Status}`, so an edit to
+  `tax_data` — the actual tax figures — was recorded identically to a status nudge, and live, every
+  `*.updated` row carried `{}`. The approval chain was the only exception. Separately `audit.Record`
+  was called **zero** times in `modules/identity/usecases/{login,logout,mfa,session,service_account,
+  token}.go`, so **service-account creation and API-token issue/revoke left no record at all** while
+  `member.*` next door wrote five. *After:*
+  - **`audit.Changes` over a per-resource whitelist** (`platform/audit/fields.go` +
+    `modules/*/usecases/audit_fields.go`) records `{"fields": {"<name>": {"from": …, "to": …}}}` —
+    a field appears only if it moved, so the key set IS the change set, a create carries `to` only
+    and a delete `from` only. Covered: entities, entity obligations (the `deadline_rule`
+    object, so the rule that computed a statutory date survives the `PUT` that replaces it
+    wholesale — its free-text members are shape-gated on the way in),
+    obligation types, workflows, workflow tasks, task instances, data templates (field ids, types
+    and numeric bounds — not a field count), documents and members. Names, free text and tax
+    reference numbers go through `audit.Redact`, which records `set`/`empty` so the change is dated
+    without quoting the value; `tax_data` records changed-key names and figure counts, never
+    amounts. The three cascade deletes record what the row WAS beside how many rows went with it.
+  - **Machine identity records** (`modules/identity/usecases/service_account.go`):
+    `service_account.created`, `api_token.issued`, `api_token.revoked`, on the request transaction.
+    A machine's grants are projected through the same helper a person's grants use, so the two are
+    byte-comparable in the trail; a token is named by its id and its `ztx_` scheme marker, never by
+    any part of the secret or its hash (the ledger is append-only and cannot be redacted later).
+  - **The trail is readable and filterable.** Rows carry `resourceId`, `seq` and the whole `hash`
+    through to the page and the CSV/Excel export, and `GET /audit-log?resourceType=` accepts all
+    **twelve** recorded types — it accepted six until 2026-09-13, so tokens, service accounts, the
+    tenant record, members, documents and data templates could not be asked for at all. The
+    vocabulary is one list (`modules/auditlog/dto.ResourceTypes`) and
+    `modules/auditlog/dto/resource_types_test.go` re-derives it from the `audit.Record` call sites,
+    so a new audited resource cannot ship unfilterable.
+  - **Reads are narrowed** — see the read-scope note above: an entity-scoped reader sees only its
+    subtree's events, tenant-level rows (tenant, member, service account, token, data template,
+    obligation type) need a tenant-wide grant, and `seq` is withheld from a narrowed reader because
+    the counter is dense and the gaps would count the rows it was not shown.
+  *Still missing:* **authentication events** — login, logout, MFA enrolment and session revocation
+  still write nothing (a signed-off Phase 2 deferral to the centralized security stream, not a
+  stream-1 gap; the credential-lifecycle half that WAS stream-1 work is now done). A couple of
+  payloads are also still a count rather than a change — `workflow.started` records
+  `{instancesCreated, periods, overrides}` and the predefined-template seeding records `{inserted}`
+  — and a token's death is dated individually only when it is revoked directly: the bulk revocation
+  that follows disabling an account writes no `api_token.revoked` entry per token, so *which*
+  credential stopped working, and when, is not in the trail. Half a day each.
 
-- **Nothing ever verifies the hash chain: `VerifyChain` has no route and no command.**
-  `platform/audit/audit.go:167` is called from exactly two places, both tests
-  (`platform/audit/audit_test.go`, `acceptance/modules/audit/audit_test.go:106`) — no endpoint, no
-  `cmd/`, no scheduled check — so a broken chain would be found only by whoever thought to run a
-  test. The quarterly restore drill in `../zentax-ui/docs/ops/environments.md` nevertheless tells
+- **Nothing ever verifies the hash chain: the verifier has no route and no command.** Since the
+  2026-09-12 cut-over the chain genuinely verifies from the stored rows and `audit.Verify` reports
+  what it could prove (`audit chain: N entries, M pre-cut-over (links intact, not recomputable),
+  hash-verified seq X..Y`), but `Verify`/`VerifyChain` (`platform/audit/audit.go`) are called only
+  from tests — no endpoint, no `cmd/`, no scheduled check — so a broken chain would be found only by
+  whoever thought to run a test. The quarterly restore drill in `../zentax-ui/docs/ops/environments.md` nevertheless tells
   the operator to verify the chain "with the API's VerifyChain tooling", a false claim in the one
   procedure where ledger integrity would ever be questioned. Two further limits: `GET /audit-log`
   returns `hash` but not `prevHash` (`modules/auditlog/dto/response.go`), so an external verifier
@@ -1225,7 +1282,7 @@ measured figures say so.
   verify command/endpoint over a tenant's chain (WORM export to S3 Object Lock stays Phase 2 —
   see *Platform / infra*).
 
-- **Chain resolution — FIXED, with a cut-over (2026-09-12).** Until today the chain could not be
+- **Chain resolution — FIXED, with a cut-over (2026-09-12).** Until that date the chain could not be
   verified from the stored rows at all: `Record` stamped `time.Now()` at nanosecond precision and
   hashed it as RFC3339Nano, while `audit_log.occurred_at` is `TIMESTAMPTZ` and keeps microseconds,
   so the last three digits were gone the moment the row committed. Reproduced on the live local
@@ -1263,9 +1320,10 @@ measured figures say so.
   plus a redacting handler; hours for the CI scan.
 
 ### 🟠 Auth & authorization
-- **Read-side scope** — list/get endpoints stay tenant-wide; narrowing what a *scoped* user can
-  *see* (filtering lists to their subtree) is a later increment. Write scope is done (see *What is
-  built*) and is the SoD-critical half. Scale of the work and the live evidence: the 🔴 bullet above.
+- ~~**Read-side scope**~~ — **done 2026-09-13** (`42ef6b7`): list/get, the reports SQL, the document
+  download and the audit trail all carry the read predicate; see the (superseded) 🔴 bullet above for
+  what it looked like before. What is left of it is populating `entity_closure` so scope resolution
+  stops doing a recursive parent-walk per read.
 - **Rate limiting** — per-IP and per-principal counters, an `/auth/mfa/verify` attempt counter, a
   throttle on `POST /auth/accept-invite`, and a bounded semaphore around the argon2 verification.
   Detail and measurements in the 🔴 bullet above; this is the missing piece for both gaps the
@@ -1298,8 +1356,11 @@ measured figures say so.
   interface, or none at all — keep the seam free of WorkOS-shaped types.
 - Breach-checked passwords (HIBP), Redis session store (Postgres for now). ~~Invite flow~~ — **done
   (2026-09-04)**; what is left of it is e-mail delivery of the invite link (the token is still
-  returned to the admin), invite-expiry configurability, and read-side scope narrowing of the member
-  directory.
+  returned to the admin) and invite-expiry configurability. **Read-side scope does NOT narrow the member
+  directory** (2026-09-13): a scoped member still lists every member of the tenant with names and
+  addresses. What landed is narrower — the scope-entity NAME on a grant is withheld when that entity is
+  outside the caller's read scope. Narrowing the directory itself is a product decision, not an
+  oversight: an assignee picker needs the names.
 
 ### 🟠 Domain features still to build
 - **Notifications / e-mail / digests — nothing exists.** There is no `modules/notifications`, no
@@ -1335,23 +1396,38 @@ measured figures say so.
   adapter — the one production uses — also has effectively no executed test coverage: CI exercises
   only `fs`, the inverse of ADR-0009 §6's gate; it needs a MinIO service in the acceptance job.
 - **Audit log — DONE (stream 1 core, ADR-0008).** `platform/audit` + the `audit_log` table: every
-  domain mutation (20 use-case sites) appends a **PII-free, actor-by-ID envelope** (action,
-  resource, UTC instant, request_id, whitelisted `details` only — status transitions/counts, never
-  free text) **on the same transaction** — the write and its evidence commit or roll back together.
+  domain mutation (39 use-case sites over 12 resource types) appends a **PII-free, actor-by-ID
+  envelope** (action, resource, UTC instant, request_id, whitelisted `details` only — before/after
+  values of fields a human chose, never free text) **on the same transaction** — the write and its
+  evidence commit or roll back together.
   **Append-only at the database** (RLS policies exist only for INSERT/SELECT → UPDATE/DELETE affect
   zero rows even for the app role) + a **per-tenant hash chain** (sha256 over the canonical envelope;
   per-tenant advisory-lock-serialized `seq`; `VerifyChain` recomputes it). **Actor attribution:**
   `created_by`/`updated_by` on all domain tables, defaulted/stamped from the `app.user_id` GUC bound
   at the Tx seam. Verified live incl. tamper attempts + cross-tenant isolation. The read API for the
   Audit Trail page is **done** (2026-09-03: `GET /audit-log`, `modules/auditlog`, capability
-  `audit:read` — see "Read models" above). **Remaining, and read the 🔴 bullets above before quoting
-  this one to an auditor:** the envelopes carry **no before/after detail** (`details` is `nil` on
-  every domain create/update/delete but the approval chain), **no authentication or credential
-  -lifecycle events** are recorded at all (service-account creation and API-token issuance included —
-  that half is stream-1 work that was missed, not the signed-off Phase 2 security-stream deferral),
-  and **nothing ever runs `VerifyChain`**. Beyond those: WORM export to S3 Object Lock (Phase 2, and
-  Object Lock appears nowhere in either CDK app), and the centralized regional security log store
-  (Phase 2; interim: structured slog, which nothing collects).
+  `audit:read` — see "Read models" above).
+  **Landed 2026-09-12/13** (`42ef6b7` + `10fae3c`; detail in the 🔴 bullets above): the envelopes now
+  carry **before/after detail** — `audit.Changes` over a per-resource non-PII whitelist across
+  entities, entity obligations, obligation types, workflows, workflow tasks, task instances, data
+  templates, documents and members, with names and free text reduced to `set`/`empty` presence
+  tokens and tax figures to changed-key names and counts; **credential lifecycle is recorded**
+  (`service_account.created`, `api_token.issued`, `api_token.revoked` — the stream-1 half that had
+  been missed); the **chain is verifiable from the stored rows** after the `hash_version` cut-over,
+  with `audit.Verify` reporting `audit chain: N entries, M pre-cut-over (links intact, not
+  recomputable), hash-verified seq X..Y`; **reads are narrowed to the caller's grant** and `seq` is
+  withheld from a narrowed reader; and a row **names the record it describes** (`resourceId`, `seq`,
+  the whole `hash`, on the page and in the CSV/Excel export) with the `resourceType` filter widened
+  from six values to the twelve the trail actually writes.
+  **Remaining, and read the 🔴 bullets above before quoting this one to an auditor:** **nothing ever
+  runs `Verify`/`VerifyChain`** — no route, no CLI, no job — and it still requires `seq == i+1`, so a
+  tenant whose first partition has been dropped can never be verified and there is no anchor table;
+  **no WORM export** — write-once retention of the chain (S3 Object Lock, compliance mode) is Phase 2
+  and Object Lock appears nowhere in either CDK app, so the ledger's only copy is the operational
+  database; **no authentication stream** — login, logout, MFA enrolment and session revocation write
+  nothing, pending the centralized regional security log store (Phase 2; interim: structured slog,
+  which nothing collects); and a couple of payloads that are still a count rather than a change
+  (`workflow.started`, the predefined-template seeding).
 - ~~**Team members / roles**~~ — done 2026-09-04, see *Member administration* under *What is built*.
 - ~~**Reports**~~ — **done.** The enriched task-instance list and per-workflow stats under `/reports`
   landed 2026-09-03; the **compliance aggregates landed 2026-09-04** —

@@ -27,11 +27,35 @@ type EntityDependents struct {
 // entity, which makes the delete a refusal.
 func (d EntityDependents) HasAttestedWork() bool { return d.ApprovedTaskInstances > 0 }
 
-// AuditDetails is the ADR-0008 details payload for entity.deleted: counts only
-// — no names, no free text, nothing that could carry PII. blobsQueued is how
-// many storage keys went to the reclaim queue for the purge job.
-func (d EntityDependents) AuditDetails(blobsQueued int) map[string]any {
-	return map[string]any{
+// ScopedGrant is one RBAC grant an entity delete revokes: who held it, at which
+// role. Read before the DELETE, because the cascade takes the row with no
+// tombstone and no history table behind it.
+//
+// The scope entity is not repeated — it is the entity being deleted, i.e.
+// resource_id on the envelope — and the scope entity's NAME is deliberately
+// absent, for the same reason identity's grant projection omits it: it is the
+// entity's free text.
+type ScopedGrant struct {
+	UserID string `db:"user_id"`
+	Role   string `db:"role"`
+}
+
+// AuditDetails is the ADR-0008 details payload for entity.deleted: counts, plus
+// the one thing a count cannot carry — WHICH access was revoked. No names, no
+// free text, nothing that could carry PII. blobsQueued is how many storage keys
+// went to the reclaim queue for the purge job.
+//
+// revokedGrants sits beside userGrantsRevoked rather than replacing it: the
+// count comes from the census's own round trip and the list from a second read,
+// so keeping both makes a disagreement between them visible instead of quietly
+// substituting one for the other.
+//
+// Both halves of a grant are constrained — the role by authz.KnownRole, the
+// user id by a uuid and a composite FK — and a user id is a value the trail
+// already carries as actor_id and as the resource_id of every member entry, so
+// naming the grants introduces no new class of value into the log.
+func (d EntityDependents) AuditDetails(blobsQueued int, revoked []ScopedGrant) map[string]any {
+	details := map[string]any{
 		"workflows":             d.Workflows,
 		"workflowTasks":         d.WorkflowTasks,
 		"taskInstances":         d.TaskInstances,
@@ -42,4 +66,12 @@ func (d EntityDependents) AuditDetails(blobsQueued int) map[string]any {
 		"userGrantsRevoked":     d.UserGrantsRevoked,
 		"blobsQueuedForReclaim": blobsQueued,
 	}
+	if len(revoked) > 0 {
+		grants := make([]map[string]any, 0, len(revoked))
+		for _, g := range revoked {
+			grants = append(grants, map[string]any{"userId": g.UserID, "role": g.Role})
+		}
+		details["revokedGrants"] = grants
+	}
+	return details
 }

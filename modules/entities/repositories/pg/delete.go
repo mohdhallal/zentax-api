@@ -28,6 +28,18 @@ func (r *EntityRepo) CountDependents(ctx context.Context, id domain.EntityID) (d
 	return dep, nil
 }
 
+// ScopedGrants reads the RBAC grants an entity delete is about to cascade away,
+// on the delete's own transaction and before the DELETE runs. An entity that
+// does not exist, or one in another tenant, reads nothing: user_grants is
+// RLS-scoped, so the rows can only ever be the caller's own.
+func (r *EntityRepo) ScopedGrants(ctx context.Context, id domain.EntityID) ([]domain.ScopedGrant, error) {
+	var grants []domain.ScopedGrant
+	if err := r.DB.SelectContext(ctx, &grants, scopedGrantsSQL, id); err != nil {
+		return nil, err
+	}
+	return grants, nil
+}
+
 // QueueBlobReclaim records the storage key of every document version under the
 // entity's workflows before the delete cascades the metadata away, and returns
 // how many keys were queued. Nothing is removed from object storage here: the

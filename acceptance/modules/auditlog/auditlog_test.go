@@ -242,10 +242,24 @@ func (s *AuditLogSuite) TestAuditTrailReadAPI() {
 	s.Require().Equal(pagination{Total: 6, Limit: 2, Offset: 4}, pg)
 	s.Require().Equal([]string{"obligation_type.created", "entity.created"}, actions(rows))
 
+	// ---- Every resource type the trail writes can be asked for. ----
+	// The filter accepted only the six workflow-chain types until 2026-09-13,
+	// so the tenant-level half of the trail — members, machine identity, the
+	// tenant record, documents and templates — could not be filtered at all.
+	// Each is accepted now and matches nothing in THIS fixture, which is the
+	// honest answer; `dto.ResourceTypes` and its unit tests keep the list tied
+	// to the recorder's call sites.
+	for _, resourceType := range []string{
+		"data_template", "document", "user", "service_account", "api_token", "tenant",
+	} {
+		_, pg = s.list(admin, "?resourceType="+resourceType)
+		s.Require().Zero(pg.Total, "%s must be a filterable resource type", resourceType)
+	}
+
 	// ---- Validation. ----
 	admin.GET(s.T(), "/audit-log?from=2026-99-99").AssertStatus(s.T(), http.StatusBadRequest)
 	admin.GET(s.T(), "/audit-log?from=yesterday").AssertStatus(s.T(), http.StatusBadRequest)
-	admin.GET(s.T(), "/audit-log?resourceType=user").AssertStatus(s.T(), http.StatusBadRequest)
+	admin.GET(s.T(), "/audit-log?resourceType=invoice").AssertStatus(s.T(), http.StatusBadRequest)
 	admin.GET(s.T(), "/audit-log?workflowId=not-a-uuid").AssertStatus(s.T(), http.StatusBadRequest)
 	admin.GET(s.T(), "/audit-log?limit=501").AssertStatus(s.T(), http.StatusBadRequest)
 

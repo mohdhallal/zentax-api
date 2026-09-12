@@ -1007,7 +1007,7 @@ func TestLogout(t *testing.T) {
 func TestLogoutAll(t *testing.T) {
 	ctx := t.Context()
 	uc, _, sessions := newUC()
-	sessions.On("RevokeAllForUser", ctx, "u1").Return(nil).Once()
+	sessions.On("RevokeAllForUser", ctx, "u1").Return(3, nil).Once()
 
 	require.NoError(t, uc.LogoutAll(ctx, "u1"))
 	sessions.AssertExpectations(t)

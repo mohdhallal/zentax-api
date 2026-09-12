@@ -79,12 +79,41 @@ type plannedInstance struct {
 	RoleLabel *string
 }
 
+// appliedOverride is one statutory date a human replaced at the moment the
+// period was materialised: which template, which period, which date, what the
+// rules computed, and what was filed instead. All five are bounded — two ids,
+// a field name from a fixed set, and two calendar dates — so the trail can
+// carry them verbatim.
+//
+// Recording the count alone (what this used to do) says a filing deadline was
+// moved without saying which, from what, or to what, and there is no
+// per-instance entry to fall back on: generation writes the instances in bulk.
+type appliedOverride struct {
+	TemplateID string        `json:"templateId"`
+	PeriodCode string        `json:"periodCode"`
+	Field      string        `json:"field"`
+	Computed   dateonly.Date `json:"computed"`
+	Applied    dateonly.Date `json:"applied"`
+}
+
 // workflowPlan is the shared output of planWorkflow.
 type workflowPlan struct {
 	workflow  *workflowsdomain.Workflow
 	periods   int // period codes planned: len(selectedPeriods), or 1 for a project
 	templates int
 	instances []plannedInstance
+	// overrides are the substitutions actually applied, in plan order. An
+	// override that names a value identical to the computed one is still
+	// recorded: the intent to override is itself the fact being attested.
+	overrides []appliedOverride
+}
+
+// noteOverride appends one applied substitution to the plan.
+func (p *workflowPlan) noteOverride(templateID, periodCode, field string, computed, applied dateonly.Date) {
+	p.overrides = append(p.overrides, appliedOverride{
+		TemplateID: templateID, PeriodCode: periodCode, Field: field,
+		Computed: computed, Applied: applied,
+	})
 }
 
 // PreviewWorkflow computes the instances StartWorkflow would create without
@@ -192,6 +221,10 @@ func (g *Generator) StartWorkflow(ctx context.Context, workflowID string, overri
 			"instancesCreated": count,
 			"periods":          plan.periods,
 			"overrides":        len(overrides),
+			// Which statutory dates were replaced, and by what. A count says a
+			// filing deadline moved without saying which one or from where, and
+			// the instances are written in bulk, so nothing else records it.
+			"appliedOverrides": plan.overrides,
 		}); err != nil {
 		return 0, err
 	}
@@ -317,6 +350,7 @@ func (g *Generator) planRecurring(
 			// and due date are recomputed from it via the rules + template offset.
 			periodEnd := period.End
 			if ov.PeriodEndDate != nil {
+				plan.noteOverride(task.ID, periodCode, "periodEndDate", period.End, *ov.PeriodEndDate)
 				periodEnd = *ov.PeriodEndDate
 			}
 			filing := deadline.ApplyWeekendAdjustment(
@@ -328,6 +362,7 @@ func (g *Generator) planRecurring(
 				return nil, apperrors.NewValidation(err.Error())
 			}
 			if ov.PaymentDeadline != nil {
+				plan.noteOverride(task.ID, periodCode, "paymentDeadline", payment, *ov.PaymentDeadline)
 				payment = *ov.PaymentDeadline
 			}
 
@@ -340,6 +375,7 @@ func (g *Generator) planRecurring(
 			}
 			due := deadline.ApplyOffset(ref, task.DueDateOffsetValue, task.DueDateOffsetUnit, task.DueDateOffsetDirection)
 			if ov.DueDate != nil {
+				plan.noteOverride(task.ID, periodCode, "dueDate", due, *ov.DueDate)
 				due = *ov.DueDate
 			}
 
@@ -409,11 +445,13 @@ func (g *Generator) planProject(
 
 		periodEnd := end
 		if ov.PeriodEndDate != nil {
+			plan.noteOverride(task.ID, workflowsdomain.ProjectPeriodCode, "periodEndDate", end, *ov.PeriodEndDate)
 			periodEnd = *ov.PeriodEndDate
 		}
 		filing := periodEnd
 		due := deadline.ApplyOffset(filing, task.DueDateOffsetValue, task.DueDateOffsetUnit, task.DueDateOffsetDirection)
 		if ov.DueDate != nil {
+			plan.noteOverride(task.ID, workflowsdomain.ProjectPeriodCode, "dueDate", due, *ov.DueDate)
 			due = *ov.DueDate
 		}
 

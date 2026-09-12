@@ -18,7 +18,11 @@ func (uc *UseCases) Logout(ctx context.Context, sessionToken string) error {
 	return uc.sessions.Revoke(ctx, session.ID)
 }
 
-// LogoutAll revokes every session for a user ("log out everywhere").
+// LogoutAll revokes every session for a user ("log out everywhere"). The count
+// is dropped on purpose: the principal is ending its OWN sessions, which is
+// operational hygiene, not the access-review event a disable is — that path
+// records it (member.credentials_revoked).
 func (uc *UseCases) LogoutAll(ctx context.Context, userID string) error {
-	return uc.sessions.RevokeAllForUser(ctx, userID)
+	_, err := uc.sessions.RevokeAllForUser(ctx, userID)
+	return err
 }

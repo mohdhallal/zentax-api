@@ -80,7 +80,11 @@ type SessionRepository interface {
 	// destroys a pending enrolment — both leave the session itself alive.
 	ClearMFAAttempts(ctx context.Context, id string) error
 	Revoke(ctx context.Context, id string) error
-	RevokeAllForUser(ctx context.Context, userID string) error
+	// RevokeAllForUser tombstones every live session of a principal and returns
+	// HOW MANY it killed. The count is the audit fact: disabling a member ends
+	// live access, and "two sessions died" and "nothing was live" are different
+	// answers to an access review (ADR-0008, member.credentials_revoked).
+	RevokeAllForUser(ctx context.Context, userID string) (int, error)
 }
 
 // SessionAuthenticator resolves a session-cookie token to its session + user.
@@ -113,8 +117,9 @@ type TokenRepository interface {
 	// token matched (wrong tenant, unknown id, or already revoked).
 	Revoke(ctx context.Context, id, tenantID string) (bool, error)
 	// RevokeAllForUser tombstones every live token of a principal (used when a
-	// member is disabled).
-	RevokeAllForUser(ctx context.Context, userID string) error
+	// member is disabled) and returns how many it killed — see the session
+	// repository's own RevokeAllForUser for why the count is recorded.
+	RevokeAllForUser(ctx context.Context, userID string) (int, error)
 }
 
 // MemberRepository is the tenant-directory persistence: users (NOT RLS-scoped,
@@ -155,8 +160,11 @@ type InviteTokenRepository interface {
 	// MarkAccepted stamps accepted_at on a still-unused token; false if the
 	// token was already accepted/revoked (single use, race-safe).
 	MarkAccepted(ctx context.Context, id string, at time.Time) (bool, error)
-	// RevokeUnusedForUser tombstones every outstanding token of a user.
-	RevokeUnusedForUser(ctx context.Context, userID string) error
+	// RevokeUnusedForUser tombstones every outstanding token of a user and
+	// returns how many it killed. An outstanding invite is a live credential
+	// too — anyone holding it can still set a password on the account — so a
+	// disable counts it alongside the sessions and API tokens it ends.
+	RevokeUnusedForUser(ctx context.Context, userID string) (int, error)
 }
 
 // MemberUseCases is the tenant-admin member surface + the public accept-invite

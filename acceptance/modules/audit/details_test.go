@@ -74,6 +74,15 @@ func (s *AuditDetailsSuite) fieldsOf(e audit.Entry) map[string]map[string]any {
 	return payload.Fields
 }
 
+// detailsOf decodes an entry's whole payload, for the entries that record an
+// event rather than a change set (a start, a credential revocation).
+func (s *AuditDetailsSuite) detailsOf(e audit.Entry) map[string]any {
+	var payload map[string]any
+	s.Require().NoError(json.Unmarshal(e.Details, &payload),
+		"details must decode: %s", string(e.Details))
+	return payload
+}
+
 // requireChange asserts one field's recorded before and after. Pass nil for a
 // side that must be absent (a create has no "from", a delete no "to").
 func (s *AuditDetailsSuite) requireChange(e audit.Entry, field string, from, to any) {

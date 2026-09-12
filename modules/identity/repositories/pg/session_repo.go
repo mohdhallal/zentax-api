@@ -139,7 +139,15 @@ func (r *SessionRepo) Revoke(ctx context.Context, id string) error {
 	return err
 }
 
-func (r *SessionRepo) RevokeAllForUser(ctx context.Context, userID string) error {
-	_, err := r.db.ExecContext(ctx, `UPDATE sessions SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL`, userID)
-	return err
+// RevokeAllForUser kills every live session of a principal and reports how
+// many. `revoked_at IS NULL` in the predicate makes the row count the number of
+// sessions that were actually alive, not the number that ever existed — a
+// second call over the same user returns 0, which is the honest answer.
+func (r *SessionRepo) RevokeAllForUser(ctx context.Context, userID string) (int, error) {
+	res, err := r.db.ExecContext(ctx, `UPDATE sessions SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL`, userID)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
 }

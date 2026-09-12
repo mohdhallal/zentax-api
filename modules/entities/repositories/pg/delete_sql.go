@@ -42,6 +42,19 @@ const countEntityDependentsSQL = `
 		(SELECT COUNT(*)::int FROM user_grants
 		  WHERE scope_entity_id = $1)                              AS user_grants_revoked`
 
+// scopedGrantsSQL names the access an entity delete takes away. The census
+// above already counts these very rows; this reads them, because a count says
+// how much access vanished and nothing about whose, at which role — and
+// user_grants is hard-deleted (no revoked_at, no history table), so after the
+// cascade the audit envelope is the only place either could have survived.
+//
+// The ORDER BY is not cosmetic: it makes the recorded list deterministic, so
+// two deletes that removed equivalent access record equal envelopes.
+const scopedGrantsSQL = `
+	SELECT user_id, role FROM user_grants
+	WHERE scope_entity_id = $1
+	ORDER BY role, user_id`
+
 // queueEntityBlobReclaimSQL hands the purge job the storage keys it is about to
 // lose the metadata for. Soft-deleted documents are included on purpose: their
 // rows are cascading away too, so their blobs would be just as unreachable.
