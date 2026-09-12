@@ -1,6 +1,13 @@
 package pg
 
-import baserepo "github.com/mohamadhallal/zentax-api/shared/repositories"
+import (
+	"context"
+
+	"github.com/mohamadhallal/zentax-api/platform/authz"
+	authzpg "github.com/mohamadhallal/zentax-api/platform/authz/pg"
+	"github.com/mohamadhallal/zentax-api/platform/database"
+	baserepo "github.com/mohamadhallal/zentax-api/shared/repositories"
+)
 
 // entityColumns is the domain projection — deliberately WITHOUT tenant_id, which
 // is infrastructure (RLS-enforced) and absent from the domain.Entity struct, so
@@ -49,4 +56,25 @@ var sqlConfig = baserepo.SQLConfig{
 	Delete:   `DELETE FROM entities WHERE id = $1`,
 	Count:    `SELECT COUNT(*)::int AS total FROM entities`,
 	ListBase: `SELECT ` + entityColumns + ` FROM entities`,
+}
+
+// readScope narrows every read of this repository to the entity subtree the
+// caller's grants cover (ADR-0012 B-3). The anchor is the entity's own id, and
+// it is deliberately the SUBTREE ONLY: the ancestors above a scope root are not
+// added back. The hierarchy still renders — the client treats an entity whose
+// parent it cannot resolve as a root of the tree it can see, and the scope
+// root's own parentEntityId is still returned, so a scoped reader can tell
+// that a parent exists without reading it.
+//
+// `id` is unqualified because the entities statements join nothing; the base
+// repository reuses the same predicate for GetById, where `id` is the projected
+// column.
+func readScope(db database.ExecerPg) func(context.Context, func(any) string) (string, error) {
+	return func(ctx context.Context, bind func(any) string) (string, error) {
+		scope, err := authzpg.ReadScope(ctx, db, authz.EntityRead)
+		if err != nil {
+			return "", err
+		}
+		return scope.EntityPredicate("id", bind), nil
+	}
 }

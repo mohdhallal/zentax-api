@@ -665,7 +665,8 @@ Migrations (sqitch): `tenants`, `entities`, `obligation_types`, `entity_obligati
 `workflows`, `workflow_tasks`, `task_instances`, `task_instance_approvals`, `actor_columns`,
 `audit_log`, `service_accounts`, `entity_obligation_details`, `reporting_indexes`, `invite_tokens`,
 `documents`, `data_templates`, `fiscal_calendar`, `tenant_timezone`, `canonical_tax_keys`,
-`pagination_indexes`
+`pagination_indexes`, `attested_delete_guard`, `storage_reclaim`, `session_mfa_attempts`,
+`audit_chain_version`
 (+ boilerplate `appschema`, `internal_api_keys`, `nexus_accounts_api_keys`).
 
 **Auth / identity (Increments A + B):** first-party email/password + server-side sessions + TOTP MFA
@@ -1223,6 +1224,32 @@ measured figures say so.
   retention scheme breaks it permanently for that tenant, and there is no anchor table. Days for a
   verify command/endpoint over a tenant's chain (WORM export to S3 Object Lock stays Phase 2 —
   see *Platform / infra*).
+
+- **Chain resolution — FIXED, with a cut-over (2026-09-12).** Until today the chain could not be
+  verified from the stored rows at all: `Record` stamped `time.Now()` at nanosecond precision and
+  hashed it as RFC3339Nano, while `audit_log.occurred_at` is `TIMESTAMPTZ` and keeps microseconds,
+  so the last three digits were gone the moment the row committed. Reproduced on the live local
+  chain — the production `VerifyChain` over the stored rows failed at seq 1, and brute-forcing the
+  1000 nanosecond suffixes reproduced each stored hash exactly (seq 1 at +218 ns). Every gate was
+  green because they ran on macOS, whose clock is microsecond-granular; the API container, CI and
+  every Fargate cell are Linux, where it is not. Now: `audit.ChainResolution` (= 1 µs) is the one
+  resolution both halves use — `Record` truncates the instant it stamps AND the canonical form
+  formats it at exactly six fractional digits, so a future writer cannot reintroduce the bug by
+  stamping a finer clock. **Cut-over:** migration `20260912000026_audit_chain_version` adds
+  `audit_log.hash_version SMALLINT NOT NULL DEFAULT 1` (no `UPDATE` — the table is append-only);
+  `1` = pre-cut-over and unverifiable by construction, `2` = written under the current contract.
+  `audit.Verify` link-checks every entry, recomputes every v2 entry, tolerates a contiguous v1
+  PREFIX and reports `FirstVerifiableSeq`; a v1 row appearing *after* a verifiable one is an error,
+  so the marker cannot exempt a row mid-chain. `VerifyChain` stays strict (any v1 entry is an error
+  naming the first verifiable seq), and an entry loaded *without* the column (version 0) is verified
+  strictly — a forgotten column can never turn verification into a no-op. **What an operator sees on
+  a chain written before today:** `audit chain: N entries, M pre-cut-over (links intact, not
+  recomputable), hash-verified seq X..Y` — not tamper evidence. Every row in the local dev database
+  (610 at the cut-over) is v1; re-seed (`seed-demo reset --admin-dsn … && seed-demo seed`) for a
+  fully verifiable demo chain. Nothing is deployed, so no customer chain is affected. Proved by
+  `acceptance/modules/audit/chain_test.go`, which records through Postgres with an **injected**
+  nanosecond clock and verifies the rows it reads back — the host's clock no longer decides whether
+  the suite can fail (reverting the fix makes it fail at seq 1 on macOS).
 
 - **Request URIs, with their search terms, reach the logs in clear text.**
   `delivery/httpkit/middlewares/request_logger.go:30` logs `r.RequestURI` verbatim on every

@@ -10,6 +10,8 @@ import (
 	"github.com/mohamadhallal/zentax-api/app"
 	apperrors "github.com/mohamadhallal/zentax-api/errors"
 	"github.com/mohamadhallal/zentax-api/modules/identity/domain"
+	"github.com/mohamadhallal/zentax-api/platform/authz"
+	authzpg "github.com/mohamadhallal/zentax-api/platform/authz/pg"
 	"github.com/mohamadhallal/zentax-api/platform/database"
 	baserepo "github.com/mohamadhallal/zentax-api/shared/repositories"
 )
@@ -95,9 +97,34 @@ func (r *MemberRepo) GetByID(ctx context.Context, tenantID, id string) (*domain.
 }
 
 // attachGrants loads every grant of the given members in ONE statement (no
-// N+1). user_grants is RLS-scoped (only this tenant's rows are visible) and the
-// scope entity's name comes from an RLS-scoped LEFT JOIN, so a scope pointing
-// outside the tenant could never render a foreign name.
+// N+1), and WITHHOLDS the scope entity's name when that entity lies outside the
+// caller's read scope.
+//
+// The directory itself is deliberately never narrowed (platform/authz/
+// readscope.go): a preparer scoped to one subsidiary still has to render the
+// assignee picker, so every member of the tenant is listed for every principal.
+// But a grant row is not directory data — it carries an ENTITY, and resolving
+// e.name for it handed that scoped principal the human-readable names of the
+// siblings they cannot read: in ADR-0012's motivating case (an external advisor
+// granted one entity) precisely the list of client entities the advisor is not
+// engaged on. So the name is resolved only inside the caller's entity:read
+// scope — the same predicate and the same capability the /entities reads use —
+// and for anything else it never leaves the database. The caller's own grants
+// and every tenant-wide grant (scope_entity_id IS NULL) are untouched, as is an
+// unbounded caller, who pays no query for the scope at all.
+//
+// user_grants and entities are both RLS-scoped, so a scope pointing outside the
+// TENANT could never render a foreign name to begin with; this is the in-tenant
+// half of the same question.
+//
+// CONTRACT WITH dto.MemberToJSON: a grant that has a scope entity but no
+// resolved name is a withheld scope, and the DTO drops the id on that signal
+// too. The combination has no other meaning — entities.name is NOT NULL, and
+// the composite (tenant_id, scope_entity_id) FK cascades, so an in-tenant grant
+// whose scope the caller may read always resolves a name. ScopeEntityID is left
+// intact on the domain object so the write paths keep full fidelity (the
+// last-admin guard asks removed.IsTenantWide()); those are member:manage paths,
+// which only a tenant-wide — hence unbounded — admin can reach.
 func (r *MemberRepo) attachGrants(ctx context.Context, members []domain.Member) error {
 	if len(members) == 0 {
 		return nil
@@ -110,13 +137,29 @@ func (r *MemberRepo) attachGrants(ctx context.Context, members []domain.Member) 
 		index[members[i].ID] = i
 	}
 
+	scope, err := authzpg.ReadScope(ctx, r.db, authz.EntityRead)
+	if err != nil {
+		return err
+	}
+	args := []any{ids}
+	bind := func(v any) string {
+		args = append(args, v)
+		return "$" + strconv.Itoa(len(args))
+	}
+	// "" (unbounded) reads every name; "FALSE" resolves none.
+	nameVisible := "TRUE"
+	if pred := scope.EntityPredicate("g.scope_entity_id", bind); pred != "" {
+		nameVisible = pred
+	}
+
 	var grants []domain.MemberGrant
 	if err := r.db.SelectContext(ctx, &grants, `
-		SELECT g.id, g.user_id, g.role, g.scope_entity_id, e.name AS scope_entity_name
+		SELECT g.id, g.user_id, g.role, g.scope_entity_id,
+		       CASE WHEN `+nameVisible+` THEN e.name END AS scope_entity_name
 		FROM user_grants g
 		LEFT JOIN entities e ON e.id = g.scope_entity_id
 		WHERE g.user_id = ANY($1::uuid[])
-		ORDER BY g.created_at, g.id`, ids); err != nil {
+		ORDER BY g.created_at, g.id`, args...); err != nil {
 		return err
 	}
 	for _, g := range grants {

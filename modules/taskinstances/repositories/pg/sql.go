@@ -1,6 +1,13 @@
 package pg
 
-import baserepo "github.com/mohamadhallal/zentax-api/shared/repositories"
+import (
+	"context"
+
+	"github.com/mohamadhallal/zentax-api/platform/authz"
+	authzpg "github.com/mohamadhallal/zentax-api/platform/authz/pg"
+	"github.com/mohamadhallal/zentax-api/platform/database"
+	baserepo "github.com/mohamadhallal/zentax-api/shared/repositories"
+)
 
 // taskInstanceColumns is the domain projection — WITHOUT tenant_id (RLS infra).
 // due_date/period_end_date/filing_deadline/payment_deadline (DATE) scan into
@@ -49,6 +56,22 @@ var sqlConfig = baserepo.SQLConfig{
 	Delete:   `DELETE FROM task_instances WHERE id = $1`,
 	Count:    `SELECT COUNT(*)::int AS total FROM task_instances`,
 	ListBase: `SELECT ` + taskInstanceColumns + ` FROM task_instances`,
+}
+
+// readScope narrows every read of this repository to the caller's entity
+// subtree (ADR-0012 B-3). An instance reaches its entity through its workflow,
+// so the predicate is an EXISTS on that workflow. It applies to the reads the
+// approval flow makes too (GetById before submit / approve / reject): a scoped
+// principal is refused by the authorizer there in any case, and this makes the
+// refusal independent of the order of the two checks.
+func readScope(db database.ExecerPg) func(context.Context, func(any) string) (string, error) {
+	return func(ctx context.Context, bind func(any) string) (string, error) {
+		scope, err := authzpg.ReadScope(ctx, db, authz.TaskRead)
+		if err != nil {
+			return "", err
+		}
+		return scope.WorkflowPredicate("workflow_id", bind), nil
+	}
 }
 
 // Approval-flow transitions (ADR-0018). Preconditions + SoD are enforced in the

@@ -398,7 +398,16 @@ func TestListByWorkflow_And_ByTaskInstance_404(t *testing.T) {
 	_, err = uc.ListByTaskInstance(ctx, tiID)
 	assert.IsType(t, &apperrors.NotFoundError{}, err)
 
+	// An instance whose workflow the caller cannot READ — outside their entity
+	// subtree — is a 404, not an empty list. WorkflowExists is read-scoped, so
+	// false is exactly the answer a scoped caller gets.
 	repo.On("TaskInstanceRef", ctx, tiID).Return(&domain.TaskInstanceRef{ID: tiID, WorkflowID: wfID}, nil).Once()
+	repo.On("WorkflowExists", ctx, wfID).Return(false, nil).Once()
+	_, err = uc.ListByTaskInstance(ctx, tiID)
+	assert.IsType(t, &apperrors.NotFoundError{}, err)
+
+	repo.On("TaskInstanceRef", ctx, tiID).Return(&domain.TaskInstanceRef{ID: tiID, WorkflowID: wfID}, nil).Once()
+	repo.On("WorkflowExists", ctx, wfID).Return(true, nil).Once()
 	ti := tiID
 	repo.On("ListViews", ctx, domain.ListDocumentsFilter{TaskInstanceID: &ti}).Return([]domain.DocumentView{*sampleView()}, 1, nil).Once()
 	views, err := uc.ListByTaskInstance(ctx, tiID)
@@ -415,7 +424,9 @@ func TestDownload_LatestAndMissingBlob(t *testing.T) {
 	uc := newUC(repo, store, 1<<20)
 	ver := &domain.DocumentVersion{ID: verID, DocumentID: docID, Version: 2, StorageKey: "tenants/a/documents/d/v", FileName: "r.pdf", FileSize: 3, MimeType: "application/pdf"}
 
-	repo.On("GetByID", ctx, docID).Return(sampleDoc(nil), nil)
+	// Download resolves the document through the read-scoped VIEW, so a
+	// document outside the caller's subtree never reaches storage.
+	repo.On("GetView", ctx, docID).Return(sampleView(), nil)
 	repo.On("GetLatestVersion", ctx, docID).Return(ver, nil).Once()
 	store.On("Get", ctx, ver.StorageKey).Return(io.NopCloser(strings.NewReader("abc")), storage.ObjectInfo{Size: 3, ContentType: "application/octet-stream"}, nil).Once()
 
@@ -441,10 +452,17 @@ func TestDownloadVersion_UnknownVersion404(t *testing.T) {
 	ctx := tenantCtx(t)
 	repo := new(domain.DocumentRepositoryMock)
 	uc := newUC(repo, new(storage.Mock), 1<<20)
-	repo.On("GetByID", ctx, docID).Return(sampleDoc(nil), nil).Once()
+	repo.On("GetView", ctx, docID).Return(sampleView(), nil).Once()
 	repo.On("GetVersion", ctx, docID, verID).Return(nil, nil).Once()
 	_, err := uc.DownloadVersion(ctx, docID, verID)
 	assert.IsType(t, &apperrors.NotFoundError{}, err)
+
+	// A document outside the caller's read scope is 404 before any version
+	// lookup at all — the view is where the narrowing happens.
+	repo.On("GetView", ctx, docID).Return(nil, nil).Once()
+	_, err = uc.DownloadVersion(ctx, docID, verID)
+	assert.IsType(t, &apperrors.NotFoundError{}, err)
+	repo.AssertNumberOfCalls(t, "GetVersion", 1)
 }
 
 func TestSanitizeFileName(t *testing.T) {

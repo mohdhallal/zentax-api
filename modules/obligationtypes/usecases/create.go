@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/mohamadhallal/zentax-api/modules/obligationtypes/domain"
+	"github.com/mohamadhallal/zentax-api/platform/audit"
 	"github.com/mohamadhallal/zentax-api/platform/authz"
 )
 
@@ -19,7 +20,8 @@ func (uc *UseCases) Create(ctx context.Context, input domain.CreateObligationTyp
 	if err != nil {
 		return nil, err
 	}
-	if err := uc.audit.Record(ctx, "obligation_type.created", "obligation_type", ot.ID, nil); err != nil {
+	if err := uc.audit.Record(ctx, "obligation_type.created", "obligation_type", ot.ID,
+		audit.Changes(nil, auditValues(ot))); err != nil {
 		return nil, err
 	}
 	return ot, nil

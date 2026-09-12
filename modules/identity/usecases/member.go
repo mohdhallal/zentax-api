@@ -2,12 +2,14 @@ package usecases
 
 import (
 	"context"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/mohamadhallal/zentax-api/app"
 	apperrors "github.com/mohamadhallal/zentax-api/errors"
 	"github.com/mohamadhallal/zentax-api/modules/identity/domain"
+	"github.com/mohamadhallal/zentax-api/platform/audit"
 	"github.com/mohamadhallal/zentax-api/platform/authz"
 	"github.com/mohamadhallal/zentax-api/platform/crypto"
 	"github.com/mohamadhallal/zentax-api/platform/database"
@@ -139,7 +141,17 @@ func (uc *UseCases) ReissueInvite(ctx context.Context, memberID string) (*domain
 	if err != nil {
 		return nil, err
 	}
-	if err := uc.audit.Record(ctx, "member.invite_reissued", "user", member.ID, nil); err != nil {
+	// A re-issue is one-sided: nothing on the member row moves, a credential is
+	// minted. So the envelope records what the new credential IS — the window
+	// it is valid for, and the access it will unlock on acceptance — in the
+	// same "to"-only form audit.Changes gives a create. Without it the trail
+	// said only that somebody re-invited somebody.
+	if err := uc.audit.Record(ctx, "member.invite_reissued", "user", member.ID,
+		audit.Changes(nil, audit.Values{
+			"status":          member.Status,
+			"inviteExpiresAt": expiresAt,
+			"grants":          auditMemberGrants(member.Grants),
+		})); err != nil {
 		return nil, err
 	}
 	return &domain.InviteResult{Member: member, RawToken: raw, ExpiresAt: expiresAt}, nil
@@ -229,11 +241,19 @@ func (uc *UseCases) UpdateMember(ctx context.Context, memberID string, input dom
 		}
 	}
 
-	if err := uc.audit.Record(ctx, "member.updated", "user", member.ID,
-		map[string]any{"status": status}); err != nil {
+	// Both sides are rows this request already read — `member` from the 404
+	// check above, `updated` from the response it is about to return — so the
+	// envelope records the rename and the enable/disable it actually performed
+	// (including the invited-not-active landing above) at no extra cost.
+	updated, err := uc.mustMember(ctx, tenantID, member.ID)
+	if err != nil {
 		return nil, err
 	}
-	return uc.mustMember(ctx, tenantID, member.ID)
+	if err := uc.audit.Record(ctx, "member.updated", "user", member.ID,
+		audit.Changes(auditMemberValues(member), auditMemberValues(updated))); err != nil {
+		return nil, err
+	}
+	return updated, nil
 }
 
 // SetRole REPLACES every grant of the member with the given one.
@@ -258,7 +278,7 @@ func (uc *UseCases) SetRole(ctx context.Context, memberID string, input domain.G
 	if _, err := uc.members.InsertGrant(ctx, member.ID, input.Role, input.ScopeEntityID); err != nil {
 		return nil, err
 	}
-	return uc.finishGrantChange(ctx, tenantID, member.ID, input.Role, input.ScopeEntityID != nil)
+	return uc.finishGrantChange(ctx, tenantID, member)
 }
 
 // AddGrant ADDS one grant to the member's set.
@@ -280,7 +300,7 @@ func (uc *UseCases) AddGrant(ctx context.Context, memberID string, input domain.
 	if _, err := uc.members.InsertGrant(ctx, member.ID, input.Role, input.ScopeEntityID); err != nil {
 		return nil, err
 	}
-	return uc.finishGrantChange(ctx, tenantID, member.ID, input.Role, input.ScopeEntityID != nil)
+	return uc.finishGrantChange(ctx, tenantID, member)
 }
 
 // RemoveGrant deletes one grant of the member.
@@ -293,14 +313,14 @@ func (uc *UseCases) RemoveGrant(ctx context.Context, memberID, grantID string) e
 	if err != nil {
 		return err
 	}
-	var removed *domain.MemberGrant
+	var found bool
 	for i := range member.Grants {
 		if member.Grants[i].ID == grantID {
-			removed = &member.Grants[i]
+			found = true
 			break
 		}
 	}
-	if removed == nil {
+	if !found {
 		return apperrors.NewNotFound(domain.MsgGrantNotFound)
 	}
 	if err := uc.members.LockAdminGuard(ctx, tenantID); err != nil {
@@ -313,7 +333,7 @@ func (uc *UseCases) RemoveGrant(ctx context.Context, memberID, grantID string) e
 	if !ok {
 		return apperrors.NewNotFound(domain.MsgGrantNotFound)
 	}
-	_, err = uc.finishGrantChange(ctx, tenantID, member.ID, removed.Role, !removed.IsTenantWide())
+	_, err = uc.finishGrantChange(ctx, tenantID, member)
 	return err
 }
 
@@ -339,19 +359,112 @@ func validateGrant(isService bool, input domain.GrantInput) error {
 // finishGrantChange applies the last-admin guard (on the request tx, so it
 // sees the uncommitted change — a violation rolls the whole request back),
 // records the audit entry and returns the fresh member view.
-func (uc *UseCases) finishGrantChange(ctx context.Context, tenantID, memberID, role string, scoped bool) (*domain.Member, error) {
+//
+// `before` is the member as its caller already loaded it, on this same
+// transaction, BEFORE touching user_grants — the grant set that is about to be
+// replaced. It costs no extra read and is the only surviving copy: user_grants
+// is hard-deleted. All three grant paths (replace-all, add one, remove one)
+// therefore record the same thing — the grant set on both sides — rather than
+// the one role that happened to be named in the request, which said nothing
+// about what the member could do before, and on an add or a remove was not even
+// a change of role.
+func (uc *UseCases) finishGrantChange(ctx context.Context, tenantID string, before *domain.Member) (*domain.Member, error) {
 	if err := uc.ensureTenantAdminRemains(ctx, tenantID); err != nil {
 		return nil, err
 	}
-	member, err := uc.mustMember(ctx, tenantID, memberID)
+	member, err := uc.mustMember(ctx, tenantID, before.ID)
 	if err != nil {
 		return nil, err
 	}
 	if err := uc.audit.Record(ctx, "member.role_changed", "user", member.ID,
-		map[string]any{"role": role, "scoped": scoped, "grants": len(member.Grants)}); err != nil {
+		audit.Changes(auditMemberValues(before), auditMemberValues(member))); err != nil {
 		return nil, err
 	}
 	return member, nil
+}
+
+// auditMemberValues is the ADR-0008 whitelist for a member — the access-review
+// envelope, and the one place in the system where prior state exists nowhere
+// else: user_grants is hard-deleted (no revoked_at, no history table), so a
+// grant that is replaced or removed survives only here. It feeds audit.Changes,
+// which records the before and after of whatever moved.
+//
+// Quoted verbatim (enums, a bool, uuids):
+//
+//   - grants: the whole grant set, as role + scope entity id per grant — see
+//     auditMemberGrants. This is the segregation-of-duties record: a demotion
+//     from reviewer to preparer, or an escalation from viewer to tenant_admin,
+//     is reconstructable from the two sides. Both halves are constrained — the
+//     role by authz.KnownRole, the scope by a `uuid` and a composite FK.
+//   - status: invited / active / disabled.
+//   - kind: human / service. A machine principal can never approve (ADR-0012),
+//     so what kind of principal held a grant is part of the control question.
+//   - mfaEnabled: whether the credential behind those grants was second-factor
+//     protected.
+//
+// Redacted — the change is dated, the value withheld: name and email. Both are
+// personal data under ADR-0007, and the audit log is outside the erasure
+// boundary, so the trail must never duplicate them. The actor is already
+// carried as actor_id, and the member is resource_id.
+func auditMemberValues(m *domain.Member) audit.Values {
+	if m == nil {
+		return nil
+	}
+	return audit.Values{
+		"name":       audit.Redact(m.Name),
+		"email":      audit.Redact(m.Email),
+		"kind":       m.Kind,
+		"status":     m.Status,
+		"mfaEnabled": m.MFAEnabled,
+		"grants":     auditMemberGrants(m.Grants),
+	}
+}
+
+// auditMemberGrants projects the grant set onto what an access review asks of
+// it: which role, and over which entity subtree (nothing for a tenant-wide
+// grant). The scope entity's NAME is deliberately absent — it is the entity's
+// free text, and a scope name is exactly what a reader outside that subtree
+// must not learn from the trail.
+//
+// Grant ids are left out and the list is sorted, so the two sides compare by
+// MEANING: replacing a grant with an identical one (SetRole to the same role
+// mints a new row id) records no change, which is the honest answer.
+func auditMemberGrants(grants []domain.MemberGrant) []map[string]any {
+	if len(grants) == 0 {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(grants))
+	for i := range grants {
+		grant := &grants[i]
+		entry := map[string]any{"role": grant.Role}
+		if !grant.IsTenantWide() {
+			entry["scopeEntityId"] = *grant.ScopeEntityID
+		}
+		out = append(out, entry)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		left, right := auditGrantKey(out[i]), auditGrantKey(out[j])
+		return left < right
+	})
+	return out
+}
+
+// auditGrantKey orders a projected grant: by role, then by scope (tenant-wide
+// first). Only the sort depends on it — it never reaches the envelope.
+func auditGrantKey(g map[string]any) string {
+	role, _ := g["role"].(string)
+	scope, _ := g["scopeEntityId"].(string)
+	return role + "\x00" + scope
+}
+
+// activatedName mirrors the repository's `name = COALESCE($3, name)`: an
+// accept-invite that sends no display name keeps the invited one, so the trail
+// must not claim a rename that did not happen.
+func activatedName(current string, override *string) string {
+	if override == nil {
+		return current
+	}
+	return *override
 }
 
 func (uc *UseCases) ensureTenantAdminRemains(ctx context.Context, tenantID string) error {
@@ -423,7 +536,23 @@ func (uc *UseCases) AcceptInvite(ctx context.Context, input domain.AcceptInviteI
 		if err := uc.invites.RevokeUnusedForUser(ctx, user.ID); err != nil {
 			return err
 		}
-		return uc.audit.Record(ctx, "member.activated", "user", user.ID, nil)
+		// The activation is a real transition and the user row that preceded it
+		// is already loaded: invited → active, and no credential → a credential.
+		// That second half is the one an access review cares about, because it
+		// is the moment the account becomes usable.
+		return uc.audit.Record(ctx, "member.activated", "user", user.ID,
+			audit.Changes(
+				audit.Values{
+					"status":      user.Status,
+					"hasPassword": user.PasswordHash != nil,
+					"name":        audit.Redact(user.Name),
+				},
+				audit.Values{
+					"status":      domain.StatusActive,
+					"hasPassword": true,
+					"name":        audit.Redact(activatedName(user.Name, input.Name)),
+				},
+			))
 	})
 	if err != nil {
 		return nil, err

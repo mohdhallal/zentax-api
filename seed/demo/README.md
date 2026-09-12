@@ -254,6 +254,17 @@ you seeded. That is correct behaviour, and it is the one place where the demo
 world visibly is a demo. Don't screenshot the audit log next to a 2025 filing
 date and expect them to agree.
 
+**Re-seed anything seeded before 2026-09-12.** The hash-chain cut-over
+(migration `20260912000026_audit_chain_version`) fixed a writer that hashed
+`occurred_at` at nanosecond precision while the column stores microseconds:
+every entry written before it is marked `hash_version = 1` and can never be
+recomputed from the stored row — `platform/audit.Verify` link-checks those rows,
+skips recomputation, and reports the first sequence number it could verify. A
+demo whose chain must verify end to end (and any screenshot of a verifier)
+therefore needs a fresh trail: `reset --yes --admin-dsn …`, then seed again.
+There is no migration that repairs the old rows, and there will not be:
+rewriting an append-only ledger is the one thing it exists to prevent.
+
 ---
 
 ## `seed-demo-output.json`

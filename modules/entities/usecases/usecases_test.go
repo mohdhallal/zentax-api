@@ -1,14 +1,17 @@
 package usecases
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	apperrors "github.com/mohamadhallal/zentax-api/errors"
 	"github.com/mohamadhallal/zentax-api/modules/entities/domain"
+	"github.com/mohamadhallal/zentax-api/platform/audit"
 	sharedtypes "github.com/mohamadhallal/zentax-api/shared/types"
 )
 
@@ -105,12 +108,13 @@ func TestEntityGetById_RepoError(t *testing.T) {
 	repo.AssertExpectations(t)
 }
 
-func TestEntityUpdate_DefaultsAndNotFound(t *testing.T) {
+func TestEntityUpdate_AppliesDefaults(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	repo := new(domain.EntityRepositoryMock)
 	uc := NewUseCases(repo)
 
+	entity := sampleEntity()
 	in := domain.UpdateEntityInput{Name: "Acme", Country: "Germany"} // no pattern, no status
 	want := in
 	want.FiscalCalendarPattern = "standard"
@@ -118,12 +122,30 @@ func TestEntityUpdate_DefaultsAndNotFound(t *testing.T) {
 	want.FiscalYearEndRule = "nearest"
 	want.Status = "active"
 
-	repo.On("Update", ctx, "missing", want).Return(nil, nil).Once()
+	repo.On("GetById", ctx, entity.ID).Return(entity, nil).Once()
+	repo.On("Update", ctx, entity.ID, want).Return(entity, nil).Once()
 
-	result, err := uc.Update(ctx, "missing", in)
+	_, err := uc.Update(ctx, entity.ID, in)
+	require.NoError(t, err)
+	repo.AssertExpectations(t)
+}
+
+// The prior row is read before the write (its whitelisted fields are the
+// audit envelope's "from" side, ADR-0008), so a missing entity is a 404 before
+// anything is written.
+func TestEntityUpdate_NotFound(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	repo := new(domain.EntityRepositoryMock)
+	uc := NewUseCases(repo)
+
+	repo.On("GetById", ctx, "missing").Return(nil, nil).Once()
+
+	result, err := uc.Update(ctx, "missing", domain.UpdateEntityInput{Name: "Acme", Country: "Germany"})
 	assert.Nil(t, result)
 	assert.IsType(t, &apperrors.NotFoundError{}, err)
 	repo.AssertExpectations(t)
+	repo.AssertNotCalled(t, "Update", ctx, "missing", mock.Anything)
 }
 
 func TestEntityUpdate_Success(t *testing.T) {
@@ -137,6 +159,7 @@ func TestEntityUpdate_Success(t *testing.T) {
 		Name: "Acme", Country: "Germany", FiscalCalendarPattern: "454", Status: "inactive",
 		FiscalWeekEndDay: "saturday", FiscalYearEndRule: "nearest",
 	}
+	repo.On("GetById", ctx, entity.ID).Return(sampleEntity(), nil).Once()
 	repo.On("Update", ctx, entity.ID, in).Return(entity, nil).Once()
 
 	result, err := uc.Update(ctx, entity.ID, in)
@@ -195,6 +218,27 @@ func TestEntityDelete_RefusedWhenApprovedWorkExists(t *testing.T) {
 	repo.AssertExpectations(t)
 	repo.AssertNotCalled(t, "Delete", ctx, "e1")
 	repo.AssertNotCalled(t, "QueueBlobReclaim", ctx, "e1")
+}
+
+// The audit whitelist quotes the fiscal calendar but not the entity's names,
+// and a custom period reaches the trail as code + boundaries only — the
+// display name is the tenant's free text (ADR-0008).
+func TestEntityAuditValues_WhitelistsCalendarAndWithholdsNames(t *testing.T) {
+	t.Parallel()
+
+	entity := sampleEntity()
+	entity.CustomPeriods = domain.CustomPeriods{
+		{Code: "P1", Name: "Trading period one", StartDate: "01-01", EndDate: "01-28"},
+	}
+	details := audit.Changes(nil, auditValues(entity))
+	encoded, err := json.Marshal(details)
+	require.NoError(t, err)
+
+	assert.Contains(t, string(encoded), `"fiscalCalendarPattern":{"to":"standard"}`)
+	assert.Contains(t, string(encoded), `"name":{"to":"set"}`)
+	assert.NotContains(t, string(encoded), "Acme GmbH")
+	assert.Contains(t, string(encoded), `"code":"P1"`)
+	assert.NotContains(t, string(encoded), "Trading period one")
 }
 
 func TestEntityList_Aggregates(t *testing.T) {

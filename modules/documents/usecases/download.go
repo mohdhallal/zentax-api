@@ -10,11 +10,16 @@ import (
 	"github.com/mohamadhallal/zentax-api/platform/storage"
 )
 
-// Download opens the latest version's blob. Unknown / other-tenant / deleted →
-// 404 before any byte; a blob missing from storage is an internal error
-// (logged by the transport as a 500) — the metadata says it should exist.
+// Download opens the latest version's blob. Unknown / other-tenant / deleted /
+// outside the caller's entity subtree → 404 before any byte; a blob missing
+// from storage is an internal error (logged by the transport as a 500) — the
+// metadata says it should exist.
+//
+// The document is resolved through the read-scoped view, not loadLive: this is
+// the path that hands over actual file bytes, so the scope decision is made
+// here, in the open, and the version lookup below is narrowed again behind it.
 func (uc *UseCases) Download(ctx context.Context, id domain.DocumentID) (*domain.Download, error) {
-	if _, err := uc.loadLive(ctx, id); err != nil {
+	if _, err := uc.view(ctx, id); err != nil {
 		return nil, err
 	}
 	ver, err := uc.repo.GetLatestVersion(ctx, id)
@@ -27,9 +32,10 @@ func (uc *UseCases) Download(ctx context.Context, id domain.DocumentID) (*domain
 	return uc.open(ctx, ver)
 }
 
-// DownloadVersion opens one specific version of a live document.
+// DownloadVersion opens one specific version of a live document, read-scoped
+// exactly as Download is.
 func (uc *UseCases) DownloadVersion(ctx context.Context, id domain.DocumentID, versionID string) (*domain.Download, error) {
-	if _, err := uc.loadLive(ctx, id); err != nil {
+	if _, err := uc.view(ctx, id); err != nil {
 		return nil, err
 	}
 	ver, err := uc.repo.GetVersion(ctx, id, versionID)

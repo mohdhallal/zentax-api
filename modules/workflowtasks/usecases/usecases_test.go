@@ -1,14 +1,17 @@
 package usecases
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	apperrors "github.com/mohamadhallal/zentax-api/errors"
 	"github.com/mohamadhallal/zentax-api/modules/workflowtasks/domain"
+	"github.com/mohamadhallal/zentax-api/platform/audit"
 	sharedtypes "github.com/mohamadhallal/zentax-api/shared/types"
 )
 
@@ -95,24 +98,43 @@ func TestWTGetById_Success(t *testing.T) {
 	repo.AssertExpectations(t)
 }
 
-func TestWTUpdate_DefaultsAndNotFound(t *testing.T) {
+func TestWTUpdate_AppliesDefaults(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	repo := new(domain.WorkflowTaskRepositoryMock)
 	uc := NewUseCases(repo)
 
+	wt := sampleWorkflowTask()
 	in := domain.UpdateWorkflowTaskInput{Name: "T", TaskType: "review"} // no due-date fields
 	want := in
 	want.DueDateReference = "filing_deadline"
 	want.DueDateOffsetUnit = "days"
 	want.DueDateOffsetDirection = "before"
 
-	repo.On("Update", ctx, "missing", want).Return(nil, nil).Once()
+	repo.On("GetById", ctx, wt.ID).Return(wt, nil).Once()
+	repo.On("Update", ctx, wt.ID, want).Return(wt, nil).Once()
 
-	result, err := uc.Update(ctx, "missing", in)
+	_, err := uc.Update(ctx, wt.ID, in)
+	require.NoError(t, err)
+	repo.AssertExpectations(t)
+}
+
+// The prior row is read before the write (its whitelisted fields are the audit
+// envelope's "from" side, ADR-0008), so a missing template is a 404 before
+// anything is written.
+func TestWTUpdate_NotFound(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	repo := new(domain.WorkflowTaskRepositoryMock)
+	uc := NewUseCases(repo)
+
+	repo.On("GetById", ctx, "missing").Return(nil, nil).Once()
+
+	result, err := uc.Update(ctx, "missing", domain.UpdateWorkflowTaskInput{Name: "T", TaskType: "review"})
 	assert.Nil(t, result)
 	assert.IsType(t, &apperrors.NotFoundError{}, err)
 	repo.AssertExpectations(t)
+	repo.AssertNotCalled(t, "Update", ctx, "missing", mock.Anything)
 }
 
 func TestWTUpdate_Success(t *testing.T) {
@@ -126,12 +148,33 @@ func TestWTUpdate_Success(t *testing.T) {
 		Name: "T", TaskType: "submission",
 		DueDateReference: "period_end", DueDateOffsetUnit: "months", DueDateOffsetDirection: "after",
 	}
+	repo.On("GetById", ctx, wt.ID).Return(sampleWorkflowTask(), nil).Once()
 	repo.On("Update", ctx, wt.ID, in).Return(wt, nil).Once()
 
 	result, err := uc.Update(ctx, wt.ID, in)
 	require.NoError(t, err)
 	assert.Equal(t, wt, result)
 	repo.AssertExpectations(t)
+}
+
+// The required-document list reaches the trail as a shape — how many, how many
+// mandatory — because a requirement's name and description are free text
+// (ADR-0008).
+func TestWTAuditValues_DocumentRequirementsAreShapeOnly(t *testing.T) {
+	t.Parallel()
+
+	wt := sampleWorkflowTask()
+	wt.RequiredDocuments = domain.DocumentRequirements{
+		{Name: "Signed VAT return", Required: true},
+		{Name: "Bank statement", Required: false},
+	}
+	encoded, err := json.Marshal(audit.Changes(nil, auditValues(wt)))
+	require.NoError(t, err)
+
+	assert.Contains(t, string(encoded), `"requiredDocuments":{"to":{"count":2,"mandatory":1}}`)
+	assert.NotContains(t, string(encoded), "Signed VAT return")
+	assert.NotContains(t, string(encoded), "Prepare VAT") // the task's own name
+	assert.Contains(t, string(encoded), `"approvalRequired":{"to":false}`)
 }
 
 func TestWTDelete_NotFound(t *testing.T) {

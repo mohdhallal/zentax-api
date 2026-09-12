@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	apperrors "github.com/mohamadhallal/zentax-api/errors"
@@ -85,23 +86,42 @@ func TestWorkflowGetById_Success(t *testing.T) {
 	repo.AssertExpectations(t)
 }
 
-func TestWorkflowUpdate_DefaultsAndNotFound(t *testing.T) {
+func TestWorkflowUpdate_AppliesDefaults(t *testing.T) {
 	t.Parallel()
 	ctx := t.Context()
 	repo := new(domain.WorkflowRepositoryMock)
 	uc := NewUseCases(repo)
 
+	wf := sampleWorkflow()
 	in := domain.UpdateWorkflowInput{Name: "Wf"} // no category/status
 	want := in
 	want.WorkflowCategory = "recurring"
 	want.Status = "draft"
 
-	repo.On("Update", ctx, "missing", want).Return(nil, nil).Once()
+	repo.On("GetById", ctx, wf.ID).Return(wf, nil).Once()
+	repo.On("Update", ctx, wf.ID, want).Return(wf, nil).Once()
 
-	result, err := uc.Update(ctx, "missing", in)
+	_, err := uc.Update(ctx, wf.ID, in)
+	require.NoError(t, err)
+	repo.AssertExpectations(t)
+}
+
+// The prior row is read before the write (its whitelisted fields are the audit
+// envelope's "from" side, ADR-0008), so a missing workflow is a 404 before
+// anything is written.
+func TestWorkflowUpdate_NotFound(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	repo := new(domain.WorkflowRepositoryMock)
+	uc := NewUseCases(repo)
+
+	repo.On("GetById", ctx, "missing").Return(nil, nil).Once()
+
+	result, err := uc.Update(ctx, "missing", domain.UpdateWorkflowInput{Name: "Wf"})
 	assert.Nil(t, result)
 	assert.IsType(t, &apperrors.NotFoundError{}, err)
 	repo.AssertExpectations(t)
+	repo.AssertNotCalled(t, "Update", ctx, "missing", mock.Anything)
 }
 
 func TestWorkflowUpdate_Success(t *testing.T) {
@@ -112,6 +132,7 @@ func TestWorkflowUpdate_Success(t *testing.T) {
 
 	wf := sampleWorkflow()
 	in := domain.UpdateWorkflowInput{Name: "Wf", WorkflowCategory: "project", Status: "active"}
+	repo.On("GetById", ctx, wf.ID).Return(sampleWorkflow(), nil).Once()
 	repo.On("Update", ctx, wf.ID, in).Return(wf, nil).Once()
 
 	result, err := uc.Update(ctx, wf.ID, in)

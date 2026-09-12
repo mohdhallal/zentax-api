@@ -19,8 +19,10 @@ type WorkflowTaskRepo struct {
 }
 
 func NewWorkflowTaskRepo(db database.ExecerPg) *WorkflowTaskRepo {
+	cfg := sqlConfig
+	cfg.ReadScope = readScope(db)
 	return &WorkflowTaskRepo{
-		BaseRepo: baserepo.NewBaseRepo[domain.WorkflowTask, domain.WorkflowTaskID](db, sqlConfig),
+		BaseRepo: baserepo.NewBaseRepo[domain.WorkflowTask, domain.WorkflowTaskID](db, cfg),
 	}
 }
 

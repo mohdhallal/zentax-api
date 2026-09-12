@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/mohamadhallal/zentax-api/modules/entityobligations/domain"
+	"github.com/mohamadhallal/zentax-api/platform/audit"
 	"github.com/mohamadhallal/zentax-api/platform/authz"
 )
 
@@ -15,7 +16,8 @@ func (uc *UseCases) Create(ctx context.Context, input domain.CreateEntityObligat
 	if err != nil {
 		return nil, err
 	}
-	if err := uc.audit.Record(ctx, "entity_obligation.created", "entity_obligation", eo.ID, nil); err != nil {
+	if err := uc.audit.Record(ctx, "entity_obligation.created", "entity_obligation", eo.ID,
+		audit.Changes(nil, auditValues(eo))); err != nil {
 		return nil, err
 	}
 	return eo, nil

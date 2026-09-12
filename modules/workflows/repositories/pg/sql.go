@@ -1,6 +1,13 @@
 package pg
 
-import baserepo "github.com/mohamadhallal/zentax-api/shared/repositories"
+import (
+	"context"
+
+	"github.com/mohamadhallal/zentax-api/platform/authz"
+	authzpg "github.com/mohamadhallal/zentax-api/platform/authz/pg"
+	"github.com/mohamadhallal/zentax-api/platform/database"
+	baserepo "github.com/mohamadhallal/zentax-api/shared/repositories"
+)
 
 // workflowColumns is the domain projection — WITHOUT tenant_id (RLS infra).
 // selected_periods (JSONB) and due_date_rule (JSONB) scan into the domain
@@ -78,4 +85,26 @@ var sqlConfig = baserepo.SQLConfig{
 	// the base repository appends to both statements binds identically.
 	Count:    `SELECT COUNT(*)::int AS total FROM workflows w`,
 	ListBase: `SELECT ` + workflowReadColumns + workflowReadFrom,
+}
+
+// readScope narrows every read of this repository to the caller's entity
+// subtree (ADR-0012 B-3). The anchor is the workflow's entity_id, left
+// UNQUALIFIED on purpose: it is the one column name that is correct in all
+// three statements the base repository builds — the list and the count over
+// `workflows w` (entity_id exists on no other table in the join: not on
+// entities, not on obligation_types) and the GetById wrapper, where it is the
+// projected column. Were a joined table ever to grow an entity_id, Postgres
+// would refuse the statement as ambiguous — loudly, not silently wide.
+//
+// A workflow with NO entity — tenant-level project work — matches nothing here
+// (`NULL = ANY(...)` is NULL), so it stays visible only to a tenant-wide grant,
+// exactly as the write side already treats it.
+func readScope(db database.ExecerPg) func(context.Context, func(any) string) (string, error) {
+	return func(ctx context.Context, bind func(any) string) (string, error) {
+		scope, err := authzpg.ReadScope(ctx, db, authz.WorkflowRead)
+		if err != nil {
+			return "", err
+		}
+		return scope.EntityPredicate("entity_id", bind), nil
+	}
 }

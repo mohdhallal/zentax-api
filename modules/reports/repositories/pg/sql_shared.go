@@ -2,9 +2,11 @@ package pg
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/mohamadhallal/zentax-api/modules/reports/domain"
+	"github.com/mohamadhallal/zentax-api/platform/authz"
 )
 
 // Shared SQL building blocks for the compliance / financial reports
@@ -95,6 +97,32 @@ const reportFiltersWhere = `
 
 func filterArgs(f domain.ReportFilters) []any {
 	return []any{f.FinancialYear, f.EntityID, f.ObligationTypeID}
+}
+
+// reportScopeWhere renders the RBAC read-scope predicate (ADR-0012 B-3) as an
+// extra AND on a report's WHERE, plus the argument it binds. Every statement
+// in this package keeps its own fixed placeholders, so the scope's bind is
+// APPENDED: firstParam is the statement's next free placeholder number and the
+// caller appends the returned args last. An unbounded caller (any tenant-wide
+// grant) gets "" and no argument — the statement is byte-for-byte the one that
+// ran before this increment, which is what keeps the common path free.
+//
+// The ids are bound as one uuid[] rather than expanded inline as a recursive
+// walk per statement, and that is not a stylistic choice: measured on the
+// largest tenant, the bound array plans the task page at 0.30 ms against
+// 7.3 ms for the inline walk, and its exact count at 24.9 ms against 59.7 ms
+// (and 26.7 ms unscoped). See platform/authz/readscope.go.
+func reportScopeWhere(scope authz.ReadScope, firstParam int) (string, []any) {
+	var params []any
+	bind := func(v any) string {
+		params = append(params, v)
+		return "$" + strconv.Itoa(firstParam+len(params)-1)
+	}
+	pred := scope.EntityPredicate("w.entity_id", bind)
+	if pred == "" {
+		return "", nil
+	}
+	return "\n  AND " + pred, params
 }
 
 // numericRegex accepts a plain decimal number ("1000", "-12.5"); anything else

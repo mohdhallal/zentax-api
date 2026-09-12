@@ -5,6 +5,7 @@ import (
 
 	apperrors "github.com/mohamadhallal/zentax-api/errors"
 	"github.com/mohamadhallal/zentax-api/modules/entities/domain"
+	"github.com/mohamadhallal/zentax-api/platform/audit"
 	"github.com/mohamadhallal/zentax-api/platform/authz"
 )
 
@@ -28,7 +29,8 @@ func (uc *UseCases) Create(ctx context.Context, input domain.CreateEntityInput) 
 	if err != nil {
 		return nil, err
 	}
-	if err := uc.audit.Record(ctx, "entity.created", "entity", e.ID, nil); err != nil {
+	if err := uc.audit.Record(ctx, "entity.created", "entity", e.ID,
+		audit.Changes(nil, auditValues(e))); err != nil {
 		return nil, err
 	}
 	return e, nil

@@ -54,6 +54,18 @@ type SQLConfig struct {
 	// append the predicate, so a searched page and its total agree. Empty means
 	// the repository has no search: the filter is ignored.
 	SearchColumns []string
+	// ReadScope renders the module's read-scope predicate for this request
+	// (ADR-0012 B-3) — the entity-subtree narrowing of a scoped RBAC grant. It
+	// is declared here, alongside the tenant predicate RLS applies underneath,
+	// for the same reason: List, GetTotal and GetById all pick it up, so a
+	// route — or a later read method — cannot forget it. The module supplies
+	// the closure, because it alone knows which column reaches its owning
+	// entity; bind appends a parameter and returns its placeholder. Returning
+	// "" adds no clause, which is the answer for a tenant-wide grant and for
+	// every non-request context. A module that declares nothing is never
+	// narrowed: tenant-level reference data (obligation types, data templates)
+	// has no owning entity and must stay readable by scoped users.
+	ReadScope func(ctx context.Context, bind func(any) string) (string, error)
 }
 
 type BaseRepo[T any, ID comparable] struct {
@@ -65,8 +77,34 @@ func NewBaseRepo[T any, ID comparable](db database.ExecerPg, cfg SQLConfig) Base
 	return BaseRepo[T, ID]{DB: db, SQL: cfg}
 }
 
+// GetById reads one row by primary key, narrowed to the caller's read scope.
+// The scope predicate wraps the module's statement rather than being spliced
+// into it — the projection every GetById selects already carries the column the
+// predicate needs, and wrapping means no module has to reshape its SQL (or
+// keep a second, scope-aware copy of it).
 func (r *BaseRepo[T, ID]) GetById(ctx context.Context, id ID) (*T, error) {
-	return r.QueryRow(ctx, r.SQL.GetById, id)
+	params := []any{id}
+	bind := func(v any) string {
+		params = append(params, v)
+		return "$" + strconv.Itoa(len(params))
+	}
+	scope, err := r.readScope(ctx, bind)
+	if err != nil {
+		return nil, err
+	}
+	if scope == "" {
+		return r.QueryRow(ctx, r.SQL.GetById, id)
+	}
+	return r.QueryRow(ctx, `SELECT * FROM (`+r.SQL.GetById+`) scoped WHERE `+scope, params...)
+}
+
+// readScope renders the module's scope predicate, or "" when the module
+// declares none.
+func (r *BaseRepo[T, ID]) readScope(ctx context.Context, bind func(any) string) (string, error) {
+	if r.SQL.ReadScope == nil {
+		return "", nil
+	}
+	return r.SQL.ReadScope(ctx, bind)
 }
 
 func (r *BaseRepo[T, ID]) Delete(ctx context.Context, id ID) (bool, error) {
@@ -76,7 +114,10 @@ func (r *BaseRepo[T, ID]) Delete(ctx context.Context, id ID) (bool, error) {
 func (r *BaseRepo[T, ID]) List(ctx context.Context, args sharedtypes.ListArgs) ([]T, error) {
 	var sb strings.Builder
 	sb.WriteString(r.SQL.ListBase)
-	params := r.writeWhere(&sb, args.Filters)
+	params, err := r.writeWhere(ctx, &sb, args.Filters)
+	if err != nil {
+		return nil, err
+	}
 
 	sb.WriteString(" ORDER BY ")
 	sb.WriteString(strings.Join(r.orderClauses(args.Sort), ", "))
@@ -88,8 +129,7 @@ func (r *BaseRepo[T, ID]) List(ctx context.Context, args sharedtypes.ListArgs) (
 	params = append(params, args.Limit, args.Offset)
 
 	var results []T
-	err := r.DB.SelectContext(ctx, &results, sb.String(), params...)
-	if err != nil {
+	if err := r.DB.SelectContext(ctx, &results, sb.String(), params...); err != nil {
 		return nil, err
 	}
 	return results, nil
@@ -98,22 +138,43 @@ func (r *BaseRepo[T, ID]) List(ctx context.Context, args sharedtypes.ListArgs) (
 func (r *BaseRepo[T, ID]) GetTotal(ctx context.Context, filters []sharedtypes.Filter) (int, error) {
 	var sb strings.Builder
 	sb.WriteString(r.SQL.Count)
-	params := r.writeWhere(&sb, filters)
+	params, err := r.writeWhere(ctx, &sb, filters)
+	if err != nil {
+		return 0, err
+	}
 
 	var total int
-	err := r.DB.GetContext(ctx, &total, sb.String(), params...)
-	if err != nil {
+	if err := r.DB.GetContext(ctx, &total, sb.String(), params...); err != nil {
 		return 0, err
 	}
 	return total, nil
 }
 
-// writeWhere appends the WHERE clause the filters describe (nothing when no
-// allowed filter is set) and returns the positional parameters it consumed, in
-// order. List and GetTotal share it so a page and its total always agree.
-func (r *BaseRepo[T, ID]) writeWhere(sb *strings.Builder, filters []sharedtypes.Filter) []any {
+// writeWhere appends the WHERE clause the read scope and the filters describe
+// (nothing when neither applies) and returns the positional parameters it
+// consumed, in order. List and GetTotal share it so a page and its total always
+// agree — which is why the scope predicate belongs here and not in either of
+// them: a narrowed page whose total counted the whole tenant would leak the
+// size of what it hid.
+func (r *BaseRepo[T, ID]) writeWhere(
+	ctx context.Context, sb *strings.Builder, filters []sharedtypes.Filter,
+) ([]any, error) {
 	var params []any
 	clauses := 0
+
+	scope, err := r.readScope(ctx, func(v any) string {
+		params = append(params, v)
+		return "$" + strconv.Itoa(len(params))
+	})
+	if err != nil {
+		return nil, err
+	}
+	if scope != "" {
+		sb.WriteString(" WHERE ")
+		sb.WriteString(scope)
+		clauses++
+	}
+
 	for _, f := range filters {
 		var (
 			pred   string
@@ -139,7 +200,7 @@ func (r *BaseRepo[T, ID]) writeWhere(sb *strings.Builder, filters []sharedtypes.
 		params = append(params, values...)
 		clauses++
 	}
-	return params
+	return params, nil
 }
 
 // predicate renders one filter as SQL starting at placeholder $paramIdx and

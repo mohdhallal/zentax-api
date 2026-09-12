@@ -50,7 +50,7 @@ func TestTaskFilterWhere_EachNewFilterEmitsOnlyWhenSet(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			where, args := taskFilterWhere(tc.f)
+			where, args := taskFilterWhere(unscoped, tc.f)
 			if where != tc.want {
 				t.Fatalf("got %q, want %q", where, tc.want)
 			}
@@ -72,7 +72,7 @@ func TestTaskFilterWhere_EachNewFilterEmitsOnlyWhenSet(t *testing.T) {
 // An unknown due window (impossible past the DTO's enum) emits nothing
 // rather than an unguarded predicate.
 func TestTaskFilterWhere_UnknownDueWindowIsIgnored(t *testing.T) {
-	where, args := taskFilterWhere(domain.TaskFilters{Due: ptr("someday")})
+	where, args := taskFilterWhere(unscoped, domain.TaskFilters{Due: ptr("someday")})
 	if where != "" || len(args) != 0 {
 		t.Fatalf("got %q with %v", where, args)
 	}
@@ -103,7 +103,7 @@ func TestDueWindows_AreOpenWorkAgainstTheTenantDay(t *testing.T) {
 // name and — through semi-joins, never a display LEFT JOIN — the names of its
 // entity and obligation type.
 func TestTaskFilterWhere_SearchIsEscapedAndLiteral(t *testing.T) {
-	where, args := taskFilterWhere(domain.TaskFilters{Search: ptr(`  50% off_the\top  `)})
+	where, args := taskFilterWhere(unscoped, domain.TaskFilters{Search: ptr(`  50% off_the\top  `)})
 	if len(args) != 1 {
 		t.Fatalf("search binds exactly one pattern, got %v", args)
 	}
@@ -133,7 +133,7 @@ func TestTaskFilterWhere_SearchIsEscapedAndLiteral(t *testing.T) {
 
 	// The predicate is one parenthesized OR-group, so it AND-s cleanly with
 	// the other filters.
-	where, args = taskFilterWhere(domain.TaskFilters{Status: ptr(domain.StatusOpen), Search: ptr("vat")})
+	where, args = taskFilterWhere(unscoped, domain.TaskFilters{Status: ptr(domain.StatusOpen), Search: ptr("vat")})
 	if !strings.HasPrefix(where, "\nWHERE "+taskOpen+"\n  AND (ti.name ILIKE $1") || !strings.HasSuffix(where, "))") {
 		t.Fatalf("search must be a parenthesized group after the other predicates:\n%s", where)
 	}
@@ -145,7 +145,7 @@ func TestTaskFilterWhere_SearchIsEscapedAndLiteral(t *testing.T) {
 // A blank (or whitespace-only) search is no search: no predicate, no bind.
 func TestTaskFilterWhere_BlankSearchIsNoFilter(t *testing.T) {
 	for _, term := range []string{"", "   ", "\t\n"} {
-		where, args := taskFilterWhere(domain.TaskFilters{Search: ptr(term)})
+		where, args := taskFilterWhere(unscoped, domain.TaskFilters{Search: ptr(term)})
 		if where != "" || len(args) != 0 {
 			t.Fatalf("%q: got %q with %v", term, where, args)
 		}
@@ -171,7 +171,7 @@ func TestEscapeLike(t *testing.T) {
 // Every filter together: the binds are numbered in order of appearance and
 // each predicate is present exactly once.
 func TestTaskFilterWhere_AllFiltersTogether(t *testing.T) {
-	where, args := taskFilterWhere(domain.TaskFilters{
+	where, args := taskFilterWhere(unscoped, domain.TaskFilters{
 		WorkflowID:       ptr("6ba7b810-9dad-11d1-80b4-00c04fd430c8"),
 		EntityID:         ptr("6ba7b810-9dad-11d1-80b4-00c04fd430c9"),
 		AssigneeID:       ptr("6ba7b810-9dad-11d1-80b4-00c04fd430ca"),
@@ -266,12 +266,12 @@ func TestOrderBy_EndsInTheInstanceIdInThePrimaryDirection(t *testing.T) {
 // The workflow-stats filters follow the same rule: predicates only for what
 // is set, on the workflow row, numbered in order; `none` is IS NULL.
 func TestWorkflowStatsWhere_OnlySetFiltersBecomePredicates(t *testing.T) {
-	where, args := workflowStatsWhere(domain.WorkflowStatsFilters{})
+	where, args := workflowStatsWhere(unscoped, domain.WorkflowStatsFilters{})
 	if where != "" || len(args) != 0 {
 		t.Fatalf("no filter must render no WHERE, got %q with %v", where, args)
 	}
 
-	where, args = workflowStatsWhere(domain.WorkflowStatsFilters{
+	where, args = workflowStatsWhere(unscoped, domain.WorkflowStatsFilters{
 		WorkflowID:       ptr("6ba7b810-9dad-11d1-80b4-00c04fd430c8"),
 		EntityID:         ptr("6ba7b810-9dad-11d1-80b4-00c04fd430c9"),
 		FinancialYears:   []string{"2025", "2026"},
@@ -290,11 +290,11 @@ func TestWorkflowStatsWhere_OnlySetFiltersBecomePredicates(t *testing.T) {
 		t.Fatalf("binds = %v", args)
 	}
 
-	where, args = workflowStatsWhere(domain.WorkflowStatsFilters{FinancialYears: []string{domain.FinancialYearNone}})
+	where, args = workflowStatsWhere(unscoped, domain.WorkflowStatsFilters{FinancialYears: []string{domain.FinancialYearNone}})
 	if where != "\nWHERE w.financial_year IS NULL" || len(args) != 0 {
 		t.Fatalf("got %q with %v", where, args)
 	}
-	where, args = workflowStatsWhere(domain.WorkflowStatsFilters{Status: ptr("draft")})
+	where, args = workflowStatsWhere(unscoped, domain.WorkflowStatsFilters{Status: ptr("draft")})
 	if where != "\nWHERE w.status = $1::varchar" || len(args) != 1 {
 		t.Fatalf("got %q with %v", where, args)
 	}

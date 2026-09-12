@@ -1,6 +1,12 @@
 # zentax-api — CI gates.
 #
 #   build   : gofmt, go build / vet / test (main module + acceptance module), govulncheck
+#             and the ADR-0015 log-hygiene gate — it walks the tree's AST and fails
+#             if any call site can put a query value, a whole object or a sensitive
+#             key into a log line. Logs sit OUTSIDE the erasure boundary (ADR-0007),
+#             so personal data that reaches one cannot be deleted on request; this
+#             is the ADR's "a stray logger.info(user) fails the build" check. It is
+#             part of `go test ./...` too, so it also gates a local run.
 #   accept  : the acceptance suites (HTTP -> tenant GUC -> RLS isolation, per module)
 #             against a real Postgres 16, migrated with the SAME runner the Compose
 #             stack and the ECS migrate task use (deployment/docker/migrate.sh), then
@@ -66,6 +72,12 @@ jobs:
         run: |
           go vet ./...
           (cd acceptance && go vet ./...)
+
+      # Named separately from the unit run (which also covers it) so that a
+      # violation reads as what it is in the job list, with the file, the line
+      # and the remedy in the failure message.
+      - name: log hygiene — no PII in logs (ADR-0015)
+        run: go test -count=1 -run 'TestLogHygiene|TestLogScan|TestRedact|TestIsSensitiveKey' ./logger/...
 
       - name: go test (unit)
         run: go test -count=1 ./...

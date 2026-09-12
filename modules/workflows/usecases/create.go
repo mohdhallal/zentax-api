@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/mohamadhallal/zentax-api/modules/workflows/domain"
+	"github.com/mohamadhallal/zentax-api/platform/audit"
 	"github.com/mohamadhallal/zentax-api/platform/authz"
 )
 
@@ -20,7 +21,8 @@ func (uc *UseCases) Create(ctx context.Context, input domain.CreateWorkflowInput
 	if err != nil {
 		return nil, err
 	}
-	if err := uc.audit.Record(ctx, "workflow.created", "workflow", wf.ID, nil); err != nil {
+	if err := uc.audit.Record(ctx, "workflow.created", "workflow", wf.ID,
+		audit.Changes(nil, auditValues(wf))); err != nil {
 		return nil, err
 	}
 	return wf, nil

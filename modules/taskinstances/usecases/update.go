@@ -6,6 +6,7 @@ import (
 	apperrors "github.com/mohamadhallal/zentax-api/errors"
 	datatemplatesdomain "github.com/mohamadhallal/zentax-api/modules/datatemplates/domain"
 	"github.com/mohamadhallal/zentax-api/modules/taskinstances/domain"
+	"github.com/mohamadhallal/zentax-api/platform/audit"
 	"github.com/mohamadhallal/zentax-api/platform/authz"
 )
 
@@ -81,8 +82,13 @@ func (uc *UseCases) Update(ctx context.Context, id domain.TaskInstanceID, input 
 	if ti == nil {
 		return nil, apperrors.NewNotFound(domain.ErrTaskInstanceNotFound(id))
 	}
-	if err := uc.audit.Record(ctx, "task_instance.updated", "task_instance", id,
-		map[string]any{"status": ti.Status}); err != nil {
+	// The evidence costs no extra read: `current` was loaded above for the
+	// ADR-0018 freeze check, on this request's transaction, so the whole
+	// before/after envelope comes from rows already in hand.
+	details := withTaxDataChange(
+		audit.Changes(auditValues(current), auditValues(ti)),
+		current.TaxData, ti.TaxData)
+	if err := uc.audit.Record(ctx, "task_instance.updated", "task_instance", id, details); err != nil {
 		return nil, err
 	}
 	return ti, nil

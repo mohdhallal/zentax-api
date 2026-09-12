@@ -5,7 +5,12 @@ import (
 	"testing"
 
 	"github.com/mohamadhallal/zentax-api/modules/documents/domain"
+	"github.com/mohamadhallal/zentax-api/platform/authz"
 )
+
+// unscoped is the tenant-wide caller: the scope adds no clause, so these tests
+// pin the statement shape the vast majority of requests still get.
+var unscoped = authz.UnboundedReadScope()
 
 func ptr(s string) *string { return &s }
 
@@ -13,12 +18,12 @@ func ptr(s string) *string { return &s }
 // carries a predicate ONLY for the filters that are set — never a generic
 // `($n IS NULL OR col = $n)` shape — with the binds numbered in order.
 func TestDocumentsWhere_OnlySetFiltersBecomePredicates(t *testing.T) {
-	where, args := documentsWhere(domain.ListDocumentsFilter{}, nil)
+	where, args := documentsWhere(unscoped, domain.ListDocumentsFilter{}, nil)
 	if where != "\nWHERE d.deleted_at IS NULL" || len(args) != 0 {
 		t.Fatalf("no filter must render the live-only clause, got %q with %v", where, args)
 	}
 
-	where, args = documentsWhere(domain.ListDocumentsFilter{
+	where, args = documentsWhere(unscoped, domain.ListDocumentsFilter{
 		WorkflowID:     ptr("6ba7b810-9dad-11d1-80b4-00c04fd430c8"),
 		TaskInstanceID: ptr("6ba7b810-9dad-11d1-80b4-00c04fd430c9"),
 		EntityID:       ptr("6ba7b810-9dad-11d1-80b4-00c04fd430ca"),
@@ -47,7 +52,7 @@ func TestDocumentsWhere_OnlySetFiltersBecomePredicates(t *testing.T) {
 
 	// GetView narrows to one id, bound first.
 	id := "6ba7b810-9dad-11d1-80b4-00c04fd430cb"
-	where, args = documentsWhere(domain.ListDocumentsFilter{DocumentType: ptr("other")}, &id)
+	where, args = documentsWhere(unscoped, domain.ListDocumentsFilter{DocumentType: ptr("other")}, &id)
 	if where != "\nWHERE d.deleted_at IS NULL\n  AND d.id = $1::uuid\n  AND d.document_type = $2::varchar" {
 		t.Fatalf("got %q", where)
 	}
@@ -75,7 +80,7 @@ func TestDocumentsWhere_YearSet(t *testing.T) {
 			prefix + "(w.financial_year IS NULL OR w.financial_year = ANY($1::varchar[]))", 1},
 	}
 	for _, tc := range cases {
-		where, args := documentsWhere(domain.ListDocumentsFilter{Years: tc.years}, nil)
+		where, args := documentsWhere(unscoped, domain.ListDocumentsFilter{Years: tc.years}, nil)
 		if where != tc.want {
 			t.Fatalf("%v: got %q, want %q", tc.years, where, tc.want)
 		}
@@ -83,7 +88,7 @@ func TestDocumentsWhere_YearSet(t *testing.T) {
 			t.Fatalf("%v: got %d binds, want %d", tc.years, len(args), tc.args)
 		}
 	}
-	_, args := documentsWhere(domain.ListDocumentsFilter{Years: []string{"2024", domain.FinancialYearNone, "2025"}}, nil)
+	_, args := documentsWhere(unscoped, domain.ListDocumentsFilter{Years: []string{"2024", domain.FinancialYearNone, "2025"}}, nil)
 	years, ok := args[0].([]string)
 	if !ok || len(years) != 2 || years[0] != "2024" || years[1] != "2025" {
 		t.Fatalf("array bind must hold the plain years only, got %v", args)
@@ -94,15 +99,55 @@ func TestDocumentsWhere_YearSet(t *testing.T) {
 // metacharacters escaped, ONE bind shared by the three columns; blank is no
 // search.
 func TestDocumentsWhere_SearchIsEscapedAndLiteral(t *testing.T) {
-	_, args := documentsWhere(domain.ListDocumentsFilter{Search: ptr(`  100% reconciled_ok\  `)}, nil)
+	_, args := documentsWhere(unscoped, domain.ListDocumentsFilter{Search: ptr(`  100% reconciled_ok\  `)}, nil)
 	if len(args) != 1 || args[0] != `%100\% reconciled\_ok\\%` {
 		t.Fatalf("pattern = %v", args)
 	}
 	for _, term := range []string{"", "  ", "\t"} {
-		where, args := documentsWhere(domain.ListDocumentsFilter{Search: ptr(term)}, nil)
+		where, args := documentsWhere(unscoped, domain.ListDocumentsFilter{Search: ptr(term)}, nil)
 		if where != "\nWHERE d.deleted_at IS NULL" || len(args) != 0 {
 			t.Fatalf("%q: got %q with %v", term, where, args)
 		}
+	}
+}
+
+// A scoped caller's read scope is a predicate on the joined workflow's entity,
+// bound as one uuid[] right after the live-only clause — before the request's
+// own filters, so the page and the count bind it identically.
+func TestDocumentsWhere_ReadScopeNarrowsToTheEntitySubtree(t *testing.T) {
+	fr := "3f90e964-c16a-4b06-8cd6-4f651eb741f4"
+	where, args := documentsWhere(authz.NarrowedReadScope(fr),
+		domain.ListDocumentsFilter{DocumentType: ptr("draft_return")}, nil)
+	want := "\nWHERE d.deleted_at IS NULL" +
+		"\n  AND w.entity_id = ANY($1::uuid[])" +
+		"\n  AND d.document_type = $2::varchar"
+	if where != want {
+		t.Fatalf("got %q\nwant %q", where, want)
+	}
+	ids, ok := args[0].([]string)
+	if !ok || len(ids) != 1 || ids[0] != fr {
+		t.Fatalf("the subtree must be bound, not interpolated: %v", args)
+	}
+
+	// A caller who can read nothing reads nothing — never everything.
+	where, args = documentsWhere(authz.NarrowedReadScope(), domain.ListDocumentsFilter{}, nil)
+	if where != "\nWHERE d.deleted_at IS NULL\n  AND FALSE" || len(args) != 0 {
+		t.Fatalf("empty scope must fail closed, got %q with %v", where, args)
+	}
+}
+
+// The version statements narrow through the document to its workflow's entity,
+// so a download or a version list cannot reach outside the subtree either.
+func TestDocumentScope_ReachesTheEntityThroughTheDocument(t *testing.T) {
+	var b whereBuilder
+	got := documentScope(authz.NarrowedReadScope("3f90e964-c16a-4b06-8cd6-4f651eb741f4"), "v.document_id", b.bind)
+	want := "EXISTS (SELECT 1 FROM documents sd JOIN workflows sw ON sw.id = sd.workflow_id" +
+		" WHERE sd.id = v.document_id AND sw.entity_id = ANY($1::uuid[]))"
+	if got != want {
+		t.Fatalf("got %q\nwant %q", got, want)
+	}
+	if documentScope(unscoped, "v.document_id", b.bind) != "" {
+		t.Fatal("a tenant-wide caller must add no clause")
 	}
 }
 

@@ -5,14 +5,31 @@
 // task:approve). A user is granted one or more roles via user_grants; their
 // effective capabilities are the union of the capabilities of those roles.
 //
-// This package answers the *tenant-wide* question — "does this user hold
+// HasCapability here answers the *tenant-wide* question — "does this user hold
 // capability X anywhere in the tenant" — which is enough to enforce role-based
-// separation of duties (a viewer cannot write; a preparer cannot approve).
-// Per-entity *scope* of a grant (scope_entity_id → an entity subtree) is a
-// second gate enforced per-resource in the handlers; see AuthorizeScope once it
-// lands. Until then, a grant's scope is not yet narrowed — only tenant-wide
-// grants are issued (cmd/seed-admin), so the tenant-wide check is exact for the
-// grants that exist today.
+// separation of duties (a viewer cannot write; a preparer cannot approve). It
+// is the first of two gates, and on its own it is NOT a confidentiality
+// boundary: every role holds every read capability.
+//
+// The per-entity *scope* of a grant (scope_entity_id → an entity subtree) is
+// the second gate, and it has two halves because a write and a read ask
+// different questions:
+//
+//   - writes name their target, so Authorizer.Ensure* (authorizer.go) answers
+//     "may this principal touch THIS resource" and refuses with 403;
+//   - reads have no single target — a list is not one row — so ReadScope
+//     (readscope.go) resolves the principal's readable entity set once per
+//     request and the repositories apply it as a SQL predicate, next to the
+//     tenant predicate RLS applies underneath (ADR-0004). A row outside the
+//     set is simply not in the caller's view.
+//
+// Scoped grants are real: the members API issues them and the demo seeder
+// seeds one. Neither gate may be skipped — the capability check decides what
+// a role may do at all, the scope decides where.
+//
+// Deliberately NOT narrowed, in either half: tenant-level reference data
+// (obligation types, data templates, the member directory) carries no owning
+// entity, and a scoped user cannot render their own work without it.
 package authz
 
 // Capability is a fine-grained permission required by a route.

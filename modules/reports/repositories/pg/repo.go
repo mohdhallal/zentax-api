@@ -12,6 +12,8 @@ import (
 	"strings"
 
 	"github.com/mohamadhallal/zentax-api/modules/reports/domain"
+	"github.com/mohamadhallal/zentax-api/platform/authz"
+	authzpg "github.com/mohamadhallal/zentax-api/platform/authz/pg"
 	"github.com/mohamadhallal/zentax-api/platform/database"
 )
 
@@ -23,6 +25,23 @@ type ReportsRepo struct {
 
 func NewReportsRepo(db database.ExecerPg) *ReportsRepo {
 	return &ReportsRepo{db: db}
+}
+
+// readScope resolves the caller's readable entity set for the report reads
+// (ADR-0012 B-3). Every statement in this package hangs off `workflows w`, so
+// one predicate on w.entity_id narrows all of them — the heatmap, the
+// compliance rows and their summary, the tax-financial figures and their
+// GROUPING SETS roll-ups, the task feed and its tile counts, the workflow
+// stats and all three raw-export datasets. This is where the whole-group
+// export came from: nothing here consulted authorization at all.
+//
+// Capability: the reports are task reads (`task:read`), which is what every
+// route in the module declares except workflow-stats (`workflow:read`). Both
+// are held by every role, so the resolved scope is the same either way; the
+// capability is passed through so a future divergence in the matrix narrows
+// correctly instead of silently.
+func (r *ReportsRepo) readScope(ctx context.Context, cap authz.Capability) (authz.ReadScope, error) {
+	return authzpg.ReadScope(ctx, r.db, cap)
 }
 
 // taskInstanceBase is the instance set every task read is cut from: the
@@ -89,9 +108,14 @@ func (b *whereBuilder) where() (string, []any) {
 	return "\nWHERE " + strings.Join(b.preds, "\n  AND "), b.args
 }
 
-// taskFilterWhere renders the WHERE clause for the task filters that are set.
-func taskFilterWhere(f domain.TaskFilters) (string, []any) {
+// taskFilterWhere renders the WHERE clause for the caller's read scope and the
+// task filters that are set. The scope goes first so its bind is $1: it is the
+// one predicate that is not optional.
+func taskFilterWhere(scope authz.ReadScope, f domain.TaskFilters) (string, []any) {
 	var b whereBuilder
+	if pred := scope.EntityPredicate("w.entity_id", b.bind); pred != "" {
+		b.add(pred)
+	}
 	if f.WorkflowID != nil {
 		b.add("ti.workflow_id = " + b.bind(*f.WorkflowID) + "::uuid")
 	}
@@ -245,7 +269,11 @@ func orderBy(column string, desc bool) string {
 func (r *ReportsRepo) ListTaskInstances(
 	ctx context.Context, args domain.ListTaskInstancesArgs,
 ) ([]domain.TaskInstanceRow, int, error) {
-	where, params := taskFilterWhere(args.TaskFilters)
+	scope, err := r.readScope(ctx, authz.TaskRead)
+	if err != nil {
+		return nil, 0, err
+	}
+	where, params := taskFilterWhere(scope, args.TaskFilters)
 
 	rows := []domain.TaskInstanceRow{}
 	limit := "$" + strconv.Itoa(len(params)+1)
@@ -287,7 +315,11 @@ SELECT ` + tenantToday + ` AS today,
 	taskInstanceBase
 
 func (r *ReportsRepo) TaskSummary(ctx context.Context, filters domain.TaskFilters) (*domain.TaskSummary, error) {
-	where, params := taskFilterWhere(filters)
+	scope, err := r.readScope(ctx, authz.TaskRead)
+	if err != nil {
+		return nil, err
+	}
+	where, params := taskFilterWhere(scope, filters)
 	var summary domain.TaskSummary
 	if err := r.db.GetContext(ctx, &summary, taskSummarySelect+where, params...); err != nil {
 		return nil, err
@@ -311,10 +343,14 @@ const workflowStatsGroup = `
 GROUP BY w.id
 ORDER BY w.id`
 
-// workflowStatsWhere renders the WHERE clause for the workflow-stats filters
-// that are set (same dynamic assembly as the task filters).
-func workflowStatsWhere(f domain.WorkflowStatsFilters) (string, []any) {
+// workflowStatsWhere renders the WHERE clause for the caller's read scope and
+// the workflow-stats filters that are set (same dynamic assembly as the task
+// filters).
+func workflowStatsWhere(scope authz.ReadScope, f domain.WorkflowStatsFilters) (string, []any) {
 	var b whereBuilder
+	if pred := scope.EntityPredicate("w.entity_id", b.bind); pred != "" {
+		b.add(pred)
+	}
 	if f.WorkflowID != nil {
 		b.add("w.id = " + b.bind(*f.WorkflowID) + "::uuid")
 	}
@@ -336,7 +372,12 @@ func workflowStatsWhere(f domain.WorkflowStatsFilters) (string, []any) {
 func (r *ReportsRepo) WorkflowStats(
 	ctx context.Context, filters domain.WorkflowStatsFilters,
 ) ([]domain.WorkflowStats, error) {
-	where, params := workflowStatsWhere(filters)
+	// workflow-stats is the one report route gated by workflow:read.
+	scope, err := r.readScope(ctx, authz.WorkflowRead)
+	if err != nil {
+		return nil, err
+	}
+	where, params := workflowStatsWhere(scope, filters)
 	stats := []domain.WorkflowStats{}
 	if err := r.db.SelectContext(ctx, &stats, workflowStatsSelect+where+workflowStatsGroup, params...); err != nil {
 		return nil, err

@@ -69,16 +69,36 @@ func ServiceAccountToJSON(u *domain.User) map[string]any {
 }
 
 // MemberToJSON renders the directory view of a user: no auth material, grants
-// embedded with the scope entity's name resolved at read time.
+// embedded with the scope entity's name resolved at read time — and the scope
+// WITHHELD when it points outside the caller's read scope.
+//
+// The repository resolves scope_entity_name only for a scope entity the caller
+// may read, so a grant that HAS a scope entity but no resolved name is one whose
+// scope is withheld (see the contract documented on attachGrants in
+// modules/identity/repositories/pg/member_repo.go). The id is dropped with the
+// name rather than kept: a uuid this caller can resolve nowhere is still a join
+// key — it confirms "this member has access to entity X" for any X they can name
+// from elsewhere, and counting the distinct withheld ids measures the size of
+// the group that is being hidden, which is the same leak a non-narrowing total
+// is. `scopeWithheld` then says so explicitly, so a client renders "scoped to an
+// entity you cannot see" instead of mistaking a scoped grant for a tenant-wide
+// one. For an unbounded caller — every holder of member:manage among them — the
+// flag is false on every grant and the view is unchanged.
 func MemberToJSON(m *domain.Member) map[string]any {
 	grants := make([]map[string]any, 0, len(m.Grants))
 	for i := range m.Grants {
 		g := &m.Grants[i]
+		withheld := g.ScopeEntityID != nil && g.ScopeEntityName == nil
+		scopeEntityID := g.ScopeEntityID
+		if withheld {
+			scopeEntityID = nil
+		}
 		grants = append(grants, map[string]any{
 			"id":              g.ID,
 			"role":            g.Role,
-			"scopeEntityId":   g.ScopeEntityID,
+			"scopeEntityId":   scopeEntityID,
 			"scopeEntityName": g.ScopeEntityName,
+			"scopeWithheld":   withheld,
 		})
 	}
 	return map[string]any{

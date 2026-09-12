@@ -19,8 +19,10 @@ type WorkflowRepo struct {
 }
 
 func NewWorkflowRepo(db database.ExecerPg) *WorkflowRepo {
+	cfg := sqlConfig
+	cfg.ReadScope = readScope(db)
 	return &WorkflowRepo{
-		BaseRepo: baserepo.NewBaseRepo[domain.Workflow, domain.WorkflowID](db, sqlConfig),
+		BaseRepo: baserepo.NewBaseRepo[domain.Workflow, domain.WorkflowID](db, cfg),
 	}
 }
 

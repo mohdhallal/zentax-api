@@ -1,6 +1,13 @@
 package pg
 
-import baserepo "github.com/mohamadhallal/zentax-api/shared/repositories"
+import (
+	"context"
+
+	"github.com/mohamadhallal/zentax-api/platform/authz"
+	authzpg "github.com/mohamadhallal/zentax-api/platform/authz/pg"
+	"github.com/mohamadhallal/zentax-api/platform/database"
+	baserepo "github.com/mohamadhallal/zentax-api/shared/repositories"
+)
 
 // workflowTaskColumns is the domain projection — WITHOUT tenant_id (RLS infra).
 // required_documents (JSONB) scans into the domain.DocumentRequirements type.
@@ -47,4 +54,18 @@ var sqlConfig = baserepo.SQLConfig{
 	Delete:   `DELETE FROM workflow_tasks WHERE id = $1`,
 	Count:    `SELECT COUNT(*)::int AS total FROM workflow_tasks`,
 	ListBase: `SELECT ` + workflowTaskColumns + ` FROM workflow_tasks`,
+}
+
+// readScope narrows every read of this repository to the caller's entity
+// subtree (ADR-0012 B-3). A task template carries no entity of its own — it
+// reaches one through its workflow — so the predicate is an EXISTS on that
+// workflow, which leaves the row count, order and any aggregate untouched.
+func readScope(db database.ExecerPg) func(context.Context, func(any) string) (string, error) {
+	return func(ctx context.Context, bind func(any) string) (string, error) {
+		scope, err := authzpg.ReadScope(ctx, db, authz.WorkflowTaskRead)
+		if err != nil {
+			return "", err
+		}
+		return scope.WorkflowPredicate("workflow_id", bind), nil
+	}
 }

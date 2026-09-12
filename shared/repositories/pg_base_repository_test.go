@@ -3,6 +3,7 @@ package repositories
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 
 	"github.com/jmoiron/sqlx"
@@ -461,4 +462,100 @@ func TestSearch_QualifiedColumns_WithMultiValueFilters(t *testing.T) {
 			` AND (w.name ILIKE $3 ESCAPE '\')`,
 		got.Query)
 	assert.Equal(t, []any{[]string{"active", "draft"}, []string{"2026"}, "%vat%"}, got.Args)
+}
+
+// The read-scope hook (ADR-0012 B-3) is applied by List, GetTotal AND GetById
+// alike — the property the whole design rests on: a read method that forgets
+// cannot exist, because none of them renders its own WHERE.
+func TestReadScope_AppliedToEveryRead(t *testing.T) {
+	t.Parallel()
+
+	cfg := taskConfig()
+	cfg.GetById = "SELECT id, workflow_id FROM task_instances WHERE id = $1 LIMIT 1"
+	cfg.ReadScope = func(_ context.Context, bind func(any) string) (string, error) {
+		return "workflow_id = ANY(" + bind([]string{"wf-1", "wf-2"}) + "::uuid[])", nil
+	}
+	repo, db := newRepo(cfg)
+	scopeArg := []string{"wf-1", "wf-2"}
+
+	// The scope binds FIRST, so the filters' own placeholders follow it and the
+	// page's LIMIT/OFFSET land after both.
+	got := list(t, repo, db, sharedtypes.ListArgs{
+		Limit: 25, Filters: []sharedtypes.Filter{{Column: "status", Value: "blocked"}},
+	})
+	assert.Equal(t,
+		"SELECT id FROM task_instances WHERE workflow_id = ANY($1::uuid[]) AND status = $2"+
+			" ORDER BY due_date ASC, id ASC LIMIT $3 OFFSET $4",
+		got.Query)
+	assert.Equal(t, []any{scopeArg, "blocked", 25, 0}, got.Args)
+
+	// The count carries the same predicate, so a narrowed page can never report
+	// the whole tenant's total — which would leak the size of what it hid.
+	got = total(t, repo, db, []sharedtypes.Filter{{Column: "status", Value: "blocked"}})
+	assert.Equal(t,
+		"SELECT COUNT(*)::int AS total FROM task_instances"+
+			" WHERE workflow_id = ANY($1::uuid[]) AND status = $2",
+		got.Query)
+	assert.Equal(t, []any{scopeArg, "blocked"}, got.Args)
+
+	// GetById wraps the module's own statement rather than reshaping it: the
+	// predicate reads off the projection, so no module needs a second copy.
+	_, err := repo.GetById(context.Background(), "ti-1")
+	require.NoError(t, err)
+	got = db.last()
+	assert.Equal(t,
+		"SELECT * FROM (SELECT id, workflow_id FROM task_instances WHERE id = $1 LIMIT 1) scoped"+
+			" WHERE workflow_id = ANY($2::uuid[])",
+		got.Query)
+	assert.Equal(t, []any{"ti-1", scopeArg}, got.Args)
+}
+
+// An unbounded caller (any tenant-wide grant) and a module that declares no
+// scope at all both get the statement unchanged — byte for byte the one that
+// ran before the increment.
+func TestReadScope_UnboundedAndUndeclaredChangeNothing(t *testing.T) {
+	t.Parallel()
+
+	for name, scope := range map[string]func(context.Context, func(any) string) (string, error){
+		"undeclared": nil,
+		"unbounded":  func(context.Context, func(any) string) (string, error) { return "", nil },
+	} {
+		cfg := taskConfig()
+		cfg.GetById = "SELECT id FROM task_instances WHERE id = $1 LIMIT 1"
+		cfg.ReadScope = scope
+		repo, db := newRepo(cfg)
+
+		got := list(t, repo, db, sharedtypes.ListArgs{Limit: 10})
+		assert.Equal(t, "SELECT id FROM task_instances ORDER BY due_date ASC, id ASC LIMIT $1 OFFSET $2",
+			got.Query, name)
+		assert.Equal(t, []any{10, 0}, got.Args, name)
+
+		got = total(t, repo, db, nil)
+		assert.Equal(t, "SELECT COUNT(*)::int AS total FROM task_instances", got.Query, name)
+		assert.Empty(t, got.Args, name)
+
+		_, err := repo.GetById(context.Background(), "ti-1")
+		require.NoError(t, err)
+		assert.Equal(t, "SELECT id FROM task_instances WHERE id = $1 LIMIT 1", db.last().Query, name)
+	}
+}
+
+// A scope that cannot be resolved is an error on every read path — never a
+// statement that quietly ran unnarrowed.
+func TestReadScope_ResolutionFailureFailsTheRead(t *testing.T) {
+	t.Parallel()
+
+	boom := errors.New("resolve scope: boom")
+	cfg := taskConfig()
+	cfg.GetById = "SELECT id FROM task_instances WHERE id = $1 LIMIT 1"
+	cfg.ReadScope = func(context.Context, func(any) string) (string, error) { return "", boom }
+	repo, db := newRepo(cfg)
+
+	_, err := repo.List(context.Background(), sharedtypes.ListArgs{Limit: 10})
+	require.ErrorIs(t, err, boom)
+	_, err = repo.GetTotal(context.Background(), nil)
+	require.ErrorIs(t, err, boom)
+	_, err = repo.GetById(context.Background(), "ti-1")
+	require.ErrorIs(t, err, boom)
+	assert.Empty(t, db.queries, "no statement may reach the database")
 }

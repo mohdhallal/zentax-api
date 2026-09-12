@@ -20,8 +20,10 @@ type EntityObligationRepo struct {
 }
 
 func NewEntityObligationRepo(db database.ExecerPg) *EntityObligationRepo {
+	cfg := sqlConfig
+	cfg.ReadScope = readScope(db)
 	return &EntityObligationRepo{
-		BaseRepo: baserepo.NewBaseRepo[domain.EntityObligation, domain.EntityObligationID](db, sqlConfig),
+		BaseRepo: baserepo.NewBaseRepo[domain.EntityObligation, domain.EntityObligationID](db, cfg),
 	}
 }
 

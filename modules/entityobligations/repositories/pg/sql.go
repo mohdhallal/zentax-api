@@ -1,6 +1,13 @@
 package pg
 
-import baserepo "github.com/mohamadhallal/zentax-api/shared/repositories"
+import (
+	"context"
+
+	"github.com/mohamadhallal/zentax-api/platform/authz"
+	authzpg "github.com/mohamadhallal/zentax-api/platform/authz/pg"
+	"github.com/mohamadhallal/zentax-api/platform/database"
+	baserepo "github.com/mohamadhallal/zentax-api/shared/repositories"
+)
 
 // entityObligationColumns is the domain projection — WITHOUT tenant_id (RLS
 // infra, absent from the model). deadline_rule (JSONB) scans into the
@@ -42,6 +49,20 @@ var sqlConfig = baserepo.SQLConfig{
 	Delete:   `DELETE FROM entity_obligations WHERE id = $1`,
 	Count:    `SELECT COUNT(*)::int AS total FROM entity_obligations`,
 	ListBase: `SELECT ` + entityObligationColumns + ` FROM entity_obligations`,
+}
+
+// readScope narrows every read of this repository to the caller's entity
+// subtree (ADR-0012 B-3). An obligation always names its entity, so the anchor
+// is entity_id — unqualified, which the single-table statements and the
+// GetById projection both accept.
+func readScope(db database.ExecerPg) func(context.Context, func(any) string) (string, error) {
+	return func(ctx context.Context, bind func(any) string) (string, error) {
+		scope, err := authzpg.ReadScope(ctx, db, authz.EntityObligationRead)
+		if err != nil {
+			return "", err
+		}
+		return scope.EntityPredicate("entity_id", bind), nil
+	}
 }
 
 // findByEntityAndTypeSQL resolves the payment rule for a workflow's (entity,

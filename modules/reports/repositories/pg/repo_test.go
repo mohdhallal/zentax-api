@@ -5,20 +5,27 @@ import (
 	"testing"
 
 	"github.com/mohamadhallal/zentax-api/modules/reports/domain"
+	"github.com/mohamadhallal/zentax-api/platform/authz"
 )
 
 func ptr(s string) *string { return &s }
+
+// unscoped is the tenant-wide caller (every admin, manager, reviewer, preparer
+// and viewer holding a tenant-wide grant): the read scope adds no clause, so
+// these tests pin the statements the overwhelming majority of requests get —
+// byte for byte the ones that ran before the read-scope increment.
+var unscoped = authz.UnboundedReadScope()
 
 // The WHERE clause is assembled from the filters that are SET — never a
 // generic `($n IS NULL OR col = $n)` shape (which pgx's statement cache turns
 // into a generic plan that loses the index after a few executions).
 func TestTaskFilterWhere_OnlySetFiltersBecomePredicates(t *testing.T) {
-	where, args := taskFilterWhere(domain.TaskFilters{})
+	where, args := taskFilterWhere(unscoped, domain.TaskFilters{})
 	if where != "" || len(args) != 0 {
 		t.Fatalf("no filter must render no WHERE, got %q with %v", where, args)
 	}
 
-	where, args = taskFilterWhere(domain.TaskFilters{
+	where, args = taskFilterWhere(unscoped, domain.TaskFilters{
 		WorkflowID:       ptr("6ba7b810-9dad-11d1-80b4-00c04fd430c8"),
 		EntityID:         ptr("6ba7b810-9dad-11d1-80b4-00c04fd430c9"),
 		AssigneeID:       ptr("6ba7b810-9dad-11d1-80b4-00c04fd430ca"),
@@ -46,7 +53,7 @@ func TestTaskFilterWhere_OnlySetFiltersBecomePredicates(t *testing.T) {
 	}
 
 	// A subset binds from $1 again: the numbering follows what is set.
-	where, args = taskFilterWhere(domain.TaskFilters{Status: ptr("blocked")})
+	where, args = taskFilterWhere(unscoped, domain.TaskFilters{Status: ptr("blocked")})
 	if where != "\nWHERE ti.status = $1::varchar" || len(args) != 1 || args[0] != "blocked" {
 		t.Fatalf("got %q with %v", where, args)
 	}
@@ -54,7 +61,7 @@ func TestTaskFilterWhere_OnlySetFiltersBecomePredicates(t *testing.T) {
 
 // status=open is "not completed" — a literal predicate, no bind.
 func TestTaskFilterWhere_OpenIsNotCompleted(t *testing.T) {
-	where, args := taskFilterWhere(domain.TaskFilters{Status: ptr(domain.StatusOpen)})
+	where, args := taskFilterWhere(unscoped, domain.TaskFilters{Status: ptr(domain.StatusOpen)})
 	if where != "\nWHERE "+taskOpen || len(args) != 0 {
 		t.Fatalf("got %q with %v", where, args)
 	}
@@ -80,7 +87,7 @@ func TestTaskFilterWhere_FinancialYearSet(t *testing.T) {
 			"\nWHERE (w.financial_year IS NULL OR w.financial_year = ANY($1::varchar[]))", 1},
 	}
 	for _, tc := range cases {
-		where, args := taskFilterWhere(domain.TaskFilters{FinancialYears: tc.years})
+		where, args := taskFilterWhere(unscoped, domain.TaskFilters{FinancialYears: tc.years})
 		if where != tc.want {
 			t.Fatalf("%v: got %q, want %q", tc.years, where, tc.want)
 		}
@@ -89,7 +96,7 @@ func TestTaskFilterWhere_FinancialYearSet(t *testing.T) {
 		}
 	}
 	// The array bind carries the years without the sentinel.
-	_, args := taskFilterWhere(domain.TaskFilters{FinancialYears: []string{"2025", domain.FinancialYearNone, "2026"}})
+	_, args := taskFilterWhere(unscoped, domain.TaskFilters{FinancialYears: []string{"2025", domain.FinancialYearNone, "2026"}})
 	years, ok := args[0].([]string)
 	if !ok || len(years) != 2 || years[0] != "2025" || years[1] != "2026" {
 		t.Fatalf("array bind must hold the plain years only, got %v", args)

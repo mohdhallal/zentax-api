@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/mohamadhallal/zentax-api/modules/reports/domain"
+	"github.com/mohamadhallal/zentax-api/platform/authz"
 	"github.com/mohamadhallal/zentax-api/shared/taxkeys"
 )
 
@@ -16,7 +17,11 @@ import (
 // shared/taxkeys — cast safely (ADR-0021 rule 6). $4 is the groupBy, resolved
 // here into group_key / group_label so the aggregate statement can GROUP BY
 // them. period_end_date rides along so periods can be ordered by the calendar.
-var figuresCTE = `
+func figuresCTE(scopeWhere string) string {
+	return figuresCTEHead + participatingWorkflows + reportFiltersWhere + scopeWhere + figuresCTETail
+}
+
+var figuresCTEHead = `
 WITH raw AS (
     SELECT ti.id,
            COALESCE(e.name, 'Unknown Entity') AS entity_name,
@@ -41,7 +46,10 @@ WITH raw AS (
     JOIN workflows w ON w.id = ti.workflow_id
     LEFT JOIN entities e ON e.id = w.entity_id
     LEFT JOIN obligation_types ot ON ot.id = w.obligation_type_id
-    WHERE ` + participatingWorkflows + reportFiltersWhere + `
+    WHERE `
+
+// figuresCTETail closes the raw CTE and derives the figures / grouping keys.
+var figuresCTETail = `
       AND ti.tax_data IS NOT NULL AND ti.tax_data <> '{}'::jsonb -- planner-estimable (null_frac / MCV); the API only ever stores objects
 ),
 figures AS (
@@ -72,7 +80,12 @@ figures AS (
 `
 
 // Page of rows (numeric → float8 so the JSON carries numbers, never strings).
-var financialRowsSQL = figuresCTE + `
+// Own placeholders run to $6, so a narrowed caller's entity set binds at $7.
+func financialRowsSQL(scopeWhere string) string {
+	return figuresCTE(scopeWhere) + financialRowsTail
+}
+
+const financialRowsTail = `
 SELECT entity_name, entity_id, country, tax_type, obligation_name, obligation_code, period, financial_year,
        output_vat::float8, input_vat::float8, net_vat::float8, taxable_income::float8,
        tax_liability::float8, wht_amount::float8, engagement_cost::float8, total_amount::float8
@@ -86,7 +99,13 @@ LIMIT $5 OFFSET $6`
 // Period buckets — the chart, and the aggregation when groupBy=period — follow
 // the CALENDAR (earliest period end, then the code), never period-code text
 // (which puts M10 before M2); every other grouping is ordered by label.
-var financialAggregateSQL = figuresCTE + `
+// Own placeholders run to $4, so its scope bind is $5 — a different number
+// from the rows statement, which is why the two are assembled separately.
+func financialAggregateSQL(scopeWhere string) string {
+	return figuresCTE(scopeWhere) + financialAggregateTail
+}
+
+const financialAggregateTail = `
 SELECT GROUPING(group_key, period)::int AS grp,
        COALESCE(group_key, '') AS group_key,
        COALESCE(group_label, '') AS group_label,
@@ -125,19 +144,28 @@ const (
 )
 
 func (r *ReportsRepo) TaxFinancial(ctx context.Context, args domain.TaxFinancialArgs) (*domain.TaxFinancialResult, error) {
+	scope, err := r.readScope(ctx, authz.TaskRead)
+	if err != nil {
+		return nil, err
+	}
 	params := append(filterArgs(args.ReportFilters), args.GroupBy)
 	res := &domain.TaxFinancialResult{
 		Rows:       []domain.FinancialRow{},
 		Aggregated: []domain.FinancialGroup{},
 		ChartData:  []domain.FinancialPeriodPoint{},
 	}
-	if err := r.db.SelectContext(ctx, &res.Rows, financialRowsSQL,
-		append(params, args.Limit, args.Offset)...); err != nil {
+
+	rowParams := append(append([]any{}, params...), args.Limit, args.Offset)
+	rowScope, rowScopeArgs := reportScopeWhere(scope, len(rowParams)+1)
+	if err := r.db.SelectContext(ctx, &res.Rows, financialRowsSQL(rowScope),
+		append(rowParams, rowScopeArgs...)...); err != nil {
 		return nil, err
 	}
 
+	aggScope, aggScopeArgs := reportScopeWhere(scope, len(params)+1)
 	aggs := []financialAggRow{}
-	if err := r.db.SelectContext(ctx, &aggs, financialAggregateSQL, params...); err != nil {
+	if err := r.db.SelectContext(ctx, &aggs, financialAggregateSQL(aggScope),
+		append(append([]any{}, params...), aggScopeArgs...)...); err != nil {
 		return nil, err
 	}
 	for i := range aggs {

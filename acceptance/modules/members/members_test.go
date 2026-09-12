@@ -320,15 +320,29 @@ func (s *MembersSuite) TestDisableRevokesAccess() {
 		AssertStatus(s.T(), http.StatusOK)
 	s.login("carol@acme.com", "correct-horse-battery-staple").AssertStatus(s.T(), http.StatusOK)
 
-	// Audit carries the status only.
+	// Audit carries the status transition, both sides, and the rename dated but
+	// withheld — the name is personal data (ADR-0007/0008).
 	var audit []struct {
-		Action  string         `json:"action"`
-		Details map[string]any `json:"details"`
+		Action  string `json:"action"`
+		Details struct {
+			Fields map[string]struct {
+				From any `json:"from"`
+				To   any `json:"to"`
+			} `json:"fields"`
+		} `json:"details"`
 	}
-	s.As(tenant).GET(s.T(), "/audit-log?action=member.updated&resourceId="+memberID).DecodeData(s.T(), &audit)
+	resp := s.As(tenant).GET(s.T(), "/audit-log?action=member.updated&resourceId="+memberID)
+	resp.DecodeData(s.T(), &audit)
 	s.Require().Len(audit, 2)
-	s.Require().Equal("active", audit[0].Details["status"])
-	s.Require().Equal("disabled", audit[1].Details["status"])
+	// Newest first: [0] is the re-enable, [1] the disable.
+	s.Require().Equal("disabled", audit[0].Details.Fields["status"].From)
+	s.Require().Equal("active", audit[0].Details.Fields["status"].To)
+	s.Require().Equal("active", audit[1].Details.Fields["status"].From)
+	s.Require().Equal("disabled", audit[1].Details.Fields["status"].To)
+	// Both PUTs renamed the member; the trail dates that without quoting it.
+	s.Require().Equal("set", audit[1].Details.Fields["name"].From)
+	s.Require().Equal("set", audit[1].Details.Fields["name"].To)
+	s.Require().NotContains(resp.BodyString(), "Carol Disabled")
 }
 
 func (s *MembersSuite) TestRolesGrantsAndLastAdminGuard() {
@@ -394,17 +408,33 @@ func (s *MembersSuite) TestRolesGrantsAndLastAdminGuard() {
 	second.DELETE(s.T(), "/members/"+secondID+"/grants/"+scoped.ID).AssertStatus(s.T(), http.StatusNotFound)
 	s.Require().Len(s.getMember(tenant, secondID).Grants, 1)
 
-	// Audit: role changes carry role / scoped / grants count — never names.
+	// Audit: a grant change carries the whole grant set on BOTH sides — role and
+	// scope entity id, never a scope name (ADR-0008). The add and the remove are
+	// exact mirrors, which is what makes an access review reconstructable.
 	var audit []struct {
-		Action  string         `json:"action"`
-		Details map[string]any `json:"details"`
+		Action  string `json:"action"`
+		Details struct {
+			Fields struct {
+				Grants struct {
+					From []map[string]any `json:"from"`
+					To   []map[string]any `json:"to"`
+				} `json:"grants"`
+			} `json:"fields"`
+		} `json:"details"`
 	}
 	second.GET(s.T(), "/audit-log?action=member.role_changed&resourceId="+secondID).DecodeData(s.T(), &audit)
 	s.Require().Len(audit, 2)
-	s.Require().Equal("reviewer", audit[1].Details["role"])
-	s.Require().Equal(true, audit[1].Details["scoped"])
-	s.Require().Equal(float64(2), audit[1].Details["grants"])
-	s.Require().Equal(float64(1), audit[0].Details["grants"])
+
+	adminOnly := []map[string]any{{"role": "tenant_admin"}}
+	adminPlusScoped := []map[string]any{
+		{"role": "reviewer", "scopeEntityId": entity.ID},
+		{"role": "tenant_admin"},
+	}
+	added, removed := audit[1].Details.Fields.Grants, audit[0].Details.Fields.Grants
+	s.Require().Equal(adminOnly, added.From)
+	s.Require().Equal(adminPlusScoped, added.To)
+	s.Require().Equal(adminPlusScoped, removed.From)
+	s.Require().Equal(adminOnly, removed.To)
 }
 
 // A machine principal never holds member:manage — neither at creation nor by

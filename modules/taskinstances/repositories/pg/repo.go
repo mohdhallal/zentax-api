@@ -18,8 +18,10 @@ type TaskInstanceRepo struct {
 }
 
 func NewTaskInstanceRepo(db database.ExecerPg) *TaskInstanceRepo {
+	cfg := sqlConfig
+	cfg.ReadScope = readScope(db)
 	return &TaskInstanceRepo{
-		BaseRepo: baserepo.NewBaseRepo[domain.TaskInstance, domain.TaskInstanceID](db, sqlConfig),
+		BaseRepo: baserepo.NewBaseRepo[domain.TaskInstance, domain.TaskInstanceID](db, cfg),
 	}
 }
 
