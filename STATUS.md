@@ -41,8 +41,10 @@ would hurt first:
    reach the logs in clear text. → *🔴 Holes in code that has already shipped*
 2. **No notifications, no e-mail, no scheduler** — invites are copy-paste and the reminder/digest
    feature does not exist server-side. → *🟠 Domain features still to build*
-3. **Credential recovery** — no password reset, no password change, no MFA reset.
-   → *🟠 Auth & authorization*
+3. **Credential recovery — brokered, not built (decided 2026-09-12).** Nothing exists today and a lost
+   authenticator is a permanent lockout, but the fix is the WorkOS broker (Phase 2), not a first-party
+   reset; a placeholder pass makes the absence visible meanwhile. A broker-less self-host is the one
+   edition that still needs our own flow. → *🟠 Auth & authorization*
 4. **Read-side scope narrowing and the ADR-0018 amendment chain.** → *🟠 Auth & authorization*
 5. **Deadline engine** — public holidays on top of the weekend adjustment; `additionalDeadlines`.
    → *🟠 Deadline engine*
@@ -671,8 +673,9 @@ Migrations (sqitch): `tenants`, `entities`, `obligation_types`, `entity_obligati
 `X-Tenant-ID` header is gone); `cmd/seed-admin` bootstraps the first tenant + admin. Plus **scoped RBAC**
 (`platform/authz`): a role→capability matrix + `RequireCapability` gate every domain route (B-1), and an
 `authz.Authorizer` narrows a scoped grant to its entity subtree on every write (B-2). The detail is the
-next subsection; what is *left* of auth — read-side scope, rate limiting, credential recovery, the
-ADR-0018 amendment chain, WorkOS — is under *What is missing / remaining*. (The submit/approve/reject
+next subsection; what is *left* of auth — read-side scope, rate limiting, credential recovery (broker-owned;
+first-party only for a broker-less self-host), the ADR-0018 amendment chain, WorkOS — is under
+*What is missing / remaining*. (The submit/approve/reject
 actions this paragraph once listed as outstanding shipped with ADR-0018; see Domain modules.)
 
 Commits: `4cdcd4e` scaffold · `2851179` tenancy+entities · `d074780` obligation-types ·
@@ -1240,13 +1243,18 @@ measured figures say so.
   throttle on `POST /auth/accept-invite`, and a bounded semaphore around the argon2 verification.
   Detail and measurements in the 🔴 bullet above; this is the missing piece for both gaps the
   failed-login attempt budget explicitly does not close.
-- **Credential recovery does not exist** — no password reset, no password change, no MFA reset and
-  no recovery codes, for the user or for an admin. `PUT /members/{id}` writes name and
-  active/disabled only, `ReissueInvite` 409s unless the member is still `invited`, and `users.email` is
-  globally unique so delete-and-reinvite is impossible: a forgotten password or a lost authenticator
-  is terminal today. The sign-in page meanwhile offers "Forgot your password?" and says resets are
-  handled by an identity provider, and `IdentityBroker` has no implementations. An admin-side reset
-  plus MFA clear is days; the user-facing flow waits on e-mail.
+- **Credential recovery — a broker responsibility, deferred by decision (2026-09-12). Do not build it
+  here.** Nothing exists today, and the lockout is real: `PUT /members/{id}` writes name and
+  active/disabled only, `ReissueInvite` 409s `MsgMemberNotInvited` unless the member is still `invited`
+  (so an *active* member has no admin-assisted remedy either), and `users.email` is globally unique, so
+  a forgotten password or a lost authenticator is **terminal** — including for a pilot tenant's only
+  admin. That risk stands until a broker lands. **Hosted self-service recovery comes with WorkOS**
+  (ADR-0011 **decision 7**, added by amendment 2026-09-12; Phase 2): `modules/identity/domain/broker.go` now declares `StartRecovery` /
+  `CompleteRecovery` beside `StartSSO`, with `NotConfiguredBroker` refusing all three and **no route
+  wired** — a written contract, zero behaviour. **Only a broker-less self-host needs a first-party
+  flow:** admin-side force-reset + clear-MFA (days), then a mail-dependent self-service reset and
+  recovery codes (days more) — sized against self-host GA, not Phase 1. Tracker: `PROJECT_PLAN.md`
+  PB-C1a/b/c.
 - **Approval amendment path (rest of ADR-0018)** — an approved record is *frozen* (in-place edits
   rejected), but the versioned re-approved *amendment* chain (lawfully correcting a filed record)
   plus the document-version / rule-version snapshots still need rule versioning (ADR-0017). The
@@ -1254,7 +1262,13 @@ measured figures say so.
   freeze protects edits only — a delete still destroys the record (🔴 above).
 - **MFA is per-user opt-in with no tenant policy** — nothing lets a tenant require it, though
   ADR-0011 assigns MFA policy enforcement to the app.
-- **WorkOS SSO/SCIM (Phase 2).** `IdentityBroker` seam is stubbed only.
+- **WorkOS SSO/SCIM + hosted recovery (Phase 2).** `IdentityBroker` is a seam with one refusing
+  implementation. It owns federated sign-in (the app still mints its own session on callback), directory
+  sync including **de-provisioning that revokes live sessions and tokens**, and self-service recovery for
+  hosted tenants; the user record, session store, MFA policy and audit trail stay first-party. Brings a new
+  **sub-processor** (register + DPA + an ADR-0005 residency check before the first EU tenant) and a new
+  **ADR-0014** secret (the WorkOS API key). Self-host: a bundled OSS broker / direct OIDC behind the same
+  interface, or none at all — keep the seam free of WorkOS-shaped types.
 - Breach-checked passwords (HIBP), Redis session store (Postgres for now). ~~Invite flow~~ — **done
   (2026-09-04)**; what is left of it is e-mail delivery of the invite link (the token is still
   returned to the admin), invite-expiry configurability, and read-side scope narrowing of the member

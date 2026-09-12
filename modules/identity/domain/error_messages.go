@@ -43,4 +43,11 @@ const (
 	// what was refused — it is caller input, not PII.
 	MsgUnknownTimezone = "unknown IANA timezone: "
 	MsgTenantNotFound  = "tenant not found"
+
+	// Federated identity and broker-owned credential recovery (ADR-0011). The
+	// broker is Phase 2 with no implementation in any edition, so this is what
+	// the seam answers today — see broker.go. It describes the DEPLOYMENT's
+	// configuration and nothing about the subject, so it is safe to return for
+	// any address: an unknown one and a real one get the same sentence.
+	MsgNoIdentityProvider = "no identity provider is configured"
 )
