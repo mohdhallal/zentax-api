@@ -3,11 +3,54 @@
 > Single source of truth for the state of the ZenTax Go backend. Updated as work
 > lands. The cross-session roadmap lives in `../zentax-ui/PROJECT_PLAN.md` (the UI
 > repository, `github.com/mohdhallal/zentax-ui`, formerly `TaxFlowReports`);
-> architecture decisions in `../zentax-ui/docs/adr/` (ADRs 0001–0025).
+> architecture decisions in `../zentax-ui/docs/adr/` (ADRs 0001–0026).
 
-**Last updated:** 2026-09-06 · **Toolchain:** Go 1.27 via gvm (`~/.gvm/gos/go1.27`;
-the system `/usr/local/go` is a stale 1.19). **Gate:** `go build/vet/test ./...`
-green on both the main module and `acceptance/`.
+**Last updated:** 2026-09-12 · **Toolchain:** Go 1.27 via gvm (`~/.gvm/gos/go1.27`;
+the system `/usr/local/go` is a stale 1.19).
+
+**Gate** — from the repository root, main module then `acceptance/`:
+
+```sh
+export GOROOT="$HOME/.gvm/gos/go1.27" PATH="$HOME/.gvm/gos/go1.27/bin:$PATH" GOWORK=off
+gofmt -l $(git ls-files '*.go')
+go build       $(go list -e -f '{{if not .Error}}{{.ImportPath}}{{end}}' ./... | grep -v /infra/)
+go vet         $(go list -e -f '{{if not .Error}}{{.ImportPath}}{{end}}' ./... | grep -v /infra/)
+go test -count=1 $(go list -e -f '{{if not .Error}}{{.ImportPath}}{{end}}' ./... | grep -v /infra/)
+(cd acceptance && go vet ./... && go test -count=1 ./...)
+```
+
+The filtered package list is not cosmetic. Once `infra/node_modules` exists — any checkout
+where the CDK's `npm ci` has run — a bare `./...` walks the CDK's own Go init-templates and
+`go build ./...` exits **1** with `invalid input file name "%name%.template.go"` before
+compiling a single package of ours. `go list -e` keeps going past that, and `{{if not .Error}}`
+drops the broken entries. (Write the substitution inline as above: `PKGS=$(…); go build $PKGS`
+word-splits in bash but **not** in zsh. CI gets away with a bare `./...` only because its Go job
+checks out without `infra/node_modules`.)
+
+---
+
+## What is left — read this first
+
+Everything above *What is missing / remaining* is finished work. In rough order of what
+would hurt first:
+
+1. **Holes in code that already shipped** — no rate limiting anywhere and no attempt counter on
+   `POST /auth/mfa/verify`; scoped grants narrow writes but not reads; deleting a workflow or an
+   entity cascades through approved records; the audit trail carries no before/after detail and no
+   authentication events; nothing ever verifies the hash chain; request URIs and their search terms
+   reach the logs in clear text. → *🔴 Holes in code that has already shipped*
+2. **No notifications, no e-mail, no scheduler** — invites are copy-paste and the reminder/digest
+   feature does not exist server-side. → *🟠 Domain features still to build*
+3. **Credential recovery** — no password reset, no password change, no MFA reset.
+   → *🟠 Auth & authorization*
+4. **Read-side scope narrowing and the ADR-0018 amendment chain.** → *🟠 Auth & authorization*
+5. **Deadline engine** — public holidays on top of the weekend adjustment; `additionalDeadlines`.
+   → *🟠 Deadline engine*
+6. **Platform, mostly Phase 2 per the ADRs** — ADR-0006 envelope encryption, ADR-0015 observability
+   and log redaction, ADR-0007 retention/purge, ADR-0010 entitlements, ADR-0005 residency cells, and
+   the ADR-0016 supply-chain controls the shipped pipeline still lacks. → *🟡 Platform / infra*
+7. **Frontend** — notification preferences and the workflow-clone action are the only surfaces still
+   on the legacy Express handlers. → *🟡 Frontend integration*
 
 ---
 
@@ -80,7 +123,10 @@ green on both the main module and `acceptance/`.
 - **Deployment readiness (staging / production, ADR-0014 — 2026-09-05):** the API boots on ECS
   from a shipped config file + injected environment, and refuses to boot otherwise.
   - **Config files** `deployment/config_files/{development,staging,production}.json` (the Dockerfile
-    copies the whole directory; `APP_ENV` picks one). `staging` / `production` are production-shaped:
+    copies the whole directory). **`APP_ENV` names a tier or a cell of one** (2026-09-12):
+    `staging` and `staging-eu` both load `staging.json` unless the image ships a per-cell override
+    file, and the **tier** decides which fail-closed rules apply, so a cell can never take the
+    development path. An unparseable value refuses to boot. `staging` / `production` are production-shaped:
     `database.url ""`, `auth.encryptionKey ""`, `cors.allowedOrigins []` (all three come from the
     environment), `auth.sessionCookieSecure true`, `log {json, info}`, `metrics.enabled true`,
     `storage.driver s3` (bucket + region from `STORAGE_S3_*`; a self-host production sets
@@ -111,7 +157,7 @@ green on both the main module and `acceptance/`.
     Manager, so it never appears in a task definition or CloudTrail) or from `--password` for local
     use, refusing to run when neither is set, holding it to the accept-invite length policy
     (12–200 chars, `resolvePassword` unit-tested), and never printing it.
-  - **Fail-closed rules** for `APP_ENV=staging|production` (every violation reported in ONE startup
+  - **Fail-closed rules** for every non-development tier, cells included (every violation reported in ONE startup
     error, each naming the variable to set): encryption key present, decodable, and **not the
     development key** (decoded bytes compared against `config.DevelopmentEncryptionKey`, which a
     test pins to `development.json`); `sessionCookieSecure` true; `database.url` without
@@ -624,125 +670,20 @@ Migrations (sqitch): `tenants`, `entities`, `obligation_types`, `entity_obligati
 (`modules/identity`, `platform/crypto`); `RequireSession` supplies the tenant from the session (the
 `X-Tenant-ID` header is gone); `cmd/seed-admin` bootstraps the first tenant + admin. Plus **scoped RBAC**
 (`platform/authz`): a role→capability matrix + `RequireCapability` gate every domain route (B-1), and an
-`authz.Authorizer` narrows a scoped grant to its entity subtree on every write (B-2). See the Auth section
-under "remaining" for what is left (read-side scope, submit/approve actions, WorkOS).
+`authz.Authorizer` narrows a scoped grant to its entity subtree on every write (B-2). The detail is the
+next subsection; what is *left* of auth — read-side scope, rate limiting, credential recovery, the
+ADR-0018 amendment chain, WorkOS — is under *What is missing / remaining*. (The submit/approve/reject
+actions this paragraph once listed as outstanding shipped with ADR-0018; see Domain modules.)
 
 Commits: `4cdcd4e` scaffold · `2851179` tenancy+entities · `d074780` obligation-types ·
 `94070d9` entity-obligations · `d91158c` workflows · `f85970a` workflow-tasks ·
 `c52c25a` task-instances+generation · `b63852d` identity module · `e1c186b` wire auth (Increment A).
 
----
+### Auth, authorization & identity (Increments A + B, ADR-0011/0012)
+_All of the following is **built**. It lived under "what is missing" until 2026-09-12, which is
+why that section read as if nothing was done; what is actually left of auth is in
+*What is missing / remaining* below._
 
-## Performance — ADR-0021 rule 7 (measured)
-
-Budgets: p95 ≤ **500 ms** for dashboard/list reads, ≤ **2 s** for aggregate reports, at 10⁵
-instances per tenant. Fixture: the `scale` tenant (`seed-demo scale`, 48 entities × 5 obligation
-types × 8 fiscal years → 1,925 workflows, **97,152 instances**) next to the three demo tenants,
-in the compose `postgres:16-alpine`; `seed-demo bench` = 3 warm-ups + 30 sequential timed requests
-per target, client wall-clock on loopback, reference machine Apple M1 Max. A > 25 % p95 regression
-on an unchanged endpoint blocks review. Rerun: `go run ./cmd/seed-demo bench --api
-http://localhost:3000` (add `--no-fail` to capture a table that misses).
-
-| date | api | target | p95 baseline (ms) | p95 after inc 2 (ms) | budget | result |
-|---|---|---|---:|---:|---:|---|
-| 2026-09-08/09 | 4f2aded → cb4df2e | task feed page 1 (dueDate asc, 50/page) | 33.5 | 42.9 | 500 | PASS |
-| | | task feed **page 200** (dueDate asc, offset 9950) | 448.8 (max 508.9) | **67.5** | 500 | PASS |
-| | | task feed page 1 (createdAt asc) | 105.3 | 109.2 | 500 | PASS |
-| | | task feed page 200 (createdAt asc) | 112.2 | 129.3 | 500 | PASS |
-| | | `/reports/task-summary` | — (404, inc 1) | 63.6 | 500 | PASS |
-| | | `/reports/workflow-stats` (1,925 rows) | 99.3 | 75.7 | 500 | PASS |
-| | | compliance heatmap (FY 2026, period view) | 52.5 | 71.4 | 2000 | PASS |
-| | | compliance status page 1 (50/page, exact summary) | **4,159.3** | **220.9** | 2000 | FAIL → PASS |
-| | | entities (search not yet honoured — unfiltered first page) | 3.0 | 2.3 | 500 | PASS |
-| | | a VAT workflow's instances (108, 50/page) | 4.6 | 4.2 | 500 | PASS |
-| | | tax-financial by entity | 61.9 | 112.4 | 2000 | PASS |
-| 2026-09-09 | 3483ca1 (after inc 4+5: feed filters, search, named workflow rows) | task feed page 1 / page 200 (dueDate) | — | 37.9 / 63.6 | 500 | PASS |
-| | | task feed page 1 / page 200 (createdAt) | — | 119.7 / 134.8 | 500 | PASS |
-| | | `/reports/task-summary` | — | 44.2 | 500 | PASS |
-| | | `/reports/workflow-stats` | — | 43.3 | 500 | PASS |
-| | | compliance heatmap (FY 2026) | — | 50.8 | 2000 | PASS |
-| | | compliance status page 1 | — | 174.0 | 2000 | PASS |
-| | | `/entities?search=Mül` (**real search now** — total 1) | — | 2.9 | 500 | PASS |
-| | | a VAT workflow's instances | — | 4.3 | 500 | PASS |
-| | | tax-financial by entity | — | 72.1 | 2000 | PASS |
-
-What moved and why: migration `20260908000022` (tenant-prefixed `(tenant_id, due_date, order_index,
-id)` + the same columns on open rows). The deep task-feed page went from an index scan on the
-tenant-less `(due_date)` that discarded other tenants' rows via the RLS filter to a range scan on the
-tenant's own index; the compliance-status statement, which classifies every instance of the tenant
-against `filing_deadline`/`due_date` inside a CTE, stopped scanning the partition. Measured index
-build at 100,000 rows: **134 ms** for the whole transaction (the lock window). `createdAt` sorts are
-unchanged (no `(tenant_id, created_at, id)` index — within budget, so not added, per the plan).
-Plan text (EXPLAIN ANALYZE, BUFFERS) for the deep page and the summary: `docs/testing/perf-2026-09-09.md`
-in the UI repo. Not measured yet: search (increment 5), the task feed's new filters (increment 4), a
-cell in AWS (the M1 is far faster than db.t4g.small — local PASS is necessary, not sufficient).
-
-## What is missing / remaining
-
-### 🟠 Auth & authorization
-- **Heatmap with years of history (2026-09-09, ADR-0026 increment 6, API side).** With no year
-  selected, period-view columns are keyed `<financialYear>:<periodCode>` and labelled `M1 (FY2019)`,
-  so the same period code in two fiscal years never merges (a selected year keeps the bare code —
-  every existing year=2025/2026 expectation holds; tax-type view unaffected). Columns stay in
-  calendar order by first period end. The grid is bounded: `domain.MaxHeatmapCells = 5000`, the
-  query fetches max+1 and the handler answers **400 VALIDATION "the heatmap has more than 5000
-  cells; narrow it by year or entity"** above it (exactly 5,000 is a full grid). Acceptance: two
-  fiscal years × same codes → qualified columns and every cell; the cap proven with a real
-  5,001-cell tenant; project workflows confirmed absent (recurring-only, and a recurring workflow
-  cannot start without a year). Oracle: `verify` keys the year=all grid the new way and expects the
-  400 wherever its own grid exceeds the cap (scale: 6,521 cells); the dataset's static year=all
-  tables stay in the legacy merged keying and are evaluated through a fold, so no static drift;
-  `checkProjectParticipation` narrows per entity when the unfiltered request hits the cap.
-- **Search and named workflow rows (2026-09-09, ADR-0026 increment 5, API side).** `search` (≤ 200
-  chars, trimmed, blank = no filter) on `/entities` (name, legal name), `/workflows` (name),
-  `/obligation-types` (name, code) and `/members` (name, email): case-insensitive `ILIKE` with `%`,
-  `_` and `\` escaped (`shared/repositories/like.go`), applied in BOTH the page and the count
-  statement through one bind so totals stay exact; the generic repository declares
-  `SQLConfig.SearchColumns`. The workflows list select is LEFT-JOINed to entities and obligation
-  types so every row carries `entityName` / `obligationTypeName` (nullable), with `w.`-qualified
-  filters, `w.created_at` order and `w.id` tie-breaker; the count stays over `workflows` alone.
-  `/workflows` year filters are lenient like every other year filter: `financialYear=` and
-  `financialYear=all` mean "no filter". Acceptance per module incl. the scale fixture's hostile
-  names (`Müller & Söhne 100% GmbH`, `Under_score Holdings Ltd`, `O'Brien \ Partners`).
-- **Task feed on the server (2026-09-09, ADR-0026 increment 4, API side).** `/reports/task-instances`
-  and `/reports/task-summary` share one filter set (`dto.TaskFilterQuery`): `workflowId`, `entityId`,
-  `assigneeId` (uuid | `me` = the session principal | `unassigned`), `obligationTypeId`, `taxType`
-  (semi-join on `obligation_types.template`), `financialYear` (repeatable, `none` = no year; `""`/`all`
-  ignored), `periodCode`, `status` (stored values + `open`), `workflowCategory`,
-  `due=overdue|today|thisWeek` (the `sql_shared.go` tenant-day predicates, so a tile drill-down is
-  exact), `dueFrom`/`dueTo` (inclusive; blank or `all` is a 400 like the uuid params), `search`
-  (task name, workflow name, period code, plus semi-joins on entity / obligation-type names — the
-  COUNT never needs the display LEFT JOINs). Feed `sort` is ONE key from dueDate | createdAt | status
-  (statusRank) | workflow | entity (NULLS LAST) | name × asc/desc, every clause ending in
-  `ti.order_index, ti.id` in the primary direction; a second sort key is a 400. Predicates are
-  assembled only for set filters. `/reports/workflow-stats` gains `workflowId`, `entityId`,
-  `financialYear`, `status`, `workflowCategory`; `/audit-log` `action` is repeatable; `/documents`
-  `year` is repeatable with `none` (= documents of workflows without a financial year) and its
-  `search` treats `all` as a term. OpenAPI: alternation rules (`uuid|oneof=me unassigned`) keep the
-  uuid format and document the extra literals; `datetime=2006-01-02` renders as `format: date`.
-  Acceptance: every filter, `due=*` on Pacific/Kiritimati and Pago Pago tenants with a required day
-  flip against UTC, six sort keys × two directions walked twice and asc = reverse of desc, workflow
-  stats filters, repeatable action and year. The demo oracle (403 checks) and the scale oracle
-  (3,105 checks) still report 0 differences: the changes are additive.
-- **List contracts (2026-09-08, ADR-0026 increment 2).** Every list `ORDER BY` now ends in a unique
-  column, in the primary sort's direction: the generic repository (`shared/repositories`) appends an
-  `id` tie-breaker (`due_date ASC, id ASC`; `created_at DESC, id DESC`); the audit log orders by `seq`
-  alone (assigned under the same per-tenant lock as `occurred_at`, so identical order, and served by
-  `idx_audit_log_tenant_seq`). Migration **`20260908000022_pagination_indexes`** adds
-  `task_instances (tenant_id, due_date, order_index, id)` and the same columns `WHERE status <>
-  'completed'`, and drops the tenant-less `(due_date)` and `(status)` — on a hash partition shared by
-  many tenants an index without `tenant_id` reads other tenants' rows before RLS discards them.
-  Measured on a 100,000-row scratch DB: the transaction took 134 ms; the deep-page feed plan went from
-  an index scan filtering `tenant_id` to a range scan on the tenant's own index; the five-soonest-open
-  query became a four-buffer partial-index scan with no sort. The paginated envelope gains `hasMore`;
-  repeatable query filters bind to `[]string` (`col = ANY($n)`) with a `none` sentinel declared per
-  nullable column (workflows: `status`, `financialYear`); a blank element is a 400. **Standing rule:**
-  a new list endpoint declares its tie-breaker (default `id`) and gets a tenant-prefixed index in the
-  same migration that introduces its order; index migrations stay plain and transactional until a
-  cell's `task_instances` passes ~10⁶ rows or a build exceeds 30 s, then use `ON ONLY` +
-  per-partition `CONCURRENTLY` + `ATTACH` in a non-transactional file. Acceptance: a dense-tie fixture
-  (144 instances, 12 per due date) walked under every sort and page size — no duplicates, no gaps,
-  byte-identical repeat walks — plus an identical-name entities walk and multi-value filter totals.
 - **Authentication + sessions — DONE (Increment A, ADR-0011).** First-party email/password
   (argon2id) + server-side sessions (httpOnly + SameSite=Strict cookie, token stored hashed,
   rotation on login/MFA, idle + absolute TTLs, failed-attempt lockout) + **TOTP MFA**
@@ -933,16 +874,6 @@ cell in AWS (the M1 is far faster than db.t4g.small — local PASS is necessary,
   obligation-types / entity-obligations / workflows / workflow-tasks / task-instances / workflow-start, and
   tested live (a manager scoped to A acts on A + descendants, never sibling B). `entity_closure` stays
   unused — the parent-walk CTE is the source of truth; the closure is a future perf optimization.
-- **Remaining:**
-  - **Read-side scope** — list/get endpoints stay tenant-wide; narrowing what a *scoped* user can *see*
-    (filtering lists to their subtree) is a later increment. Write scope (above) is the SoD-critical half.
-  - **Approval amendment path (rest of ADR-0018)** — an approved record is now *frozen* (in-place edits
-    rejected), but the versioned re-approved *amendment* chain (lawfully correcting a filed record) + the
-    document-version / rule-version snapshots need documents + audit first. The freeze + preparer≠approver
-    SoD + the submit/approve/reject actions are **done** (see Domain features).
-  - **WorkOS SSO/SCIM (Phase 2).** `IdentityBroker` seam is stubbed only.
-  - Breach-checked passwords (HIBP), password-reset flow, Redis session store (Postgres for now).
-    ~~Invite flow~~ — **done (2026-09-04, see Member administration below).**
 - **Member administration — DONE (2026-09-04).** `modules/identity` grows a members surface backed by the
   same users / user_grants rails. **Capabilities:** a new `member:read` joins the read set every role holds
   (the tenant directory — names, emails, roles — is visible to every member so tasks can be assigned);
@@ -1053,58 +984,76 @@ cell in AWS (the M1 is far faster than db.t4g.small — local PASS is necessary,
   lock** in place and approval human-only. Reads remain tenant-wide (list-scope narrowing is a later
   increment).
 
-### 🟠 Domain features still to build
-- ~~**Data Templates** module~~ — **done (2026-09-04, see Domain modules #9)**; the
-  `data_template_id` columns are now composite FKs and tax data is validated server-side.
-- **Approvals — DONE (core, ADR-0018/0012).** `POST /task-instances/{id}/{submit-for-approval,approve,reject}`
-  drive the lifecycle: a preparer (`task:submit`) submits → `pending_approval` (records `submitted_by`); a
-  different reviewer (`task:approve`) approves → `completed` (`approved_by`/`approved_at`/`completed_at`), or
-  rejects → back to `in_progress` with a reason. **Server-enforced SoD** (approver ≠ submitter) + an
-  **immutable lock** (an approved instance rejects in-place edits). Verified live. **Remaining:** the
-  versioned *amendment* chain + snapshotting linked document/rule versions (audit is now built —
-  waits on documents + rule versioning).
-- ~~**Documents / workflow-documents** — versioned, backed by object storage.~~ **Done (2026-09-04,
-  see Domain modules #10 + the storage seam).** Remaining: the ADR-0007 purge job for soft-deleted
-  documents, per-tenant envelope encryption at the adapter (ADR-0006), frontend wiring.
-- **Audit log — DONE (stream 1 core, ADR-0008).** `platform/audit` + the `audit_log` table: every
-  domain mutation (20 use-case sites) appends a **PII-free, actor-by-ID envelope** (action,
-  resource, UTC instant, request_id, whitelisted `details` only — status transitions/counts, never
-  free text) **on the same transaction** — the write and its evidence commit or roll back together.
-  **Append-only at the database** (RLS policies exist only for INSERT/SELECT → UPDATE/DELETE affect
-  zero rows even for the app role) + a **per-tenant hash chain** (sha256 over the canonical envelope;
-  per-tenant advisory-lock-serialized `seq`; `VerifyChain` recomputes it). **Actor attribution:**
-  `created_by`/`updated_by` on all domain tables, defaulted/stamped from the `app.user_id` GUC bound
-  at the Tx seam. Verified live incl. tamper attempts + cross-tenant isolation. **Remaining:** WORM
-  export to S3 Object Lock (Phase 2), the centralized **security stream** (auth events — Phase 2;
-  interim: structured slog). The read API for the Audit Trail page is **done** (2026-09-03:
-  `GET /audit-log`, `modules/auditlog`, capability `audit:read` — see "Read models" above).
-- ~~**Team members / roles**~~ (done 2026-09-04 — see Member administration under Auth), **notifications / email / digests**, **reports**
-  (compliance-heatmap / status / tax-financial / export-raw — the enriched task-instance list and
-  per-workflow stats under `/reports` are done, 2026-09-03; the compliance aggregates are not).
+### Pagination, list contracts & the server-side task feed (ADR-0026)
+_Built, increments 2 and 4–6. Increments 0–1 (the scale fixture and the benchmark) are in
+*Performance* below; what is left of ADR-0026 is in *What is missing / remaining*._
 
-### 🟠 Deadline engine
-- ~~**Non-standard fiscal patterns** (445 / 454 / 544 / 13-period / weekly / custom) —
-  currently fail-closed.~~ **Done (2026-09-05, ADR-0023)** — every pattern is computed by
-  `shared/deadline` with hand-verified vectors (see Platform / foundation); the frontend's period
-  math is superseded by `GET /entities/{id}/periods`.
-- ~~**Payment / additional deadlines** beyond the filing deadline are not yet computed during
-  generation.~~ **Payment deadline done (2026-09-05)** — `task_instances.payment_deadline` from
-  the entity obligation's `paymentOffset` / `paymentFixedDates` / "same as filing".
-  **Remaining:** `additionalDeadlines` (advance payments etc.) are recorded on the rule but not
-  yet materialized; public holidays (jurisdiction-keyed, ADR-0017 data) on top of the weekend
-  adjustment.
+- **Heatmap with years of history (2026-09-09, ADR-0026 increment 6, API side).** With no year
+  selected, period-view columns are keyed `<financialYear>:<periodCode>` and labelled `M1 (FY2019)`,
+  so the same period code in two fiscal years never merges (a selected year keeps the bare code —
+  every existing year=2025/2026 expectation holds; tax-type view unaffected). Columns stay in
+  calendar order by first period end. The grid is bounded: `domain.MaxHeatmapCells = 5000`, the
+  query fetches max+1 and the handler answers **400 VALIDATION "the heatmap has more than 5000
+  cells; narrow it by year or entity"** above it (exactly 5,000 is a full grid). Acceptance: two
+  fiscal years × same codes → qualified columns and every cell; the cap proven with a real
+  5,001-cell tenant; project workflows confirmed absent (recurring-only, and a recurring workflow
+  cannot start without a year). Oracle: `verify` keys the year=all grid the new way and expects the
+  400 wherever its own grid exceeds the cap (scale: 6,521 cells); the dataset's static year=all
+  tables stay in the legacy merged keying and are evaluated through a fold, so no static drift;
+  `checkProjectParticipation` narrows per entity when the unfiltered request hits the cap.
+- **Search and named workflow rows (2026-09-09, ADR-0026 increment 5, API side).** `search` (≤ 200
+  chars, trimmed, blank = no filter) on `/entities` (name, legal name), `/workflows` (name),
+  `/obligation-types` (name, code) and `/members` (name, email): case-insensitive `ILIKE` with `%`,
+  `_` and `\` escaped (`shared/repositories/like.go`), applied in BOTH the page and the count
+  statement through one bind so totals stay exact; the generic repository declares
+  `SQLConfig.SearchColumns`. The workflows list select is LEFT-JOINed to entities and obligation
+  types so every row carries `entityName` / `obligationTypeName` (nullable), with `w.`-qualified
+  filters, `w.created_at` order and `w.id` tie-breaker; the count stays over `workflows` alone.
+  `/workflows` year filters are lenient like every other year filter: `financialYear=` and
+  `financialYear=all` mean "no filter". Acceptance per module incl. the scale fixture's hostile
+  names (`Müller & Söhne 100% GmbH`, `Under_score Holdings Ltd`, `O'Brien \ Partners`).
+- **Task feed on the server (2026-09-09, ADR-0026 increment 4, API side).** `/reports/task-instances`
+  and `/reports/task-summary` share one filter set (`dto.TaskFilterQuery`): `workflowId`, `entityId`,
+  `assigneeId` (uuid | `me` = the session principal | `unassigned`), `obligationTypeId`, `taxType`
+  (semi-join on `obligation_types.template`), `financialYear` (repeatable, `none` = no year; `""`/`all`
+  ignored), `periodCode`, `status` (stored values + `open`), `workflowCategory`,
+  `due=overdue|today|thisWeek` (the `sql_shared.go` tenant-day predicates, so a tile drill-down is
+  exact), `dueFrom`/`dueTo` (inclusive; blank or `all` is a 400 like the uuid params), `search`
+  (task name, workflow name, period code, plus semi-joins on entity / obligation-type names — the
+  COUNT never needs the display LEFT JOINs). Feed `sort` is ONE key from dueDate | createdAt | status
+  (statusRank) | workflow | entity (NULLS LAST) | name × asc/desc, every clause ending in
+  `ti.order_index, ti.id` in the primary direction; a second sort key is a 400. Predicates are
+  assembled only for set filters. `/reports/workflow-stats` gains `workflowId`, `entityId`,
+  `financialYear`, `status`, `workflowCategory`; `/audit-log` `action` is repeatable; `/documents`
+  `year` is repeatable with `none` (= documents of workflows without a financial year) and its
+  `search` treats `all` as a term. OpenAPI: alternation rules (`uuid|oneof=me unassigned`) keep the
+  uuid format and document the extra literals; `datetime=2006-01-02` renders as `format: date`.
+  Acceptance: every filter, `due=*` on Pacific/Kiritimati and Pago Pago tenants with a required day
+  flip against UTC, six sort keys × two directions walked twice and asc = reverse of desc, workflow
+  stats filters, repeatable action and year. The demo oracle (403 checks) and the scale oracle
+  (3,105 checks) still report 0 differences: the changes are additive.
+- **List contracts (2026-09-08, ADR-0026 increment 2).** Every list `ORDER BY` now ends in a unique
+  column, in the primary sort's direction: the generic repository (`shared/repositories`) appends an
+  `id` tie-breaker (`due_date ASC, id ASC`; `created_at DESC, id DESC`); the audit log orders by `seq`
+  alone (assigned under the same per-tenant lock as `occurred_at`, so identical order, and served by
+  `idx_audit_log_tenant_seq`). Migration **`20260908000022_pagination_indexes`** adds
+  `task_instances (tenant_id, due_date, order_index, id)` and the same columns `WHERE status <>
+  'completed'`, and drops the tenant-less `(due_date)` and `(status)` — on a hash partition shared by
+  many tenants an index without `tenant_id` reads other tenants' rows before RLS discards them.
+  Measured on a 100,000-row scratch DB: the transaction took 134 ms; the deep-page feed plan went from
+  an index scan filtering `tenant_id` to a range scan on the tenant's own index; the five-soonest-open
+  query became a four-buffer partial-index scan with no sort. The paginated envelope gains `hasMore`;
+  repeatable query filters bind to `[]string` (`col = ANY($n)`) with a `none` sentinel declared per
+  nullable column (workflows: `status`, `financialYear`); a blank element is a 400. **Standing rule:**
+  a new list endpoint declares its tie-breaker (default `id`) and gets a tenant-prefixed index in the
+  same migration that introduces its order; index migrations stay plain and transactional until a
+  cell's `task_instances` passes ~10⁶ rows or a build exceeds 30 s, then use `ON ONLY` +
+  per-partition `CONCURRENTLY` + `ATTACH` in a non-transactional file. Acceptance: a dense-tie fixture
+  (144 instances, 12 per due date) walked under every sort and page size — no duplicates, no gaps,
+  byte-identical repeat walks — plus an identical-name entities walk and multi-value filter totals.
 
-### 🟡 Platform / infra (mostly Phase 2 per the ADRs)
-- ~~Object storage behind a `Storage` interface — S3 / filesystem·MinIO (ADR-0009). None wired.~~
-  **Done (2026-09-04):** `platform/storage` + `fs` / `s3` adapters, wired for documents (see
-  Platform / foundation). Remaining: SSE-KMS / per-tenant envelope keys (ADR-0006), MinIO compose profile.
-- Encryption: KMS envelope + per-tenant keys behind `KeyProvider` (ADR-0006).
-- Observability: OpenTelemetry → Grafana LGTM + PII redaction (ADR-0015; `logger.go` has the TODO).
-- Secrets injection + backup/DR (ADR-0014) — config validates fail-closed, but Secrets Manager wiring is absent.
-- Supply chain + CI: govulncheck, SBOM, signed images, OIDC, migrations-in-CI (ADR-0016/0013). **No CI pipeline yet.**
-- Feature flags / entitlements (ADR-0010); region/residency cells + control-plane (ADR-0005).
+### API contract & frontend wiring (B3)
 
-### 🟡 Frontend integration
 - **OpenAPI contract: FINISHED (B3, 2026-08-23).** `/swagger/spec.json` now describes the real API:
   **security schemes are `sessionCookie` (apiKey-in-cookie, named from config) + `bearerToken`
   (`ztx_...`)** — the boilerplate gateway schemes are gone; every tenant route declares
@@ -1124,15 +1073,316 @@ cell in AWS (the M1 is far faster than db.t4g.small — local PASS is necessary,
   chain against this API through a transitional Express adapter (`TaxFlowReports/server/go-proxy.ts` —
   path rewrites, envelope unwrapping, cookie passthrough, per-endpoint body whitelists because this API
   rightly rejects unknown fields). Verified live in the browser (login → entities from Postgres → UI
-  create → audit entry). Unmigrated surfaces (dashboard aggregates, documents, templates, team,
-  notifications, reports) remain on MSW/legacy Express until their Go modules exist; remaining forms'
-  payloads migrate module-by-module.
+  create → audit entry). **Every surface but notifications is now real** (2026-09-03/05): the
+  dashboard aggregates, the four reporting pages, documents (multipart upload + raw download,
+  ADR-0022), data templates, the audit trail and member administration all proxy to this API.
+  `server/go-proxy.ts` declines exactly two paths — `/api/members/{id}/notification-preferences`
+  and `/api/workflows/{id}/clone` — which fall through to the legacy in-memory Express handlers;
+  the notification bell's `/api/notifications` is routed by neither. Those are the last mocked
+  surfaces; see *Frontend integration* below.
+
+---
+
+## Performance — ADR-0021 rule 7 (measured)
+
+Budgets: p95 ≤ **500 ms** for dashboard/list reads, ≤ **2 s** for aggregate reports, at 10⁵
+instances per tenant. Fixture: the `scale` tenant (`seed-demo scale`, 48 entities × 5 obligation
+types × 8 fiscal years → 1,925 workflows, **97,152 instances**) next to the three demo tenants,
+in the compose `postgres:16-alpine`; `seed-demo bench` = 3 warm-ups + 30 sequential timed requests
+per target, client wall-clock on loopback, reference machine Apple M1 Max. A > 25 % p95 regression
+on an unchanged endpoint blocks review. Rerun: `go run ./cmd/seed-demo bench --api
+http://localhost:3000` (add `--no-fail` to capture a table that misses).
+
+| date | api | target | p95 baseline (ms) | p95 after inc 2 (ms) | budget | result |
+|---|---|---|---:|---:|---:|---|
+| 2026-09-08/09 | 4f2aded → cb4df2e | task feed page 1 (dueDate asc, 50/page) | 33.5 | 42.9 | 500 | PASS |
+| | | task feed **page 200** (dueDate asc, offset 9950) | 448.8 (max 508.9) | **67.5** | 500 | PASS |
+| | | task feed page 1 (createdAt asc) | 105.3 | 109.2 | 500 | PASS |
+| | | task feed page 200 (createdAt asc) | 112.2 | 129.3 | 500 | PASS |
+| | | `/reports/task-summary` | — (404, inc 1) | 63.6 | 500 | PASS |
+| | | `/reports/workflow-stats` (1,925 rows) | 99.3 | 75.7 | 500 | PASS |
+| | | compliance heatmap (FY 2026, period view) | 52.5 | 71.4 | 2000 | PASS |
+| | | compliance status page 1 (50/page, exact summary) | **4,159.3** | **220.9** | 2000 | FAIL → PASS |
+| | | entities (search not yet honoured — unfiltered first page) | 3.0 | 2.3 | 500 | PASS |
+| | | a VAT workflow's instances (108, 50/page) | 4.6 | 4.2 | 500 | PASS |
+| | | tax-financial by entity | 61.9 | 112.4 | 2000 | PASS |
+| 2026-09-09 | 3483ca1 (after inc 4+5: feed filters, search, named workflow rows) | task feed page 1 / page 200 (dueDate) | — | 37.9 / 63.6 | 500 | PASS |
+| | | task feed page 1 / page 200 (createdAt) | — | 119.7 / 134.8 | 500 | PASS |
+| | | `/reports/task-summary` | — | 44.2 | 500 | PASS |
+| | | `/reports/workflow-stats` | — | 43.3 | 500 | PASS |
+| | | compliance heatmap (FY 2026) | — | 50.8 | 2000 | PASS |
+| | | compliance status page 1 | — | 174.0 | 2000 | PASS |
+| | | `/entities?search=Mül` (**real search now** — total 1) | — | 2.9 | 500 | PASS |
+| | | a VAT workflow's instances | — | 4.3 | 500 | PASS |
+| | | tax-financial by entity | — | 72.1 | 2000 | PASS |
+
+What moved and why: migration `20260908000022` (tenant-prefixed `(tenant_id, due_date, order_index,
+id)` + the same columns on open rows). The deep task-feed page went from an index scan on the
+tenant-less `(due_date)` that discarded other tenants' rows via the RLS filter to a range scan on the
+tenant's own index; the compliance-status statement, which classifies every instance of the tenant
+against `filing_deadline`/`due_date` inside a CTE, stopped scanning the partition. Measured index
+build at 100,000 rows: **134 ms** for the whole transaction (the lock window). `createdAt` sorts are
+unchanged (no `(tenant_id, created_at, id)` index — within budget, so not added, per the plan).
+Plan text (EXPLAIN ANALYZE, BUFFERS) for the deep page and the summary: `docs/testing/perf-2026-09-09.md`
+in the UI repo. Not measured yet: search (increment 5), the task feed's new filters (increment 4), a
+cell in AWS (the M1 is far faster than db.t4g.small — local PASS is necessary, not sufficient).
+
+## What is missing / remaining
+
+Nothing under this heading is done. Finished work — the whole auth/identity chain, the ADR-0026
+list contracts, the reports, documents and data-template modules — is under *What is built* above.
+
+### 🔴 Holes in code that has already shipped
+Not future increments: gaps in surfaces that are live today. Each was verified in code, and the
+measured figures say so.
+
+- **No rate limiting anywhere, and `POST /auth/mfa/verify` has no attempt counter.**
+  `grep -rniE 'ratelimit|rate.limit|throttle' --include='*.go'` matches only comments in
+  `modules/identity/usecases/login.go`; no middleware, store or route can answer 429. Three
+  consequences, all named in the failed-login write-up above but none of them owned by a task until
+  now. (1) An attacker who knows an address holds it locked out indefinitely by paying a fresh
+  threshold per window, and **spraying** — one guess each across many addresses — touches no budget
+  at all. (2) `MfaVerify` (`modules/identity/usecases/mfa.go:67`) validates the code and, on a wrong
+  one, returns 401 **without charging anything and without invalidating the pending session**, so a
+  six-digit TOTP can be retried without limit by whoever already holds the password; that is an
+  authentication-bypass primitive, not merely a capacity problem. (3) argon2id verification is
+  unmetered at 64 MiB and ~70 ms per call, paid before any account is identified — 200 concurrent
+  logins to a **nonexistent** address peaked at ~5 GiB of heap with every request taking 4.6–5.8 s
+  (measured against the real router), against a task provisioned at 0.5 vCPU / 1 GiB in
+  `infra/lib/api-stack.ts`. Needs per-IP and per-principal counters on `/auth/login`,
+  `/auth/mfa/verify` and `/auth/accept-invite`, plus a bounded semaphore around the verification
+  with a **uniform** shed answer (uniform because a shed response that varies by address is the
+  enumeration oracle again). Days.
+
+- **Scoped grants narrow writes only — every read stays tenant-wide.** All 29 `Ensure*` authorizer
+  call sites are on create / update / delete / submit / approve paths;
+  `modules/entities/usecases/list.go` and `modules/documents/usecases/{read,download}.go` never
+  touch the authorizer, `modules/entities/handlers/list.go` declares only `Capability:
+  authz.EntityRead`, and `modules/entities/repositories/pg/sql.go`'s `Count`/`ListBase` carry no
+  scope predicate. Proven live: signed in as the seeded FR-scoped preparer
+  (`seed/demo/dataset.json`), `/api/entities` returned all five Acme entities, the compliance
+  heatmap covered the German subsidiary, `export-raw` returned 243 whole-group rows, and
+  `/api/documents/{id}/download` streamed a German entity's PDF. ADR-0012's motivating case — a
+  scoped external advisor — is therefore not delivered, and `client/src/pages/settings.tsx` tells
+  the admin, on the screen where grants are issued, that "scoped members only see that entity's
+  data"; that copy is wrong today and should be corrected regardless of when the predicate lands.
+  `entity_closure` was built for exactly this and is still unpopulated (scope resolution does a
+  recursive parent-walk). Weeks: list/get across eight modules plus the reports SQL and the
+  pagination counts.
+
+- **Deleting a workflow or an entity physically destroys approved task instances and their
+  documents.** `modules/workflows/usecases/delete.go` and `modules/entities/usecases/delete.go`
+  issue a hard `DELETE` after only an `Ensure…(…Write)` check — there is no approved-instance guard,
+  unlike the in-place-edit freeze in `modules/taskinstances/usecases/update.go`. The FKs cascade
+  (`20260821000006_task_instances.sql:39`, `20260904000017_documents.sql:43`,
+  `20260821000004_workflows.sql:32`), and `documents` is the only table in 26 migrations carrying a
+  `deleted_at`, which the cascade defeats anyway. Measured inside a rolled-back transaction: one
+  workflow removed 108 task instances, 24 of them approved; one entity removed 4 workflows, 14
+  approved instances, 4 documents and 5 versions. End to end through the proxy, deleting a workflow
+  after approving one of its tasks returned 204, 404'd the approved instance and its uploaded
+  document, and left the blob on disk with no row pointing at it — the cascade reaches the database
+  rows only, never the object store. `manager` holds `WorkflowWrite`, so a single subtree-scoped
+  manager can erase every
+  filing in their subtree while ADR-0012 requires two people to approve one of them, and the only
+  trace is a `*.deleted` envelope with `nil` details. A refuse-if-approved guard on the three delete
+  use cases is days; retrofitting `deleted_at` + purge across the workflow chain is weeks.
+
+- **The audit trail records that something changed, never what — and records no authentication
+  events.** ADR-0008's envelope mandates before/after (non-PII) values and the migration comment
+  (`20260821000012_audit_log.sql:30-32`) restates the rule; in code the `details` argument is `nil`
+  for `entity.created/updated/deleted`, `workflow.*`, `workflow_task.*`, `entity_obligation.*`,
+  `obligation_type.deleted` and `data_template.deleted`, and the richest payload on the core object
+  is `map[string]any{"status": ti.Status}` (`modules/taskinstances/usecases/update.go:84`) — so an
+  edit to `tax_data`, the actual tax figures, is recorded identically to a status nudge. Live, every
+  `*.updated` row carries `{}`. No `*_history` table exists outside document versions, and a `PUT`
+  on an entity obligation replaces `deadline_rule` wholesale, destroying the only copy of the rule
+  that computed a statutory date. The approval chain is the exception and does carry from→to.
+  Separately, `audit.Record` is called **zero** times in
+  `modules/identity/usecases/{login,logout,mfa,session,service_account,token}.go`: login (the
+  handler says so outright), logout, MFA enrolment, session revocation and — the one that matters
+  most — **service-account creation and API-token issuance/revocation** leave no audit record at
+  all, while `member.*` next door writes five. Auth events are a signed-off Phase 2 deferral (the
+  centralized security stream); credential lifecycle is a stream-1 mutation that was simply missed.
+  The hash chain is genuine and well built — it is chaining envelopes with no evidentiary content.
+  Days per module for a diff helper over an explicit non-PII field whitelist; days for the
+  credential-lifecycle events.
+
+- **Nothing ever verifies the hash chain: `VerifyChain` has no route and no command.**
+  `platform/audit/audit.go:167` is called from exactly two places, both tests
+  (`platform/audit/audit_test.go`, `acceptance/modules/audit/audit_test.go:106`) — no endpoint, no
+  `cmd/`, no scheduled check — so a broken chain would be found only by whoever thought to run a
+  test. The quarterly restore drill in `../zentax-ui/docs/ops/environments.md` nevertheless tells
+  the operator to verify the chain "with the API's VerifyChain tooling", a false claim in the one
+  procedure where ledger integrity would ever be questioned. Two further limits: `GET /audit-log`
+  returns `hash` but not `prevHash` (`modules/auditlog/dto/response.go`), so an external verifier
+  cannot recompute independently without the full contiguous page set; and `VerifyChain` hardcodes
+  `seq == i+1`, so it can only verify from seq 1 — the first partition drop under ADR-0020's
+  retention scheme breaks it permanently for that tenant, and there is no anchor table. Days for a
+  verify command/endpoint over a tenant's chain (WORM export to S3 Object Lock stays Phase 2 —
+  see *Platform / infra*).
+
+- **Request URIs, with their search terms, reach the logs in clear text.**
+  `delivery/httpkit/middlewares/request_logger.go:30` logs `r.RequestURI` verbatim on every
+  request, next to `remoteAddress`, and every list endpoint now takes `?search=`;
+  `delivery/httpkit/httperr/handler.go:63` blind-dumps `appErr.Details`. Verified live:
+  `GET /api/members?search=jane.doe%40example.com` came back out of `docker logs` with the address
+  intact. `logger/logger.go` is 137 lines of plain slog with no allowlist and no key scrubbing (its
+  own TODO says so), and container stdout is outside the erasure boundary ADR-0007 draws. ADR-0015's
+  redaction handler and its CI log-scan gate — "a stray `logger.info(user)` fails the build" — are
+  the cheap halves of that ADR and should not wait for OpenTelemetry. Hours for a path/query split
+  plus a redacting handler; hours for the CI scan.
+
+### 🟠 Auth & authorization
+- **Read-side scope** — list/get endpoints stay tenant-wide; narrowing what a *scoped* user can
+  *see* (filtering lists to their subtree) is a later increment. Write scope is done (see *What is
+  built*) and is the SoD-critical half. Scale of the work and the live evidence: the 🔴 bullet above.
+- **Rate limiting** — per-IP and per-principal counters, an `/auth/mfa/verify` attempt counter, a
+  throttle on `POST /auth/accept-invite`, and a bounded semaphore around the argon2 verification.
+  Detail and measurements in the 🔴 bullet above; this is the missing piece for both gaps the
+  failed-login attempt budget explicitly does not close.
+- **Credential recovery does not exist** — no password reset, no password change, no MFA reset and
+  no recovery codes, for the user or for an admin. `PUT /members/{id}` writes name and
+  active/disabled only, `ReissueInvite` 409s unless the member is still `invited`, and `users.email` is
+  globally unique so delete-and-reinvite is impossible: a forgotten password or a lost authenticator
+  is terminal today. The sign-in page meanwhile offers "Forgot your password?" and says resets are
+  handled by an identity provider, and `IdentityBroker` has no implementations. An admin-side reset
+  plus MFA clear is days; the user-facing flow waits on e-mail.
+- **Approval amendment path (rest of ADR-0018)** — an approved record is *frozen* (in-place edits
+  rejected), but the versioned re-approved *amendment* chain (lawfully correcting a filed record)
+  plus the document-version / rule-version snapshots still need rule versioning (ADR-0017). The
+  freeze, the preparer≠approver SoD and the submit/approve/reject actions are **done**. Note the
+  freeze protects edits only — a delete still destroys the record (🔴 above).
+- **MFA is per-user opt-in with no tenant policy** — nothing lets a tenant require it, though
+  ADR-0011 assigns MFA policy enforcement to the app.
+- **WorkOS SSO/SCIM (Phase 2).** `IdentityBroker` seam is stubbed only.
+- Breach-checked passwords (HIBP), Redis session store (Postgres for now). ~~Invite flow~~ — **done
+  (2026-09-04)**; what is left of it is e-mail delivery of the invite link (the token is still
+  returned to the admin), invite-expiry configurability, and read-side scope narrowing of the member
+  directory.
+
+### 🟠 Domain features still to build
+- **Notifications / e-mail / digests — nothing exists.** There is no `modules/notifications`, no
+  mailer, no provider seam and no SMTP/SES client anywhere in the Go tree (ADR-0009's e-mail seam is
+  one of the five that have no interface at all), and nothing to run a reminder *on*: no cron,
+  ticker, scheduler or worker, and `cmd/` is server, seed-admin, seed-demo, credentials.
+  `PUBLIC_BASE_URL` is plumbed and consumed by nothing, so an invite link is still copy-pasted out
+  of the API response by the admin. The consequences are not confined to this repo: the UI's
+  notification bell queries `/api/notifications`, which neither the proxy nor a Go module routes.
+  **Mitigated 2026-09-12:** that path now answers a JSON 404, and the component reads the error and
+  renders "Notifications are not available yet" instead of "You're all caught up" — an affirmative
+  claim of no pending compliance work, in a compliance product, was the worst of it. Settings'
+  reminder button and the per-member preferences button are **disabled** with the same explanation,
+  rather than toasting "Sent N overdue reminders" for deliveries that never happened. A provider seam
+  plus one adapter is days; the reminder/digest engine behind it is weeks, and the scheduler
+  decision (in-process with leader election, or an ECS scheduled task) has to be written down first
+  because the ADR-0007 purge, the WORM export and expired-session reaping all wait on the same
+  absence.
+- ~~**Data Templates** module~~ — **done (2026-09-04, see Domain modules #9)**; the
+  `data_template_id` columns are now composite FKs and tax data is validated server-side.
+- **Approvals — DONE (core, ADR-0018/0012).** `POST /task-instances/{id}/{submit-for-approval,approve,reject}`
+  drive the lifecycle: a preparer (`task:submit`) submits → `pending_approval` (records `submitted_by`); a
+  different reviewer (`task:approve`) approves → `completed` (`approved_by`/`approved_at`/`completed_at`), or
+  rejects → back to `in_progress` with a reason. **Server-enforced SoD** (approver ≠ submitter) + an
+  **immutable lock** (an approved instance rejects in-place edits). Verified live. **Remaining:** the
+  versioned *amendment* chain + snapshotting linked document/rule versions (audit is now built —
+  waits on documents + rule versioning).
+- ~~**Documents / workflow-documents** — versioned, backed by object storage.~~ **Done (2026-09-04,
+  see Domain modules #10 + the storage seam).** Frontend wiring is done too (2026-09-05 — multipart
+  upload and raw download through the proxy, ADR-0022). Remaining: the ADR-0007 purge job for
+  soft-deleted documents, per-tenant envelope encryption at the adapter (ADR-0006), and the fact that
+  a workflow/entity delete cascades past the soft delete and orphans the blobs (🔴 above). The `s3`
+  adapter — the one production uses — also has effectively no executed test coverage: CI exercises
+  only `fs`, the inverse of ADR-0009 §6's gate; it needs a MinIO service in the acceptance job.
+- **Audit log — DONE (stream 1 core, ADR-0008).** `platform/audit` + the `audit_log` table: every
+  domain mutation (20 use-case sites) appends a **PII-free, actor-by-ID envelope** (action,
+  resource, UTC instant, request_id, whitelisted `details` only — status transitions/counts, never
+  free text) **on the same transaction** — the write and its evidence commit or roll back together.
+  **Append-only at the database** (RLS policies exist only for INSERT/SELECT → UPDATE/DELETE affect
+  zero rows even for the app role) + a **per-tenant hash chain** (sha256 over the canonical envelope;
+  per-tenant advisory-lock-serialized `seq`; `VerifyChain` recomputes it). **Actor attribution:**
+  `created_by`/`updated_by` on all domain tables, defaulted/stamped from the `app.user_id` GUC bound
+  at the Tx seam. Verified live incl. tamper attempts + cross-tenant isolation. The read API for the
+  Audit Trail page is **done** (2026-09-03: `GET /audit-log`, `modules/auditlog`, capability
+  `audit:read` — see "Read models" above). **Remaining, and read the 🔴 bullets above before quoting
+  this one to an auditor:** the envelopes carry **no before/after detail** (`details` is `nil` on
+  every domain create/update/delete but the approval chain), **no authentication or credential
+  -lifecycle events** are recorded at all (service-account creation and API-token issuance included —
+  that half is stream-1 work that was missed, not the signed-off Phase 2 security-stream deferral),
+  and **nothing ever runs `VerifyChain`**. Beyond those: WORM export to S3 Object Lock (Phase 2, and
+  Object Lock appears nowhere in either CDK app), and the centralized regional security log store
+  (Phase 2; interim: structured slog, which nothing collects).
+- ~~**Team members / roles**~~ — done 2026-09-04, see *Member administration* under *What is built*.
+- ~~**Reports**~~ — **done.** The enriched task-instance list and per-workflow stats under `/reports`
+  landed 2026-09-03; the **compliance aggregates landed 2026-09-04** —
+  `/reports/compliance-heatmap`, `/reports/compliance-status`, `/reports/tax-financial` and
+  `/reports/export-raw` are SQL-backed, proxied as pure pass-throughs and live on the four reporting
+  pages (this line claimed the opposite until 2026-09-12, ~700 lines after the same file recorded the
+  work). What is left is accuracy, not endpoints: the on-time / late / missed classification rests on
+  `filing_deadline`, which is weekend-adjusted only (see *Deadline engine*), and
+  `/reports/workflow-stats` is still uncapped in the OpenAPI contract.
+
+### 🟠 Deadline engine
+- ~~**Non-standard fiscal patterns** (445 / 454 / 544 / 13-period / weekly / custom) —
+  currently fail-closed.~~ **Done (2026-09-05, ADR-0023)** — every pattern is computed by
+  `shared/deadline` with hand-verified vectors (see Platform / foundation); the frontend's period
+  math is superseded by `GET /entities/{id}/periods`.
+- ~~**Payment / additional deadlines** beyond the filing deadline are not yet computed during
+  generation.~~ **Payment deadline done (2026-09-05)** — `task_instances.payment_deadline` from
+  the entity obligation's `paymentOffset` / `paymentFixedDates` / "same as filing".
+  **Remaining:** `additionalDeadlines` (advance payments etc.) are recorded on the rule but not
+  yet materialized; public holidays (jurisdiction-keyed, ADR-0017 data) on top of the weekend
+  adjustment.
+
+### 🟡 Platform / infra (mostly Phase 2 per the ADRs)
+- ~~Object storage behind a `Storage` interface — S3 / filesystem·MinIO (ADR-0009). None wired.~~
+  **Done (2026-09-04):** `platform/storage` + `fs` / `s3` adapters, wired for documents (see
+  Platform / foundation). Remaining: SSE-KMS / per-tenant envelope keys (ADR-0006), MinIO compose profile.
+- Encryption: KMS envelope + per-tenant keys behind `KeyProvider` (ADR-0006).
+- Observability: OpenTelemetry → Grafana LGTM (ADR-0015; `logger.go` has the TODO). The **PII-redaction
+  handler and the CI log-scan gate** are the cheap halves and are needed now, not with the tracing —
+  request URIs and their `?search=` terms are being logged in clear text today (🔴 above).
+- Secrets injection + backup/DR (ADR-0014) — config validates fail-closed, but Secrets Manager wiring is absent.
+- Supply chain + CI (ADR-0016/0013): **the pipeline exists** — `.github/workflows/ci.yml` has run
+  gofmt, build, vet, unit tests, govulncheck (pinned v1.1.4), acceptance-on-Postgres, image builds,
+  CDK synth and actionlint/shellcheck on every push since 2026-09-05, and `deploy.yml` assumes its
+  role by OIDC with no static keys (this file said "no CI pipeline yet" until 2026-09-12). Still
+  missing from the ADR-0016 controls that were sequenced into Phase 1: SBOM, provenance attestation,
+  image signing, secret scanning, container/dependency scanning and automated update PRs (neither
+  repo has a `dependabot.yml`); the 26 sqitch verify and 26 revert scripts are never executed by CI
+  (ADR-0013); and `deploy.yml` declares no dependency on `ci.yml`, so a push to `main` deploys
+  staging-eu whether or not the checks passed.
+- Retention, purge and legal hold (ADR-0007) have no implementation: nothing in the codebase deletes
+  anything on a schedule, nothing ever detaches or drops a month partition (the whole payoff ADR-0020
+  was written for), and `deleted_at` exists on exactly one of the domain tables. All of it waits on
+  the same missing scheduler as the reminders, above.
+- Feature flags / entitlements (ADR-0010); region/residency cells + control-plane (ADR-0005).
+
+### 🟡 Frontend integration
+- The OpenAPI contract and the wiring are **done** — see *API contract & frontend
+  wiring* under *What is built*. What is left of them: the `data` payloads in the
+  response envelopes stay untyped until per-module response DTOs land with the
+  client-generation pass, and two surfaces are still served by the legacy in-memory
+  Express handlers — `/api/members/{id}/notification-preferences` (waits on the
+  notifications module) and `/api/workflows/{id}/clone`, whose button in the shipped
+  UI therefore 404s against real data. `/api/notifications` is routed by nobody at
+  all. **Fixed 2026-09-12:** an unmatched `/api/*` path now answers a JSON 404
+  (`{"message":"route not found","code":"NOT_FOUND"}`, matching the Go API's own envelope,
+  case- and slash-normalised) instead of the `200 text/html` SPA shell that made an
+  unimplemented endpoint indistinguishable from a working one.
 - **`zentax-mcp` sidecar — DEFERRED (logged 2026-08-23).** Both readiness blockers are closed
   (machine identity + audit) and the spec now carries `x-required-capability` for tool generation,
   so the sidecar is buildable when picked up — see
   `../zentax-ui/docs/assessments/agentic-ai-mcp-readiness.md` for the design (thin stateless
   translator, tools from the route registry, approval never exposed as a tool).
-- **Strip `server/` from `zentax-ui`** — deferred until the Go API + client replace the Express dev server.
+- **Strip `server/` from `zentax-ui`** — **the exposure is closed (2026-09-12); the strip itself
+  remains.** The legacy Express/MemStorage prototype used to be mounted unconditionally, so its
+  unauthenticated handlers shipped inside the production web image: with no credentials at all,
+  `GET /api/team-members` and `GET /api/permissions/roles` answered 200 and `POST`/`DELETE
+  /api/team-members` answered 201/200, into a process-global map shared across tenants.
+  `server/index.ts` now mounts `registerRoutes` **only when `NODE_ENV === "development"`**
+  (`legacyRoutesEnabled`, asserted by `server/index.test.ts` in both modes), so the shipped image
+  carries none of that surface. What remains is deleting `server/routes.ts`, `server/storage.ts`
+  and `server/notifications.ts` outright, once the two surfaces below have Go modules.
 
 ---
 
@@ -1166,7 +1416,9 @@ First real end-to-end run on **Postgres 14** (local Homebrew cluster, connecting
   `GRANT SELECT,INSERT,UPDATE,DELETE,TRUNCATE ON ALL TABLES IN SCHEMA public TO zentax_app`.
 - Point the app/tests at the app role via `DATABASE_URL` / `TEST_DATABASE_URL =
   postgres://zentax_app:...@host/zentax?sslmode=disable` (`DATABASE_URL` overrides config).
-- Build with gvm Go 1.27: `export GOROOT="$HOME/.gvm/gos/go1.27"; export PATH="$GOROOT/bin:$PATH"`.
+- Build and test with the **Gate** block at the top of this file — the gvm Go 1.27 exports plus the
+  `grep -v /infra/` package list, which is what makes `go build` work in a checkout that has run the
+  CDK's `npm ci`.
 
 ## ⚠️ Standing schema directive (ADR-0020, 2026-08-23)
 **Partition new tables by default** — HASH(tenant_id) for tenant-scoped OLTP (the composite
@@ -1188,4 +1440,7 @@ and pointer-only SET NULL verified live via psql.
 
 ## Minor tech debt
 - Generation loops `Create` (N inserts) — could batch.
-- `strip server/` and the audit-actor columns both wait on later work (auth).
+- The audit-actor columns landed with the audit module; only `strip server/` is still outstanding,
+  and it is no longer minor — see *Frontend integration*.
+- `search` shipped as an unanchored `ILIKE` with no `pg_trgm` index, against ADR-0021's own rule 3.
+  Within budget on the scale fixture today (2.9 ms p95); revisit before a cell's lists grow.

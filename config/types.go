@@ -92,20 +92,43 @@ func (s StorageConfig) validate() error {
 	return nil
 }
 
+// Environment returns the parsed environment — the tier that decides validation
+// plus the cell label — derived from app.env, which Load pins to APP_ENV. A
+// value that is not a known environment yields the zero Environment (no tier),
+// which IsDeployed treats as deployed: unknown fails closed.
+func (c *Config) Environment() Environment {
+	env, err := ParseEnvironment(c.App.Env)
+	if err != nil {
+		return Environment{}
+	}
+	return env
+}
+
+// Tier is the environment's security class — staging for both "staging" and the
+// cell "staging-eu". Everything that must behave differently per environment
+// keys off this, never off the environment name.
+func (c *Config) Tier() Tier {
+	return c.Environment().Tier
+}
+
 func (c *Config) IsDevelopment() bool {
-	return c.App.Env == "development"
+	return c.Tier() == TierDevelopment
 }
 
-// IsDeployed reports whether this is a deployed environment (staging or
-// production) — the environments the fail-closed rules of ADR-0014 apply to.
+// IsDeployed reports whether this environment's tier is one the fail-closed
+// rules of ADR-0014 apply to — every tier but development, including every cell
+// of one (staging-eu, production-eu) and any environment name that does not
+// parse at all.
 func (c *Config) IsDeployed() bool {
-	return c.App.Env == EnvStaging || c.App.Env == EnvProduction
+	return c.Tier().IsDeployed()
 }
 
+// The tier names, as plain strings, for callers that work in strings (config
+// file names, JSON, tests). They track the Tier constants by construction.
 const (
-	EnvDevelopment = "development"
-	EnvStaging     = "staging"
-	EnvProduction  = "production"
+	EnvDevelopment = string(TierDevelopment)
+	EnvStaging     = string(TierStaging)
+	EnvProduction  = string(TierProduction)
 )
 
 type AppConfig struct {

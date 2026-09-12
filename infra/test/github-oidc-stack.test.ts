@@ -5,7 +5,9 @@ import {
 } from '../lib/github-oidc-stack';
 import { addGithubOidc } from '../lib/zentax-app';
 import { OIDC_EXPORT_NAMES } from './contract';
-import { cdkJsonContext, exportNamesOf, otherEnv, resourcesOfType, synthOidc, TestEnv, TITLE_OF } from './helpers';
+import {
+  cdkJsonContext, ENVS, exportNamesOf, otherEnv, resourcesOfType, synthDns, synthEnv, synthOidc, TestEnv, TITLE_OF,
+} from './helpers';
 
 const ROLES = [
   ['staging-eu', 'api'], ['staging-eu', 'web'], ['production-eu', 'api'], ['production-eu', 'web'],
@@ -231,9 +233,13 @@ describe('ZenTax-GithubOidc', () => {
       expect(actionsOf(route53).sort()).toEqual(['route53:ChangeResourceRecordSets', 'route53:GetHostedZone', 'route53:ListResourceRecordSets']);
       for (const r of resourcesOf(route53)) expect(JSON.stringify(r)).toMatch(/:route53:::hostedzone\/\*"/);
       expect(text).toContain('route53:GetChange');
-      // ACM lives in the second policy (this one is at the size cap); hosted-zone creation in neither.
+      // This policy is at the size cap, so everything added since it got there
+      // lives in the second one, which the bootstrap always takes alongside it:
+      // ACM, and hosted-zone create/delete for the Cloud Map private DNS
+      // namespace. Route 53 is split by kind — records here, zones there.
       expect(text).not.toContain('acm:');
       expect(text).not.toContain('route53:CreateHostedZone');
+      expect(text).not.toContain('route53:DeleteHostedZone');
       // The Web stack replicates zentax/<cell>/origin-verify to us-east-1 (the
       // Edge stack's CloudFront origin resolves it by name there). The grant is
       // secretsmanager:* on the zentax/* secrets in EVERY region, so
@@ -301,15 +307,19 @@ describe('ZenTax-GithubOidc', () => {
     });
   });
 
-  describe(`${CFN_EXECUTION_POLICY_EDGE_NAME} (second execution policy: ACM for the UI app's Edge stack)`, () => {
+  describe(`${CFN_EXECUTION_POLICY_EDGE_NAME} (second execution policy: what the first one has no room for)`, () => {
     const [, policy] = resourcesOfType(template, 'AWS::IAM::ManagedPolicy').find(
       ([, r]) => r.Properties.ManagedPolicyName === CFN_EXECUTION_POLICY_EDGE_NAME,
     )!;
     const statements = policy.Properties.PolicyDocument.Statement as any[];
+    const sidOf = (name: string) => statements.find((s) => s.Sid === name)!;
 
     test('grants exactly the six ACM certificate actions on "*" (certificate ARNs are generated), nothing else', () => {
-      expect(statements).toHaveLength(1);
-      const [acm] = statements;
+      // Three statements, no more: ACM plus the two Cloud Map zone ones below.
+      expect(statements.map((s) => s.Sid)).toEqual([
+        'AcmCertificates', 'CloudMapPrivateDnsNamespace', 'CloudMapPrivateDnsNamespaceDelete',
+      ]);
+      const acm = sidOf('AcmCertificates');
       expect(acm.Effect).toBe('Allow');
       expect(acm.Resource).toBe('*');
       expect(actionsOf(acm).sort()).toEqual([
@@ -319,8 +329,65 @@ describe('ZenTax-GithubOidc', () => {
       const text = JSON.stringify(policy);
       expect(text).not.toMatch(/acm:(Import|Export|Renew|Resend|Update|Put|\*)/);
       expect(text).not.toContain('iam:');
-      expect(text).not.toContain('route53:');
-      expect(text).not.toContain('CreateHostedZone');
+    });
+
+    /**
+     * This replaces the older assertion that hosted-zone creation was absent
+     * from both policies. The rule it encoded — ADR-0025 decision 8, "the
+     * pipeline may issue certificates but never create zones" — was aimed at
+     * public zones, but route53:CreateHostedZone takes no resource and has no
+     * condition keys, so the same denial also blocked the *private* zone that
+     * every cell's Cloud Map namespace is, which would have failed the very
+     * first Cluster deploy with AccessDenied.
+     *
+     * The rule now: zone creation is granted, and it is granted here rather
+     * than in the first policy only because that one is at the 6144-character
+     * cap — both reach the same bootstrap execution role, so the split is a
+     * budget, not a boundary. What keeps the public DNS safe is not IAM: the
+     * public zone (ZenTax-Dns, the one Squarespace delegates to) is
+     * admin-deployed, never created or replaced by a pipeline, and the zone
+     * actions here are only the three Cloud Map needs.
+     */
+    test('carries hosted-zone create/delete because a Cloud Map private DNS namespace IS a Route 53 private zone', () => {
+      // The need: every cell's Cluster stack creates exactly one namespace,
+      // and it is load-bearing (api.zentax-<cell>.local is the web tier's
+      // GO_API_URL — the API tier has no load balancer).
+      for (const env of ENVS) synthEnv(env).cluster.resourceCountIs('AWS::ServiceDiscovery::PrivateDnsNamespace', 1);
+
+      // servicediscovery:CreatePrivateDnsNamespace calls these with the
+      // execution role's credentials; neither action takes a resource.
+      const create = sidOf('CloudMapPrivateDnsNamespace');
+      expect(create.Effect).toBe('Allow');
+      expect(actionsOf(create).sort()).toEqual(['route53:CreateHostedZone', 'route53:ListHostedZonesByName']);
+      expect(create.Resource).toBe('*');
+      // Deletion does take one (rollback of a failed create, and cdk destroy);
+      // zone ids are generated, so hostedzone/* is as narrow as it gets.
+      const del = sidOf('CloudMapPrivateDnsNamespaceDelete');
+      expect(actionsOf(del)).toEqual(['route53:DeleteHostedZone']);
+      for (const r of resourcesOf(del)) expect(JSON.stringify(r)).toMatch(/:route53:::hostedzone\/\*"/);
+
+      // Exactly those three zone actions, nothing else from the Route 53 or
+      // registrar surface: no delegation-set, DNSSEC, health-check, traffic
+      // policy or domain-registration power, and no route53:*.
+      const route53 = statements.flatMap(actionsOf).filter((a: string) => a.startsWith('route53:'));
+      expect(route53.sort()).toEqual([
+        'route53:CreateHostedZone', 'route53:DeleteHostedZone', 'route53:ListHostedZonesByName',
+      ]);
+      const text = JSON.stringify(policy);
+      expect(text).not.toContain('route53:*');
+      expect(text).not.toMatch(/route53:\w*(DelegationSet|KeySigningKey|HealthCheck|TrafficPolicy|VPCAssociationAuthorization)/);
+      expect(text).not.toContain('route53domains:');
+      // Record writes stay in the first policy (asserted there, on hostedzone/*).
+      expect(text).not.toContain('route53:ChangeResourceRecordSets');
+    });
+
+    test('the compensating control holds: the public zone (ZenTax-Dns) is admin-deployed, not pipeline-deployed', () => {
+      // No BootstrapVersion parameter / rule == CliCredentialsStackSynthesizer,
+      // i.e. ZenTax-Dns never runs through the execution role these policies
+      // scope, so nothing the pipeline is now allowed to create can replace it.
+      const dns = synthDns().template.toJSON();
+      expect(dns.Parameters?.BootstrapVersion).toBeUndefined();
+      expect(dns.Rules?.CheckBootstrapVersion).toBeUndefined();
     });
 
     test('fits the 6144 non-whitespace character limit and is exported for the bootstrap command', () => {

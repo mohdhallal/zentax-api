@@ -7,9 +7,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// validBase is a development config: the one tier whose validation is limited
+// to the always-on rules, so these tests exercise storage alone. (An
+// unrecognised app.env would now be refused outright — see environment_test.go.)
 func validBase() *Config {
 	return &Config{
-		App:      AppConfig{Env: "testing", Port: 3000},
+		App:      AppConfig{Env: EnvDevelopment, Port: 3000},
 		Database: DatabaseConfig{URL: "postgres://x"},
 	}
 }

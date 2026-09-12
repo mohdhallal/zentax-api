@@ -164,20 +164,23 @@ func TestShippedDevelopmentConfig_PublicBaseURLIsLocalhost(t *testing.T) {
 
 // --- end to end through Load() --------------------------------------------------
 
-func writeTestingConfig(t *testing.T, payload map[string]any) {
+// writeLoadableConfig puts a development fixture where Load() will find it: a
+// temp cwd holding deployment/config_files/development.json, with APP_ENV set to
+// match. (APP_ENV must name a real tier or cell — see environment_test.go.)
+func writeLoadableConfig(t *testing.T, payload map[string]any) {
 	t.Helper()
 	root := t.TempDir()
 	cfgDir := filepath.Join(root, "deployment", "config_files")
 	require.NoError(t, os.MkdirAll(cfgDir, 0o755))
 	b, err := json.Marshal(payload)
 	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(filepath.Join(cfgDir, "testing.json"), b, 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(cfgDir, EnvDevelopment+".json"), b, 0o600))
 
 	orig, _ := os.Getwd()
 	require.NoError(t, os.Chdir(root))
 	t.Cleanup(func() { _ = os.Chdir(orig) })
 
-	t.Setenv(EnvVarName, "testing")
+	t.Setenv(EnvVarName, EnvDevelopment)
 
 	prevCfg := cfg
 	cfg = nil
@@ -186,8 +189,8 @@ func writeTestingConfig(t *testing.T, payload map[string]any) {
 
 func TestLoad_PublicBaseURL_EnvOverrideApplied(t *testing.T) {
 	// Mutates cwd and package-level cfg — not parallel.
-	writeTestingConfig(t, map[string]any{
-		"app":      map[string]any{"env": "testing", "port": 3000, "publicBaseUrl": "http://localhost:5000"},
+	writeLoadableConfig(t, map[string]any{
+		"app":      map[string]any{"env": EnvDevelopment, "port": 3000, "publicBaseUrl": "http://localhost:5000"},
 		"database": map[string]any{"url": "postgres://localhost/test"},
 	})
 	t.Setenv(EnvPublicBaseURL, "https://eu.staging.zentax.software/")
@@ -198,8 +201,8 @@ func TestLoad_PublicBaseURL_EnvOverrideApplied(t *testing.T) {
 }
 
 func TestLoad_PublicBaseURL_InvalidEnvFailsStartup(t *testing.T) {
-	writeTestingConfig(t, map[string]any{
-		"app":      map[string]any{"env": "testing", "port": 3000},
+	writeLoadableConfig(t, map[string]any{
+		"app":      map[string]any{"env": EnvDevelopment, "port": 3000},
 		"database": map[string]any{"url": "postgres://localhost/test"},
 	})
 	t.Setenv(EnvPublicBaseURL, "eu.staging.zentax.software")

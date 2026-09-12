@@ -17,6 +17,10 @@ import (
 )
 
 const (
+	// EnvVarName carries the environment: a tier (development, staging,
+	// production) or a cell of one (staging-eu, production-eu — the SaaS
+	// deployment passes the cell name, ADR-0024/ADR-0025). ParseEnvironment
+	// splits it; the tier half chooses the config file and every rule.
 	EnvVarName     = "APP_ENV"
 	EnvDatabaseURL = "DATABASE_URL"
 
@@ -58,8 +62,12 @@ const (
 	EnvStorageS3Endpoint       = "STORAGE_S3_ENDPOINT"
 	EnvStorageS3ForcePathStyle = "STORAGE_S3_FORCE_PATH_STYLE"
 
-	DefaultEnv = "development"
+	// DefaultEnv is what an UNSET APP_ENV means (local `go run ./cmd/server`).
+	// An APP_ENV that is set but empty is an error, not this default.
+	DefaultEnv = EnvDevelopment
 
+	// configDir holds one file per tier. A cell (staging-eu) loads its tier's
+	// file unless the image also ships one named for the cell — configFilePath.
 	configDir = "deployment/config_files"
 )
 
@@ -72,20 +80,30 @@ const DevelopmentEncryptionKey = "emVudGF4LWRldi1lbmNyeXB0aW9uLWtleS0zMmJ5dGU="
 
 var cfg *Config
 
-// Load reads deployment/config_files/{APP_ENV}.json, applies env overrides, and
+// Load reads the config file APP_ENV resolves to, applies env overrides, and
 // fail-closes (ADR-0014): a missing security-critical value is a startup error,
-// never a silent default.
+// never a silent default. APP_ENV names a tier (development, staging,
+// production) or a cell of one (staging-eu); anything else is refused here
+// rather than booting with the wrong rules — see ParseEnvironment.
 func Load() (*Config, error) {
-	conf := &Config{}
-	conf.EnvName = getEnvVal(EnvVarName, DefaultEnv)
+	env, err := ParseEnvironment(getEnvVal(EnvVarName, DefaultEnv))
+	if err != nil {
+		return nil, err
+	}
 
-	path := filepath.Join(configDir, conf.EnvName+".json")
+	conf := &Config{}
+	conf.EnvName = env.Name
+
+	path := configFilePath(env)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config file %s: %w", path, err)
 	}
 	if err := json.Unmarshal(data, conf); err != nil {
 		return nil, fmt.Errorf("parse config file %s: %w", path, err)
+	}
+	if err := applyEnvironment(conf, env); err != nil {
+		return nil, fmt.Errorf("invalid config (%s, from %s): %w", env.Name, path, err)
 	}
 
 	mergeEnvOverrides(conf)
@@ -98,8 +116,56 @@ func Load() (*Config, error) {
 	return conf, nil
 }
 
+// configFilePath resolves which file an environment loads: the cell's own
+// (deployment/config_files/staging-eu.json) when the image ships one, otherwise
+// its tier's (staging.json).
+//
+// The tier file is the normal case and the only one shipped today: cells of a
+// tier differ solely in values the deployment injects as environment variables
+// (DB_*, AUTH_ENCRYPTION_KEY, CORS_ALLOWED_ORIGINS, PUBLIC_BASE_URL, STORAGE_*),
+// so a new cell needs no new file. A per-cell file is an override, never a way
+// to change the tier — applyEnvironment refuses that.
+func configFilePath(env Environment) string {
+	if env.IsCell() {
+		cellPath := filepath.Join(configDir, env.Name+".json")
+		if _, err := os.Stat(cellPath); err == nil {
+			return cellPath
+		}
+	}
+	return filepath.Join(configDir, env.Tier.String()+".json")
+}
+
+// applyEnvironment reconciles the file's app.env with APP_ENV and then pins
+// app.env to the environment the deployment declared, so every later decision
+// (and every error message) names the real environment — staging-eu, not the
+// staging.json it was loaded from.
+//
+// The file may name its tier ("staging" in staging.json), its own cell, or
+// nothing at all, but it may never move the environment to another tier: a
+// hand-written staging-eu.json saying "env": "development" is exactly how every
+// fail-closed rule would get silently switched off in a real cell.
+func applyEnvironment(conf *Config, env Environment) error {
+	declared := strings.TrimSpace(conf.App.Env)
+	if declared != "" {
+		fileEnv, err := ParseEnvironment(declared)
+		if err != nil {
+			return fmt.Errorf("app.env is %q, which is not a known environment; leave it out or set it to %q (%s=%q)",
+				declared, env.Name, EnvVarName, env.Name)
+		}
+		if fileEnv.Tier != env.Tier {
+			return fmt.Errorf("app.env is %q (the %s tier) but %s=%q is the %s tier — the tier decides every fail-closed rule (ADR-0014) and the config file must not change it",
+				declared, fileEnv.Tier, EnvVarName, env.Name, env.Tier)
+		}
+	}
+	conf.App.Env = env.Name
+	return nil
+}
+
 // validate fails closed on missing security-critical configuration (ADR-0014).
 func (c *Config) validate() error {
+	if !c.Tier().Known() {
+		return fmt.Errorf("app.env is %q, which is not a known environment: %s", c.App.Env, environmentHint())
+	}
 	if c.Database.URL == "" {
 		return fmt.Errorf("database.url is required (set %s, or %s + %s + %s + %s)",
 			EnvDatabaseURL, EnvDBHost, EnvDBName, EnvDBUser, EnvDBPassword)
@@ -123,9 +189,12 @@ func (c *Config) validate() error {
 	return nil
 }
 
-// validateDeployed holds the staging / production fail-closed rules (ADR-0014).
-// Every violation is reported at once — one boot failure lists everything the
-// operator still has to set — and each message names the env var to set.
+// validateDeployed holds the fail-closed rules of every deployed tier
+// (ADR-0014) — staging and production, and each of their cells (staging-eu,
+// production-eu), which reach this the same way because the tier decides, not
+// the name. Every violation is reported at once — one boot failure lists
+// everything the operator still has to set — and each message names the env var
+// to set.
 func (c *Config) validateDeployed() error {
 	var errs []error
 

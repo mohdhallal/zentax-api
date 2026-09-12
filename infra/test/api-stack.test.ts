@@ -1,6 +1,6 @@
 import { Match } from 'aws-cdk-lib/assertions';
 import { API_EXPORTS, exportName } from '../lib/exports';
-import { ENVS, exportNamesOf, PUBLIC_HOSTNAME_OF, resourcesOfType, synthEnv, synthEnvWith, taskDefinition } from './helpers';
+import { ENVS, exportNamesOf, PUBLIC_HOSTNAME_OF, resourcesOfType, synthEnv, synthEnvWith, taskDefinition, TIER_OF } from './helpers';
 
 const expected = {
   'staging-eu': { desired: 1 },
@@ -36,7 +36,13 @@ describe.each(ENVS)('ZenTax-%s-Api', (env) => {
     expect(envNames).not.toContain('DB_PASSWORD');
     expect(envNames).not.toContain('AUTH_ENCRYPTION_KEY');
     const byName = Object.fromEntries(container.Environment.map((e: any) => [e.Name, e.Value]));
+    // APP_ENV is the CELL name (every other deployed name follows it). The Go
+    // loader splits it into <tier>-<regionLabel>, loads that tier's
+    // deployment/config_files/<tier>.json and applies the tier's fail-closed
+    // rules — so the cell needs no config file of its own, and staging-eu is
+    // validated exactly as staging is (config/environment.go).
     expect(byName.APP_ENV).toBe(env);
+    expect(byName.APP_ENV.split('-')[0]).toBe(TIER_OF[env]);
     expect(byName.DB_SSLMODE).toBe('require');
     expect(byName.DB_USER).toBe('zentax_app');
     expect(byName.DB_NAME).toBe('zentax');

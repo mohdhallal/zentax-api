@@ -1,6 +1,8 @@
+import { existsSync } from 'node:fs';
+import * as path from 'node:path';
 import { Match } from 'aws-cdk-lib/assertions';
 import { CLUSTER_EXPORTS, exportName } from '../lib/exports';
-import { ENVS, exportNamesOf, resourcesOfType, synthEnv, taskDefinition } from './helpers';
+import { ENVS, exportNamesOf, resourcesOfType, synthEnv, taskDefinition, TIER_OF } from './helpers';
 
 describe.each(ENVS)('ZenTax-%s-Cluster', (env) => {
   const { cluster } = synthEnv(env);
@@ -45,7 +47,10 @@ describe.each(ENVS)('ZenTax-%s-Cluster', (env) => {
     );
     const byName = Object.fromEntries(seed.Environment.map((e: any) => [e.Name, e.Value]));
     expect(byName.CORS_ALLOWED_ORIGINS).toBe('https://seed.invalid');
+    // The cell name, which the Go loader resolves to its tier's config profile
+    // (see the APP_ENV contract test below).
     expect(byName.APP_ENV).toBe(env);
+    expect(byName.APP_ENV.split('-')[0]).toBe(TIER_OF[env]);
     // The seed CLI builds no links: PUBLIC_BASE_URL is the api service's alone.
     expect(envNames).not.toContain('PUBLIC_BASE_URL');
     expect(byName.STORAGE_DRIVER).toBe('s3');
@@ -89,5 +94,34 @@ describe.each(ENVS)('ZenTax-%s-Cluster', (env) => {
   test('no literal secret values in the template', () => {
     const text = JSON.stringify(cluster.toJSON());
     expect(text).not.toMatch(/"(DB_PASSWORD|AUTH_ENCRYPTION_KEY|PGPASSWORD|APP_DB_PASSWORD|SEED_ADMIN_PASSWORD)"\s*,\s*"Value"/);
+  });
+});
+
+/**
+ * The APP_ENV contract, the half of it that lives outside CloudFormation.
+ *
+ * Both containers that run the Go binary (api, seed) get APP_ENV=<cell>. The
+ * loader (config/environment.go) splits that into <tier>-<regionLabel>, reads
+ * deployment/config_files/<tier>.json — the cell's own file only if the image
+ * ships one — and applies the tier's ADR-0014 fail-closed rules. A cell whose
+ * tier has no shipped profile would exit 1 on boot and crash-loop the service,
+ * so assert the profile exists rather than waiting for the deploy waiter.
+ */
+describe('APP_ENV resolves to a shipped Go config profile', () => {
+  const configFiles = path.join(__dirname, '..', '..', 'deployment', 'config_files');
+
+  test.each(ENVS)('%s is <tier>-<regionLabel> and its tier ships a config file', (env) => {
+    const [tier, ...rest] = env.split('-');
+    expect(tier).toBe(TIER_OF[env]);
+    expect(rest.join('-')).toMatch(/^[a-z0-9]+(-[a-z0-9]+)*$/);
+    expect(existsSync(path.join(configFiles, `${tier}.json`))).toBe(true);
+  });
+
+  test('no per-cell config file is required (the tier file is the one that ships)', () => {
+    for (const env of ENVS) {
+      // Shipping one is allowed — it overrides the tier's values, never the
+      // tier — but nothing in the deploy depends on it existing.
+      expect(existsSync(path.join(configFiles, `${TIER_OF[env]}.json`))).toBe(true);
+    }
   });
 });

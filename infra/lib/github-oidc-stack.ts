@@ -11,10 +11,13 @@ export interface GithubOidcStackProps extends cdk.StackProps {
 export const GITHUB_OIDC_HOST = 'token.actions.githubusercontent.com';
 export const CFN_EXECUTION_POLICY_NAME = 'ZenTaxCfnExecutionPolicy';
 /**
- * The second execution policy: what only the UI app's Edge stack needs (ACM,
- * for the custom-domain certificate). It is a separate managed policy because
- * the first one sits at the 6144-character cap; both go to
- * `cdk bootstrap --cloudformation-execution-policies`, comma-separated.
+ * The second execution policy: what the first one has no room for. Two things
+ * live here — ACM for the UI app's Edge stack (the custom-domain certificate),
+ * and the Route 53 zone calls behind every cell's Cloud Map private DNS
+ * namespace (see makeCfnExecutionPolicyEdge). It is a separate managed policy
+ * because the first one sits at the 6144-character cap; both go to
+ * `cdk bootstrap --cloudformation-execution-policies`, comma-separated, and
+ * neither is optional — a cell cannot be deployed without this one.
  */
 export const CFN_EXECUTION_POLICY_EDGE_NAME = 'ZenTaxCfnExecutionPolicyEdge';
 /**
@@ -267,8 +270,11 @@ export class GithubOidcStack extends cdk.Stack {
    *
    * Managed policies are capped at 6144 non-whitespace characters, which is
    * why the statements carry no Sids and EC2 uses action patterns (the test
-   * suite checks the size) — and why what the Edge stack's custom domain
-   * additionally needs lives in a second policy (makeCfnExecutionPolicyEdge).
+   * suite checks the size) — and why the two things added since it reached the
+   * cap live in a second policy (makeCfnExecutionPolicyEdge): ACM for the Edge
+   * stack's custom domain, and hosted-zone create/delete for the Cloud Map
+   * private DNS namespace. Route 53 is therefore split across both policies —
+   * records here, zones there.
    */
   private makeCfnExecutionPolicy(): iam.ManagedPolicy {
     const p = this.partition;
@@ -350,6 +356,8 @@ export class GithubOidcStack extends cdk.Stack {
           `arn:${p}:ssm:*:${a}:parameter/cdk/exports/*`,
           `arn:${p}:ssm:*:${a}:parameter/zentax/*`,
         ]),
+        // Records only; zone create/delete is in the second policy (the Cloud
+        // Map private DNS namespace needs it, and there is no room left here).
         s(['route53:ChangeResourceRecordSets', 'route53:GetHostedZone', 'route53:ListResourceRecordSets'], [
           `arn:${p}:route53:::hostedzone/*`,
         ]),
@@ -382,18 +390,43 @@ export class GithubOidcStack extends cdk.Stack {
   }
 
   /**
-   * What CloudFormation additionally needs for the UI app's Edge stack once a
-   * custom domain is on: the ACM certificate it creates in-stack (DNS
-   * validation into the ZenTax-Dns hosted zone — the Route 53 record calls are
-   * already in the first policy, on `hostedzone/*`). Certificate ARNs are
-   * generated, so the resource is `*`; the action list is explicit — no
-   * import/export/renew. Hosted-zone CREATION is deliberately absent from
-   * both policies: ZenTax-Dns is admin-deployed.
+   * The overflow policy — everything the first one has no character budget for.
+   *
+   * 1. ACM, for the UI app's Edge stack once a custom domain is on: the
+   *    certificate it creates in-stack (DNS validation into the ZenTax-Dns
+   *    hosted zone — the Route 53 *record* calls are in the first policy, on
+   *    `hostedzone/*`). Certificate ARNs are generated, so the resource is `*`;
+   *    the action list is explicit — no import/export/renew.
+   *
+   * 2. Route 53 hosted-zone creation and deletion, because a Cloud Map private
+   *    DNS namespace IS a private hosted zone. Every cell's Cluster stack
+   *    creates one (`defaultCloudMapNamespace`, type DNS_PRIVATE — it is what
+   *    resolves `api.zentax-<cell>.local`, the web tier's GO_API_URL), and
+   *    `servicediscovery:CreatePrivateDnsNamespace` makes the zone with the
+   *    caller's credentials: it needs route53:CreateHostedZone +
+   *    ListHostedZonesByName + GetHostedZone (the last already granted on
+   *    `hostedzone/*`), and ec2:DescribeVpcs / DescribeRegions, which the first
+   *    policy's `ec2:Describe*` covers. DeleteNamespace — a rollback of a
+   *    failed create, or `cdk destroy` — needs route53:DeleteHostedZone; without
+   *    it a half-created cell cannot be rolled back without admin credentials.
+   *
+   * The cost of (2), stated plainly: CreateHostedZone takes no resource and has
+   * no condition keys, so a pipeline-deployed template can now also create a
+   * PUBLIC zone, which ADR-0025 decision 8 said the pipeline never would. That
+   * rule is unenforceable in IAM while the pipeline owns the Cluster stack, and
+   * it was never the load-bearing one: the first policy already grants
+   * route53:ChangeResourceRecordSets on `hostedzone/*`, i.e. the power to
+   * repoint the real zone's records, which is strictly worse than adding an
+   * unreferenced new zone (a zone nobody delegates to resolves for nobody).
+   * What still holds is the part that matters: ZenTax-Dns — the public zone for
+   * zentax.software, and the NS records Squarespace delegates to — is
+   * admin-deployed (CliCredentialsStackSynthesizer, lib/zentax-app.ts), never
+   * created or owned by a pipeline. Separate accounts per cell close the rest.
    */
   private makeCfnExecutionPolicyEdge(): iam.ManagedPolicy {
     return new iam.ManagedPolicy(this, 'CfnExecutionPolicyEdge', {
       managedPolicyName: CFN_EXECUTION_POLICY_EDGE_NAME,
-      description: 'ZenTax: second CloudFormation execution policy for the CDK bootstrap — ACM for the UI app\'s Edge stack (custom-domain certificate)',
+      description: 'ZenTax: second CloudFormation execution policy for the CDK bootstrap — what the first one has no room for: ACM for the UI app\'s Edge stack (custom-domain certificate) and the Route 53 zone calls behind each cell\'s Cloud Map private DNS namespace',
       statements: [
         new iam.PolicyStatement({
           sid: 'AcmCertificates',
@@ -402,6 +435,21 @@ export class GithubOidcStack extends cdk.Stack {
             'acm:AddTagsToCertificate', 'acm:RemoveTagsFromCertificate', 'acm:ListTagsForCertificate',
           ],
           resources: ['*'],
+        }),
+        // Neither action takes a resource (CreateHostedZone has none;
+        // ListHostedZonesByName is a list call), hence `*`.
+        new iam.PolicyStatement({
+          sid: 'CloudMapPrivateDnsNamespace',
+          actions: ['route53:CreateHostedZone', 'route53:ListHostedZonesByName'],
+          resources: ['*'],
+        }),
+        // Deletion does take one, so it stays on the hosted-zone ARN shape the
+        // first policy uses. Zone ids are generated, so `*` is as narrow as it
+        // gets; a zone that still holds records cannot be deleted anyway.
+        new iam.PolicyStatement({
+          sid: 'CloudMapPrivateDnsNamespaceDelete',
+          actions: ['route53:DeleteHostedZone'],
+          resources: [`arn:${this.partition}:route53:::hostedzone/*`],
         }),
       ],
     });
