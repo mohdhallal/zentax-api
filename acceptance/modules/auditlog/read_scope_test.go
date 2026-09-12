@@ -108,6 +108,31 @@ func (s *AuditLogSuite) TestTrailNarrowsToTheReadScopeAndKeepsEntriesWithNoEntit
 		}
 	}
 
+	// ---- The chain SEQUENCE is withheld from a narrowed reader. It counts the
+	// whole tenant's ledger and has no gaps, so the distance between two of this
+	// reader's own rows would count the entries it was refused — exactly, and
+	// with ?from= / ?to= it would date them. The same leak as a non-narrowed
+	// total, which the page above already closes.
+	//
+	// Withheld rather than renumbered per reader: a 1..n of its own would look
+	// like a chain position and would not be one, and an auditor citing it would
+	// cite an ordering that matches nothing in the ledger. Chain verification
+	// (ADR-0008) walks consecutive entries and is therefore an unbounded
+	// reader's job; this reader loses the labels, not the ordering — the rows
+	// still arrive newest first.
+	for _, row := range rows {
+		s.Require().Zero(row.Seq, "a narrowed reader must be given no chain sequence (%s)", row.Action)
+		// Only the sequence goes. The entry's own digest and the record it names
+		// count nothing about what is hidden, and they are what makes a row
+		// readable and an exported extract tie-able to the chain.
+		s.Require().Len(row.Hash, 64)
+		s.Require().NotEmpty(row.ResourceID)
+	}
+	s.Require().NotContains(
+		scoped.GET(s.T(), "/audit-log?limit=1").BodyString(), `"seq"`,
+		"the key itself must be absent, not a zero that reads as a chain position",
+	)
+
 	// ---- The tenant-wide reader: nothing has vanished. Asserted as a REVIEWER,
 	// not as the admin, so the property is about the grant's scope and not about
 	// the role.
@@ -115,6 +140,15 @@ func (s *AuditLogSuite) TestTrailNarrowsToTheReadScopeAndKeepsEntriesWithNoEntit
 	wideRows, widePg := s.list(wide, "?limit=100")
 	s.Require().Equal(len(wideRows), widePg.Total)
 	s.Require().Greater(widePg.Total, pg.Total)
+
+	// …and keeps the real ordering, which is what an auditor verifying the chain
+	// reads the ledger for.
+	for i, row := range wideRows {
+		s.Require().NotZero(row.Seq, "a tenant-wide reader keeps the chain sequence")
+		if i > 0 {
+			s.Require().Greater(wideRows[i-1].Seq, row.Seq, "and it is the ledger's own descending order")
+		}
+	}
 
 	wideIDs := resourceIDs(wideRows)
 	for what, id := range map[string]string{

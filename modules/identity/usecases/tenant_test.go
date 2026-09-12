@@ -61,22 +61,61 @@ func TestGetTenant_MissingRowIs404(t *testing.T) {
 	m.assertAll(t)
 }
 
-// The update targets the SESSION's tenant — the input carries no id — and
-// the audit entry carries the zone only, never the name.
-func TestUpdateTenant_PinsSelfTenantAndAuditsZoneOnly(t *testing.T) {
+// changeOf reads one field's recorded before/after out of an audit envelope.
+func changeOf(details map[string]any, field string) (map[string]any, bool) {
+	fields, ok := details["fields"].(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	change, ok := fields[field].(map[string]any)
+	return change, ok
+}
+
+// The update targets the SESSION's tenant — the input carries no id — and the
+// audit entry carries the zone on BOTH sides: the zone is how every instant in
+// the product is presented, and nothing else keeps the prior value. The name
+// is dated but never quoted (free text).
+func TestUpdateTenant_PinsSelfTenantAndAuditsBothZones(t *testing.T) {
 	m := newTenantUC()
 	ctx := adminCtx(t, "t1", "admin-1")
+	before := &domain.Tenant{ID: "t1", Slug: "acme", Name: "Acme", Timezone: "UTC"}
 	updated := &domain.Tenant{ID: "t1", Slug: "acme", Name: "Acme Ltd", Timezone: "Europe/London"}
+	m.tenants.On("GetByID", ctx, "t1").Return(before, nil).Once()
 	m.tenants.On("Update", ctx, "t1", "Acme Ltd", "Europe/London").Return(updated, nil).Once()
 	m.audit.On("Record", ctx, "tenant.updated", "tenant", "t1",
 		mock.MatchedBy(func(d map[string]any) bool {
-			_, hasName := d["name"]
-			return d["timezone"] == "Europe/London" && !hasName && len(d) == 1
+			if len(d) != 1 {
+				return false
+			}
+			zone, ok := changeOf(d, "timezone")
+			if !ok || zone["from"] != "UTC" || zone["to"] != "Europe/London" {
+				return false
+			}
+			// The name moved, so it is recorded — as presence only, never the
+			// value ("Acme" / "Acme Ltd" must not appear anywhere).
+			name, ok := changeOf(d, "name")
+			return ok && name["from"] == "set" && name["to"] == "set"
 		})).Return(nil).Once()
 
 	got, err := m.uc.UpdateTenant(ctx, domain.UpdateTenantInput{Name: "Acme Ltd", Timezone: "Europe/London"})
 	require.NoError(t, err)
 	assert.Equal(t, updated, got)
+	m.assertAll(t)
+}
+
+// A rewrite that moves nothing records {} — the payload's key set IS the
+// change set, so an unchanged zone is not evidence of a zone change.
+func TestUpdateTenant_UnchangedValuesRecordNoFields(t *testing.T) {
+	m := newTenantUC()
+	ctx := adminCtx(t, "t1", "admin-1")
+	same := &domain.Tenant{ID: "t1", Slug: "acme", Name: "Acme", Timezone: "UTC"}
+	m.tenants.On("GetByID", ctx, "t1").Return(same, nil).Once()
+	m.tenants.On("Update", ctx, "t1", "Acme", "UTC").Return(same, nil).Once()
+	m.audit.On("Record", ctx, "tenant.updated", "tenant", "t1",
+		mock.MatchedBy(func(d map[string]any) bool { return len(d) == 0 })).Return(nil).Once()
+
+	_, err := m.uc.UpdateTenant(ctx, domain.UpdateTenantInput{Name: "Acme", Timezone: "UTC"})
+	require.NoError(t, err)
 	m.assertAll(t)
 }
 
@@ -108,19 +147,35 @@ func TestUpdateTenant_NoTenantInContextIsUnauthorized(t *testing.T) {
 	m.assertAll(t)
 }
 
+// Missing row, either side of the write: the before read finds nothing (404
+// before anything is written), or the update loses a race with a tenant that
+// disappeared under it.
 func TestUpdateTenant_MissingRowIs404(t *testing.T) {
-	m := newTenantUC()
-	ctx := adminCtx(t, "t1", "admin-1")
-	m.tenants.On("Update", ctx, "t1", "Acme", "UTC").Return(nil, nil).Once()
+	t.Run("before the write", func(t *testing.T) {
+		m := newTenantUC()
+		ctx := adminCtx(t, "t1", "admin-1")
+		m.tenants.On("GetByID", ctx, "t1").Return(nil, nil).Once()
 
-	_, err := m.uc.UpdateTenant(ctx, domain.UpdateTenantInput{Name: "Acme", Timezone: "UTC"})
-	assert.IsType(t, &apperrors.NotFoundError{}, err)
-	m.assertAll(t) // nothing audited
+		_, err := m.uc.UpdateTenant(ctx, domain.UpdateTenantInput{Name: "Acme", Timezone: "UTC"})
+		assert.IsType(t, &apperrors.NotFoundError{}, err)
+		m.assertAll(t) // no Update, nothing audited
+	})
+	t.Run("at the write", func(t *testing.T) {
+		m := newTenantUC()
+		ctx := adminCtx(t, "t1", "admin-1")
+		m.tenants.On("GetByID", ctx, "t1").Return(&domain.Tenant{ID: "t1", Timezone: "UTC"}, nil).Once()
+		m.tenants.On("Update", ctx, "t1", "Acme", "UTC").Return(nil, nil).Once()
+
+		_, err := m.uc.UpdateTenant(ctx, domain.UpdateTenantInput{Name: "Acme", Timezone: "UTC"})
+		assert.IsType(t, &apperrors.NotFoundError{}, err)
+		m.assertAll(t) // nothing audited
+	})
 }
 
 func TestUpdateTenant_AuditFailureFailsTheRequest(t *testing.T) {
 	m := newTenantUC()
 	ctx := adminCtx(t, "t1", "admin-1")
+	m.tenants.On("GetByID", ctx, "t1").Return(&domain.Tenant{ID: "t1", Timezone: "UTC"}, nil).Once()
 	m.tenants.On("Update", ctx, "t1", "Acme", "UTC").Return(&domain.Tenant{ID: "t1", Timezone: "UTC"}, nil).Once()
 	m.audit.On("Record", ctx, "tenant.updated", "tenant", "t1", mock.Anything).Return(assert.AnError).Once()
 
@@ -134,6 +189,7 @@ func TestUpdateTenant_NilAuditIsNoop(t *testing.T) {
 	tenants := new(domain.TenantRepositoryMock)
 	uc := NewTenantUseCases(tenants, nil)
 	ctx := adminCtx(t, "t1", "admin-1")
+	tenants.On("GetByID", ctx, "t1").Return(&domain.Tenant{ID: "t1", Timezone: "UTC"}, nil).Once()
 	tenants.On("Update", ctx, "t1", "Acme", "UTC").Return(&domain.Tenant{ID: "t1", Timezone: "UTC"}, nil).Once()
 
 	_, err := uc.UpdateTenant(ctx, domain.UpdateTenantInput{Name: "Acme", Timezone: "UTC"})

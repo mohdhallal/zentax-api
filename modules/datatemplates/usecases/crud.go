@@ -5,6 +5,7 @@ import (
 
 	apperrors "github.com/mohamadhallal/zentax-api/errors"
 	"github.com/mohamadhallal/zentax-api/modules/datatemplates/domain"
+	"github.com/mohamadhallal/zentax-api/platform/audit"
 	"github.com/mohamadhallal/zentax-api/platform/authz"
 )
 
@@ -25,7 +26,7 @@ func (uc *UseCases) Create(ctx context.Context, input domain.CreateDataTemplateI
 		return nil, err
 	}
 	if err := uc.audit.Record(ctx, "data_template.created", "data_template", t.ID,
-		map[string]any{"templateType": t.TemplateType, "fields": len(t.Fields)}); err != nil {
+		audit.Changes(nil, auditValues(t))); err != nil {
 		return nil, err
 	}
 	return t, nil
@@ -84,7 +85,7 @@ func (uc *UseCases) Update(ctx context.Context, id domain.DataTemplateID, input 
 		return nil, apperrors.NewNotFound(domain.ErrDataTemplateNotFound(id))
 	}
 	if err := uc.audit.Record(ctx, "data_template.updated", "data_template", id,
-		map[string]any{"templateType": t.TemplateType, "fields": len(t.Fields)}); err != nil {
+		audit.Changes(auditValues(current), auditValues(t))); err != nil {
 		return nil, err
 	}
 	return t, nil
@@ -121,7 +122,11 @@ func (uc *UseCases) Delete(ctx context.Context, id domain.DataTemplateID) error 
 	if !deleted {
 		return apperrors.NewNotFound(domain.ErrDataTemplateNotFound(id))
 	}
-	return uc.audit.Record(ctx, "data_template.deleted", "data_template", id, nil)
+	// `current` is the row read above for the 404 / predefined guards, on this
+	// same transaction: the delete is permanent and this is the last moment the
+	// schema exists anywhere, so it is recorded as the "from" side.
+	return uc.audit.Record(ctx, "data_template.deleted", "data_template", id,
+		audit.Changes(auditValues(current), nil))
 }
 
 func (uc *UseCases) List(ctx context.Context, args domain.ListDataTemplatesArgs) ([]domain.DataTemplate, error) {

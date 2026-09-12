@@ -183,12 +183,15 @@ func TestWTDelete_NotFound(t *testing.T) {
 	repo := new(domain.WorkflowTaskRepositoryMock)
 	uc := NewUseCases(repo)
 
-	repo.On("CountDependents", ctx, "missing").Return(domain.WorkflowTaskDependents{}, nil).Once()
-	repo.On("Delete", ctx, "missing").Return(false, nil).Once()
+	// The row the audit envelope needs is read first, so a missing template step
+	// is a 404 before the census rather than after the delete.
+	repo.On("GetById", ctx, "missing").Return(nil, nil).Once()
 
 	err := uc.Delete(ctx, "missing")
 	assert.IsType(t, &apperrors.NotFoundError{}, err)
 	repo.AssertExpectations(t)
+	repo.AssertNotCalled(t, "CountDependents", ctx, "missing")
+	repo.AssertNotCalled(t, "Delete", ctx, "missing")
 }
 
 func TestWTDelete_Success(t *testing.T) {
@@ -197,6 +200,7 @@ func TestWTDelete_Success(t *testing.T) {
 	repo := new(domain.WorkflowTaskRepositoryMock)
 	uc := NewUseCases(repo)
 
+	repo.On("GetById", ctx, "wt1").Return(sampleWorkflowTask(), nil).Once()
 	repo.On("CountDependents", ctx, "wt1").
 		Return(domain.WorkflowTaskDependents{TaskInstances: 6}, nil).Once()
 	repo.On("Delete", ctx, "wt1").Return(true, nil).Once()
@@ -214,6 +218,7 @@ func TestWTDelete_RefusedWhenApprovedWorkExists(t *testing.T) {
 	repo := new(domain.WorkflowTaskRepositoryMock)
 	uc := NewUseCases(repo)
 
+	repo.On("GetById", ctx, "wt1").Return(sampleWorkflowTask(), nil).Once()
 	repo.On("CountDependents", ctx, "wt1").
 		Return(domain.WorkflowTaskDependents{ApprovedTaskInstances: 3, TaskInstances: 12}, nil).Once()
 

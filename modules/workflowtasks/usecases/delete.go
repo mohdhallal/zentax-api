@@ -5,6 +5,7 @@ import (
 
 	apperrors "github.com/mohamadhallal/zentax-api/errors"
 	"github.com/mohamadhallal/zentax-api/modules/workflowtasks/domain"
+	"github.com/mohamadhallal/zentax-api/platform/audit"
 	"github.com/mohamadhallal/zentax-api/platform/authz"
 )
 
@@ -18,7 +19,12 @@ import (
 //
 // So the census runs first (ADR-0018: an approved instance is attested
 // evidence, 409 with a count), and the audit envelope carries how many
-// instances a permitted delete removed. There is no blob reclaim here: a
+// instances a permitted delete removed AND what the step itself was: the same
+// whitelist an update records, taken from the row on its way out. A count alone
+// said how much left and nothing about what — and the row is hard-deleted with
+// no history table behind it, so the approval requirement this step carried,
+// the offset that dated every instance of it and the schema it collected
+// existed nowhere else the moment it committed. There is no blob reclaim here: a
 // document attached to one of those instances is unlinked (task_instance_id
 // SET NULL), never deleted, so this path cannot orphan an object.
 //
@@ -29,6 +35,14 @@ import (
 func (uc *UseCases) Delete(ctx context.Context, id domain.WorkflowTaskID) error {
 	if err := uc.authorizer.EnsureWorkflowTask(ctx, id, authz.WorkflowTaskWrite); err != nil {
 		return err
+	}
+
+	before, err := uc.repo.GetById(ctx, id)
+	if err != nil {
+		return err
+	}
+	if before == nil {
+		return apperrors.NewNotFound(domain.ErrWorkflowTaskNotFound(id))
 	}
 
 	dependents, err := uc.repo.CountDependents(ctx, id)
@@ -47,5 +61,13 @@ func (uc *UseCases) Delete(ctx context.Context, id domain.WorkflowTaskID) error 
 	if !deleted {
 		return apperrors.NewNotFound(domain.ErrWorkflowTaskNotFound(id))
 	}
-	return uc.audit.Record(ctx, "workflow_task.deleted", "workflow_task", id, dependents.AuditDetails())
+	// The census and the whitelist answer different questions and sit side by
+	// side in one envelope: the count says how much left, `fields` says what the
+	// row was. audit.Changes keys its payload under `fields`, so nothing
+	// collides with the count.
+	details := dependents.AuditDetails()
+	for name, change := range audit.Changes(auditValues(before), nil) {
+		details[name] = change
+	}
+	return uc.audit.Record(ctx, "workflow_task.deleted", "workflow_task", id, details)
 }

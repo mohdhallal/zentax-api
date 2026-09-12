@@ -181,9 +181,44 @@ func auditWhere(args domain.ListArgs, scope authz.ReadScope) (string, []any) {
 	return b.where()
 }
 
+// SeqWithheld is the Seq of an entry whose chain sequence is not the reader's
+// to see. platform/audit.Record assigns seq as max+1 under the per-tenant
+// advisory lock it holds to commit, so the chain is 1-based and DENSE and zero
+// never occurs naturally — which is why zero can mean "withheld", and also why
+// withholding is needed at all (see withholdSeq). dto.EntryToJSON reads it as
+// "omit the field".
+const SeqWithheld = 0
+
+// withholdSeq strips the tenant-wide chain sequence from a narrowed reader's
+// page.
+//
+// The counter is per TENANT, not per reader, and it has no gaps. So the
+// distance between two of a narrowed reader's visible rows counts the rows it
+// was refused — exactly, not approximately — and with ?from= / ?to= it dates
+// them too. That is the same leak this file closes on the total in List below
+// ("a narrowed page carrying the tenant's total would report the size of what
+// it withheld") and the one modules/identity/dto/response.go closes by dropping
+// a withheld grant's scopeEntityId; seq walked it straight back out.
+//
+// WITHHELD, NOT RENUMBERED. A per-reader 1..n would be a number that looks like
+// a chain position and is not one: an auditor handed an export of it would cite
+// an ordering that matches nothing in the ledger, and would believe they had
+// been shown the chain. The reader who verifies the chain (ADR-0008) is
+// necessarily an unbounded one — verification walks consecutive entries, and a
+// narrowed reader holds none of the neighbours whose prev_hash it would check —
+// so the true ordering still reaches the only principal who can use it, and
+// nobody is handed a plausible fiction. The rows themselves stay in ledger
+// order (seq DESC), so a narrowed reader loses the labels, not the ordering.
+func withholdSeq(entries []domain.Entry) {
+	for i := range entries {
+		entries[i].Seq = SeqWithheld
+	}
+}
+
 // List returns one page of the trail and its exact total. Both statements share
 // `where`, so the read scope narrows the TOTAL with the page: a narrowed page
-// carrying the tenant's total would report the size of what it withheld.
+// carrying the tenant's total would report the size of what it withheld. The
+// chain sequence is withheld from a narrowed reader for the same reason.
 func (r *AuditLogRepo) List(ctx context.Context, args domain.ListArgs) ([]domain.Entry, int, error) {
 	scope, err := r.readScope(ctx)
 	if err != nil {
@@ -198,6 +233,10 @@ func (r *AuditLogRepo) List(ctx context.Context, args domain.ListArgs) ([]domain
 	pageArgs := append(append([]any{}, params...), args.Limit, args.Offset)
 	if err := r.db.SelectContext(ctx, &entries, query, pageArgs...); err != nil {
 		return nil, 0, err
+	}
+
+	if !scope.Unbounded() {
+		withholdSeq(entries)
 	}
 
 	var total int

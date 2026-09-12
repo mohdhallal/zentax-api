@@ -5,6 +5,7 @@ import (
 
 	apperrors "github.com/mohamadhallal/zentax-api/errors"
 	"github.com/mohamadhallal/zentax-api/modules/workflows/domain"
+	"github.com/mohamadhallal/zentax-api/platform/audit"
 	"github.com/mohamadhallal/zentax-api/platform/authz"
 )
 
@@ -27,8 +28,16 @@ import (
 //     forever. Queueing rather than deleting the objects here keeps the whole
 //     operation rollback-safe: a failure later in the transaction takes the
 //     queue rows with it, and no byte has been touched.
-//  3. Audit. The envelope carries what was removed, counted by kind, so the
-//     trail is no longer silent about the cascade.
+//  3. Audit. The envelope carries what was removed, counted by kind AND what
+//     the workflow itself was: the same whitelist an update records, taken from
+//     the row on its way out. Counts alone said how much left and nothing about
+//     what — and the rows are hard-deleted, there is no history table, and
+//     resource_id afterwards points at nothing, so which entity this workflow
+//     filed for, against which obligation type, for which periods and under
+//     which due-date rule existed nowhere else the moment it committed. (A
+//     create envelope is not a substitute: it records the workflow as born, not
+//     as it stood after any number of edits, and every workflow predating the
+//     envelope work has an empty one.)
 //
 // The same refusal is enforced by a BEFORE DELETE trigger in the database
 // (migration 20260912000023), which is what protects a path that forgets this
@@ -36,6 +45,14 @@ import (
 func (uc *UseCases) Delete(ctx context.Context, id domain.WorkflowID) error {
 	if err := uc.authorizer.EnsureWorkflow(ctx, id, authz.WorkflowWrite); err != nil {
 		return err
+	}
+
+	before, err := uc.repo.GetById(ctx, id)
+	if err != nil {
+		return err
+	}
+	if before == nil {
+		return apperrors.NewNotFound(domain.ErrWorkflowNotFound(id))
 	}
 
 	dependents, err := uc.repo.CountDependents(ctx, id)
@@ -59,5 +76,13 @@ func (uc *UseCases) Delete(ctx context.Context, id domain.WorkflowID) error {
 	if !deleted {
 		return apperrors.NewNotFound(domain.ErrWorkflowNotFound(id))
 	}
-	return uc.audit.Record(ctx, "workflow.deleted", "workflow", id, dependents.AuditDetails(queued))
+	// The census and the whitelist answer different questions and sit side by
+	// side in one envelope: the counts say how much left, `fields` says what the
+	// row was. audit.Changes keys its payload under `fields`, so nothing
+	// collides with a count.
+	details := dependents.AuditDetails(queued)
+	for name, change := range audit.Changes(auditValues(before), nil) {
+		details[name] = change
+	}
+	return uc.audit.Record(ctx, "workflow.deleted", "workflow", id, details)
 }

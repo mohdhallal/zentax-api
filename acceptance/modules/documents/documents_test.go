@@ -278,8 +278,12 @@ func (s *DocumentsSuite) TestUploadListDownloadVersioningAndMetadata() {
 	}
 	s.As(tenant).GET(s.T(), "/audit-log?resourceId="+v1.ID).DecodeData(s.T(), &audit)
 	actions := map[string]map[string]any{}
+	var updates []map[string]any
 	for _, a := range audit {
 		actions[a.Action] = a.Details
+		if a.Action == "document.updated" {
+			updates = append(updates, a.Details)
+		}
 		for _, k := range []string{"fileName", "label", "notes", "name", "email"} {
 			s.Require().NotContains(a.Details, k, "audit %s leaks %s", a.Action, k)
 		}
@@ -293,7 +297,36 @@ func (s *DocumentsSuite) TestUploadListDownloadVersioningAndMetadata() {
 	s.Require().EqualValues(len(pdfV1), actions["document.created"]["fileSize"])
 	s.Require().EqualValues(2, actions["document.version_added"]["version"])
 	s.Require().EqualValues(len(pdfV2), actions["document.version_added"]["fileSize"])
-	s.Require().Equal("final_return", actions["document.updated"]["documentType"])
+
+	// The two updates are told apart, which is the point of the envelope: the
+	// first reclassified the document, the second only cleared the notes. The
+	// old payload asserted the post-state of documentType and category on BOTH,
+	// so an edit that touched neither read as a reclassification that never
+	// happened — and a real reclassification rendered identically.
+	s.Require().Len(updates, 2, "one entry per PUT: %v", updates)
+	// The read API is newest first, so updates[1] is the reclassification and
+	// updates[0] is the notes-only edit that followed it.
+	reclass, ok := updates[1]["fields"].(map[string]any)
+	s.Require().True(ok, "the reclassification must record a change set: %v", updates[1])
+	s.Require().Equal(map[string]any{"from": "draft_return", "to": "final_return"}, reclass["documentType"])
+	s.Require().Equal(map[string]any{"from": "compliance", "to": "project"}, reclass["category"])
+	s.Require().NotContains(reclass, "notes", "the notes did not move on this PUT")
+	s.Require().NotContains(reclass, "label")
+
+	cleared, ok := updates[0]["fields"].(map[string]any)
+	s.Require().True(ok, "clearing the notes must record a change set: %v", updates[0])
+	s.Require().Equal(map[string]any{"from": "set", "to": "empty"}, cleared["notes"],
+		"the notes moved; their content stays out")
+	s.Require().NotContains(cleared, "documentType",
+		"documentType did not move on this PUT and must not be recorded as if it had")
+	s.Require().NotContains(cleared, "category")
+
+	// And no side of any envelope quotes a label, a note or a file name.
+	raw, err := json.Marshal(audit)
+	s.Require().NoError(err)
+	for _, secret := range []string{"Q1 final", "first cut", "VAT return Q1 (final).pdf", "rapport été.pdf"} {
+		s.Require().NotContains(string(raw), secret, "the trail quoted %q", secret)
+	}
 }
 
 func (s *DocumentsSuite) TestRepositoryFiltersAndPaging() {
@@ -555,7 +588,9 @@ func (s *DocumentsSuite) TestSoftDeleteAndApprovedFreeze() {
 	free := s.mustUpload(tenant, sd.WorkflowID, map[string]string{"documentType": "other"}, pdf("free.pdf", pdfV1))
 	s.As(tenant).PUT(s.T(), "/documents/"+free.ID, map[string]any{"label": "still editable"}).AssertStatus(s.T(), http.StatusOK)
 
-	// Audit: deleted landed, PII-free.
+	// Audit: the delete says what left, PII-free. It used to record {} — a row
+	// with no changes block at all, on a soft delete that takes a piece of tax
+	// evidence out of every read path.
 	var audit []struct {
 		Action  string         `json:"action"`
 		Details map[string]any `json:"details"`
@@ -563,12 +598,26 @@ func (s *DocumentsSuite) TestSoftDeleteAndApprovedFreeze() {
 	s.As(tenant).GET(s.T(), "/audit-log?resourceId="+loose.ID).DecodeData(s.T(), &audit)
 	var sawDelete bool
 	for _, a := range audit {
-		if a.Action == "document.deleted" {
-			sawDelete = true
-			s.Require().Empty(a.Details)
+		if a.Action != "document.deleted" {
+			continue
 		}
+		sawDelete = true
+		s.Require().EqualValues(1, a.Details["versions"], "versions retained behind the delete")
+		gone, ok := a.Details["fields"].(map[string]any)
+		s.Require().True(ok, "the delete must record what the row was: %v", a.Details)
+		s.Require().Equal(map[string]any{"from": "other"}, gone["documentType"])
+		s.Require().Equal(map[string]any{"from": "compliance"}, gone["category"])
+		s.Require().Equal(map[string]any{"from": sd.WorkflowID}, gone["workflowId"],
+			"which workflow the evidence hung off — the pointer back")
+		s.Require().NotContains(gone, "to", "a delete records the before side only")
+		s.Require().NotContains(gone, "label", "never set, so never recorded")
+		s.Require().NotContains(gone, "taskInstanceId", "a workflow-level document")
 	}
 	s.Require().True(sawDelete, "document.deleted audit entry")
+
+	raw, err := json.Marshal(audit)
+	s.Require().NoError(err)
+	s.Require().NotContains(string(raw), "loose.pdf", "the trail quoted a file name")
 }
 
 // "all" is a search TERM on /documents (a document labelled "all invoices"

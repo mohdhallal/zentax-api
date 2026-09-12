@@ -21,7 +21,9 @@ import (
 //     due (ADR-0023). Changing it retroactively re-cuts the year, so an auditor
 //     needs the version that was in force. pattern / weekEndDay / yearEndRule
 //     are `oneof` enums, financialYearEnd is `len=5` (MM-DD), and a custom
-//     period reaches the trail as code + boundaries only (auditPeriods).
+//     period reaches the trail as boundaries plus a shape-gated code only
+//     (auditPeriods) — its code is `max=16` with no code list behind it, so it
+//     is quoted only when it looks like a code.
 //   - parentEntityId: `uuid`. The position in the group, which drives
 //     consolidation and decides who can see the entity at all (ADR-0012).
 //   - status: `oneof active inactive archived`.
@@ -67,6 +69,14 @@ func auditValues(e *domain.Entity) audit.Values {
 // auditPeriods projects a custom fiscal calendar onto the part that computes
 // dates — each period's code and its MM-DD boundaries — and drops the display
 // name, which is free text the tenant typed.
+//
+// The code is kept because it is the join key: workflows.selectedPeriods names
+// these codes, so without it the boundaries say when the year was cut but not
+// which period a filing belongs to. It is gated rather than quoted outright
+// (auditIdentifier), because the contract bounds its length and nothing else —
+// the same reason the name beside it is dropped. Dropping both would have been
+// consistent too, and cheaper; it would also have made the recorded calendar
+// unjoinable to the workflows that reference it.
 func auditPeriods(periods domain.CustomPeriods) []map[string]any {
 	if len(periods) == 0 {
 		return nil
@@ -74,10 +84,46 @@ func auditPeriods(periods domain.CustomPeriods) []map[string]any {
 	out := make([]map[string]any, 0, len(periods))
 	for _, p := range periods {
 		out = append(out, map[string]any{
-			"code":      p.Code,
+			"code":      auditIdentifier(p.Code),
 			"startDate": p.StartDate,
 			"endDate":   p.EndDate,
 		})
 	}
 	return out
+}
+
+// maxPeriodCodeLen is domain.CustomPeriod.Code's own `min=1,max=16`.
+const maxPeriodCodeLen = 16
+
+// redactedIdentifier stands in for a string that should have been a name but is
+// not shaped like one.
+const redactedIdentifier = "redacted"
+
+// auditIdentifier is the gate on the one user-supplied string this envelope
+// quotes. What is guaranteed here is SHAPE, not meaning: a value is quoted only
+// if it is built from letters, digits, '_', '-' and '.', which passes every
+// code a period cut actually uses ("P1", "Q4-adj", "FY26.13") and redacts
+// anything carrying a space or an '@'. Sixteen characters is a narrow window,
+// but it is wide enough for an email address, and the point of the rule the
+// file heading states is that a length bound alone is not a shape.
+//
+// This is a deliberate per-module copy of one rule — the same gate guards
+// tax-data keys (taskinstances), data-template field ids (datatemplates) and
+// additional-deadline types (entityobligations). Each module owns its own
+// whitelist and its own length bound; lifting the character rule into
+// platform/audit is the obvious consolidation once a caller wants it
+// parameterized.
+func auditIdentifier(s string) string {
+	if s == "" || len(s) > maxPeriodCodeLen {
+		return redactedIdentifier
+	}
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9',
+			c == '_', c == '-', c == '.':
+		default:
+			return redactedIdentifier
+		}
+	}
+	return s
 }

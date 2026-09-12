@@ -143,3 +143,26 @@ func TestAuditSQL_Shape(t *testing.T) {
 		t.Fatalf("the FROM must carry no static predicate; filters are per request:\n%s", auditFrom)
 	}
 }
+
+// A narrowed reader's page carries NO chain sequence. The counter is
+// tenant-wide and dense, so the distance between two of its visible rows would
+// count the entries it was refused, exactly — the leak this file already closes
+// on the total. Withheld, never renumbered: see withholdSeq.
+func TestWithholdSeq_ANarrowedReaderGetsNoChainSequence(t *testing.T) {
+	entries := []domain.Entry{
+		{ID: "a", Seq: 335, Action: "entity.updated", Hash: strings.Repeat("a", 64)},
+		{ID: "b", Seq: 3, Action: "entity.created", Hash: strings.Repeat("b", 64)},
+	}
+	withholdSeq(entries)
+
+	for _, e := range entries {
+		if e.Seq != SeqWithheld {
+			t.Fatalf("entry %s kept its chain sequence: %d", e.ID, e.Seq)
+		}
+		// Only the sequence goes: the hash counts nothing, and the identity of
+		// the record is the whole point of the row.
+		if e.Hash == "" || e.ID == "" || e.Action == "" {
+			t.Fatalf("withholding the sequence must touch nothing else: %+v", e)
+		}
+	}
+}

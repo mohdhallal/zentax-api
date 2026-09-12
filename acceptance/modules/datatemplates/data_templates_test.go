@@ -317,17 +317,72 @@ func (s *DataTemplatesSuite) TestCustomTemplateCRUD() {
 			`SELECT action FROM audit_log WHERE resource_id = $1 ORDER BY seq`, created.ID))
 	})
 	s.Require().Equal([]string{"data_template.created", "data_template.updated", "data_template.deleted"}, actions)
-	var details struct {
-		Fields       string `db:"fields"`
-		TemplateType string `db:"template_type"`
-	}
+
+	// The envelope records the SCHEMA, not a field count. A count made a full
+	// rewrite of the rules that validate tax figures byte-identical to no
+	// change; the template's contents live nowhere else (no version column, no
+	// history table), so this is the only record that the rules moved.
+	fields := s.auditFields(tenant, created.ID, "data_template.created")
+	s.Require().Equal(map[string]any{"to": "Custom"}, fields["templateType"])
+	s.Require().Equal(map[string]any{"to": "set"}, fields["name"], "the name is dated, not quoted")
+	s.Require().Equal(map[string]any{"to": []any{
+		map[string]any{
+			"id": "amount", "fieldType": "numeric", "mandatory": true,
+			"numericValidation": map[string]any{
+				"min": float64(0), "decimalPlaces": float64(2),
+				"allowDecimals": true, "formatAsCurrency": true,
+			},
+		},
+		map[string]any{"id": "note", "fieldType": "text", "mandatory": false},
+	}}, fields["fields"], "the field structure, in order")
+
+	// The PUT replaced the whole schema: both ids, both types, the mandatory
+	// flags and the numeric rule. Under the old payload this recorded
+	// {"fields": 2 -> 1} and nothing else.
+	updatedFields := s.auditFields(tenant, created.ID, "data_template.updated")
+	s.Require().Equal(map[string]any{"from": "Custom", "to": "WHT"}, updatedFields["templateType"])
+	change, ok := updatedFields["fields"].(map[string]any)
+	s.Require().True(ok, "the schema change must carry both sides: %v", updatedFields["fields"])
+	s.Require().Equal([]any{
+		map[string]any{
+			"id": "count", "fieldType": "numeric", "mandatory": true,
+			"numericValidation": map[string]any{"allowDecimals": false, "formatAsCurrency": false},
+		},
+	}, change["to"])
+	s.Require().Len(change["from"], 2, "the superseded schema: %v", change["from"])
+
+	// And the delete records the schema that left rather than {}.
+	deletedFields := s.auditFields(tenant, created.ID, "data_template.deleted")
+	s.Require().Equal(map[string]any{"from": "WHT"}, deletedFields["templateType"])
+	s.Require().NotContains(deletedFields["fields"], "to", "a delete records the before side only")
+
+	// No side of any envelope quotes a label a user typed.
+	var raw []string
 	s.inTenant(tenant, func(tx *sqlx.Tx) {
-		s.Require().NoError(tx.Get(&details,
-			`SELECT details->>'fields' AS fields, details->>'templateType' AS template_type
-			 FROM audit_log WHERE resource_id = $1 AND action = 'data_template.created'`, created.ID))
+		s.Require().NoError(tx.Select(&raw,
+			`SELECT details::text FROM audit_log WHERE resource_id = $1 ORDER BY seq`, created.ID))
 	})
-	s.Require().Equal("2", details.Fields)
-	s.Require().Equal("Custom", details.TemplateType)
+	for _, row := range raw {
+		for _, secret := range []string{"Local Levy", "Amount", "Note", "Count"} {
+			s.Require().NotContains(row, secret, "the trail quoted %q", secret)
+		}
+	}
+}
+
+// auditFields decodes one entry's change set: field name -> {"from":…, "to":…}.
+func (s *DataTemplatesSuite) auditFields(tenant, resourceID, action string) map[string]any {
+	var raw []byte
+	s.inTenant(tenant, func(tx *sqlx.Tx) {
+		s.Require().NoError(tx.Get(&raw,
+			`SELECT details FROM audit_log WHERE resource_id = $1 AND action = $2`,
+			resourceID, action))
+	})
+	var payload struct {
+		Fields map[string]any `json:"fields"`
+	}
+	s.Require().NoError(json.Unmarshal(raw, &payload), "details must decode: %s", raw)
+	s.Require().NotEmpty(payload.Fields, "%s recorded no fields: %s", action, raw)
+	return payload.Fields
 }
 
 // TestTaxDataAuthority: a template attached to a workflow task is inherited by

@@ -147,13 +147,15 @@ func TestWorkflowDelete_NotFound(t *testing.T) {
 	repo := new(domain.WorkflowRepositoryMock)
 	uc := NewUseCases(repo)
 
-	repo.On("CountDependents", ctx, "missing").Return(domain.WorkflowDependents{}, nil).Once()
-	repo.On("QueueBlobReclaim", ctx, "missing").Return(0, nil).Once()
-	repo.On("Delete", ctx, "missing").Return(false, nil).Once()
+	// The row the audit envelope needs is read first, so a missing workflow is
+	// a 404 before the census rather than after the delete.
+	repo.On("GetById", ctx, "missing").Return(nil, nil).Once()
 
 	err := uc.Delete(ctx, "missing")
 	assert.IsType(t, &apperrors.NotFoundError{}, err)
 	repo.AssertExpectations(t)
+	repo.AssertNotCalled(t, "CountDependents", ctx, "missing")
+	repo.AssertNotCalled(t, "Delete", ctx, "missing")
 }
 
 func TestWorkflowDelete_Success(t *testing.T) {
@@ -162,6 +164,7 @@ func TestWorkflowDelete_Success(t *testing.T) {
 	repo := new(domain.WorkflowRepositoryMock)
 	uc := NewUseCases(repo)
 
+	repo.On("GetById", ctx, "wf1").Return(sampleWorkflow(), nil).Once()
 	repo.On("CountDependents", ctx, "wf1").
 		Return(domain.WorkflowDependents{TaskInstances: 4, WorkflowTasks: 2}, nil).Once()
 	repo.On("QueueBlobReclaim", ctx, "wf1").Return(0, nil).Once()
@@ -180,6 +183,7 @@ func TestWorkflowDelete_RefusedWhenApprovedWorkExists(t *testing.T) {
 	repo := new(domain.WorkflowRepositoryMock)
 	uc := NewUseCases(repo)
 
+	repo.On("GetById", ctx, "wf1").Return(sampleWorkflow(), nil).Once()
 	repo.On("CountDependents", ctx, "wf1").
 		Return(domain.WorkflowDependents{ApprovedTaskInstances: 24, TaskInstances: 108}, nil).Once()
 

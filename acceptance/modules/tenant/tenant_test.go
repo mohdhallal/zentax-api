@@ -129,7 +129,8 @@ func (s *TenantSuite) TestTenantTimezoneSettings() {
 	s.Require().NoError(s.DB.Get(&count, `SELECT COUNT(*) FROM tenants WHERE timezone = 'Europe/London'`))
 	s.Require().Equal(1, count)
 
-	// Audit: one tenant.updated on the tenant, carrying the zone only.
+	// Audit: one tenant.updated on the tenant, carrying BOTH zones — and the
+	// rename dated without quoting either name.
 	var audit []struct {
 		Action       string         `json:"action"`
 		ResourceType string         `json:"resourceType"`
@@ -140,7 +141,10 @@ func (s *TenantSuite) TestTenantTimezoneSettings() {
 	s.Require().Len(audit, 1)
 	s.Require().Equal("tenant", audit[0].ResourceType)
 	s.Require().Equal(tenant, audit[0].ResourceID)
-	s.Require().Equal(map[string]any{"timezone": "Europe/London"}, audit[0].Details)
+	s.Require().Equal(map[string]any{"fields": map[string]any{
+		"timezone": map[string]any{"from": "UTC", "to": "Europe/London"},
+		"name":     map[string]any{"from": "set", "to": "set"},
+	}}, audit[0].Details)
 	s.As(other).GET(s.T(), "/audit-log?action=tenant.updated").DecodeData(s.T(), &audit)
 	s.Require().Empty(audit)
 }

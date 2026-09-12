@@ -5,6 +5,7 @@ import (
 
 	apperrors "github.com/mohamadhallal/zentax-api/errors"
 	"github.com/mohamadhallal/zentax-api/modules/documents/domain"
+	"github.com/mohamadhallal/zentax-api/platform/audit"
 	"github.com/mohamadhallal/zentax-api/platform/authz"
 )
 
@@ -42,9 +43,11 @@ func (uc *UseCases) Update(ctx context.Context, id domain.DocumentID, input doma
 	if err != nil {
 		return nil, err
 	}
-	if err := uc.audit.Record(ctx, "document.updated", "document", id, map[string]any{
-		"documentType": view.DocumentType, "category": view.Category,
-	}); err != nil {
+	// `doc` is the row loaded above for the 404 and the ADR-0018 freeze check,
+	// on this same transaction, and `view` is the post-state already read for
+	// the response — so the before and after of the edit cost no extra query.
+	if err := uc.audit.Record(ctx, "document.updated", "document", id,
+		audit.Changes(auditValues(doc), auditViewValues(view))); err != nil {
 		return nil, err
 	}
 	return view, nil
@@ -70,5 +73,14 @@ func (uc *UseCases) Delete(ctx context.Context, id domain.DocumentID) error {
 	if !deleted {
 		return apperrors.NewNotFound(domain.ErrDocumentNotFound(id))
 	}
-	return uc.audit.Record(ctx, "document.deleted", "document", id, map[string]any{})
+	// What left, not just that something did. The row survives behind deleted_at
+	// for the ADR-0007 purge / legal-hold machinery, but it is invisible to
+	// every read path from here on, so the trail records the whitelist as the
+	// "from" side — plus how many versions went out of sight with it.
+	details := audit.Changes(auditValues(doc), nil)
+	if details == nil {
+		details = map[string]any{}
+	}
+	details["versions"] = doc.CurrentVersion
+	return uc.audit.Record(ctx, "document.deleted", "document", id, details)
 }

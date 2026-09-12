@@ -5,6 +5,7 @@ import (
 
 	apperrors "github.com/mohamadhallal/zentax-api/errors"
 	"github.com/mohamadhallal/zentax-api/modules/entities/domain"
+	"github.com/mohamadhallal/zentax-api/platform/audit"
 	"github.com/mohamadhallal/zentax-api/platform/authz"
 )
 
@@ -29,8 +30,16 @@ import (
 //     forever. Queueing rather than deleting the objects here keeps the whole
 //     operation rollback-safe: a failure later in the transaction takes the
 //     queue rows with it, and no byte has been touched.
-//  3. Audit. The envelope carries what was removed, counted by kind, so the
-//     trail is no longer silent about the cascade.
+//  3. Audit. The envelope carries what was removed, counted by kind AND what
+//     the entity itself was: the same whitelist an update records, taken from
+//     the row on its way out. Counts alone said how much left and nothing about
+//     what — and the row is hard-deleted, there is no history table, and
+//     resource_id afterwards points at nothing, so the fiscal calendar that
+//     decided when every filing beneath this entity was legally due existed
+//     nowhere else the moment it committed. (A create envelope is not a
+//     substitute: it records the entity as born, not as it stood after any
+//     number of edits, and every entity predating the envelope work has an
+//     empty one.)
 //
 // The same refusal is enforced in the database by the BEFORE DELETE trigger on
 // workflows (migration 20260912000023), which fires for each workflow this
@@ -38,6 +47,14 @@ import (
 func (uc *UseCases) Delete(ctx context.Context, id domain.EntityID) error {
 	if err := uc.authorizer.EnsureEntity(ctx, id, authz.EntityWrite); err != nil {
 		return err
+	}
+
+	before, err := uc.repo.GetById(ctx, id)
+	if err != nil {
+		return err
+	}
+	if before == nil {
+		return apperrors.NewNotFound(domain.ErrEntityNotFound(id))
 	}
 
 	dependents, err := uc.repo.CountDependents(ctx, id)
@@ -61,5 +78,18 @@ func (uc *UseCases) Delete(ctx context.Context, id domain.EntityID) error {
 	if !deleted {
 		return apperrors.NewNotFound(domain.ErrEntityNotFound(id))
 	}
-	return uc.audit.Record(ctx, "entity.deleted", "entity", id, dependents.AuditDetails(queued))
+	// The census and the whitelist answer different questions and sit side by
+	// side in one envelope: the counts say how much left, `fields` says what the
+	// row was. audit.Changes keys its payload under `fields`, so nothing
+	// collides with a count.
+	//
+	// Still unnamed: userGrantsRevoked stays a count, so the trail says two
+	// grants were revoked but not whose, at which role. Those rows cascade out
+	// of user_grants and are not part of the entity's own whitelist — recording
+	// them is the identity module's job, not this one's.
+	details := dependents.AuditDetails(queued)
+	for name, change := range audit.Changes(auditValues(before), nil) {
+		details[name] = change
+	}
+	return uc.audit.Record(ctx, "entity.deleted", "entity", id, details)
 }
