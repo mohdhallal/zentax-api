@@ -1,5 +1,5 @@
 import * as cdk from 'aws-cdk-lib';
-import { configuredEnvNames, envTitle, isEnvName, loadEnvConfig, WEB_ONLY_KEYS } from '../lib/config';
+import { configuredEnvNames, configuredZoneName, envTitle, isEnvName, loadEnvConfig, mailConfigurationSetName, WEB_ONLY_KEYS } from '../lib/config';
 import { API_EXPORTS, CLUSTER_EXPORTS, DATA_EXPORTS, ENV_EXPORTS_BY_STACK, NETWORK_EXPORTS, WEB_EXPORTS, exportName } from './contract';
 import { cdkJsonContext, ENVS, envTemplates, exportNamesOf, otherEnv, resourcesOfType, synthEnv, synthEnvWith, TIER_OF, TITLE_OF } from './helpers';
 
@@ -182,6 +182,45 @@ describe('cell names (tier + region label)', () => {
     expect(loadEnvConfig(app, 'production-eu')).toEqual(expect.objectContaining({
       name: 'production-eu', tier: 'production', regionLabel: 'eu', title: 'ProductionEu', publicHostname: 'eu.app.zentax.software',
     }));
+  });
+
+  /**
+   * ADR-0027 decision 8. The sender is derived from the DNS zone rather than
+   * configured twice, and the derivation is checked against the one thing that
+   * can make a send fail at run time: the identity only covers its own domain
+   * and subdomains, so a sender outside the zone is an AccessDenied nobody sees
+   * until a reminder silently stops going out. Synth is where that is caught.
+   */
+  test('the sender defaults from the DNS zone (production at the apex, staging on a subdomain) and cannot be set outside the verified identity', () => {
+    const app = new cdk.App({ context: cdkJsonContext() });
+    expect(configuredZoneName(app)).toBe('zentax.software');
+    expect(loadEnvConfig(app, 'production-eu')).toEqual(expect.objectContaining({
+      mailFromAddress: 'noreply@zentax.software', mailFromName: 'ZenTax', mailIdentityDomain: 'zentax.software',
+    }));
+    expect(loadEnvConfig(app, 'staging-eu')).toEqual(expect.objectContaining({
+      mailFromAddress: 'noreply@staging.zentax.software', mailFromName: 'ZenTax Staging', mailIdentityDomain: 'zentax.software',
+    }));
+    expect(mailConfigurationSetName('staging-eu')).toBe('zentax-staging-eu');
+
+    const withMail = (cell: (typeof ENVS)[number], overrides: Record<string, unknown>) => {
+      const context = cdkJsonContext();
+      const environments = context.environments as Record<string, Record<string, unknown>>;
+      return loadEnvConfig(
+        new cdk.App({ context: { ...context, environments: { ...environments, [cell]: { ...environments[cell], ...overrides } } } }),
+        cell,
+      );
+    };
+    for (const cell of ENVS) {
+      // An explicit sender is honoured — inside the zone.
+      expect(withMail(cell, { mailFromAddress: 'reminders@zentax.software', mailFromName: 'ZenTax Deadlines' }))
+        .toEqual(expect.objectContaining({ mailFromAddress: 'reminders@zentax.software', mailFromName: 'ZenTax Deadlines' }));
+      // ...and refused outside it, or malformed, or unquotable as a display name.
+      expect(() => withMail(cell, { mailFromAddress: 'noreply@example.com' })).toThrow(/must be at zentax\.software or a subdomain/);
+      expect(() => withMail(cell, { mailFromAddress: 'NoReply@zentax.software' })).toThrow(/lowercase e-mail address/);
+      expect(() => withMail(cell, { mailFromAddress: 'not an address' })).toThrow(/lowercase e-mail address/);
+      expect(() => withMail(cell, { mailFromName: 'ZenTax <spoof@evil.test>' })).toThrow(/plain display name/);
+      expect(() => withMail(cell, { mailFromName: 'ZenTax\nBcc: someone@evil.test' })).toThrow(/plain display name/);
+    }
   });
 
   test('isEnvName = well-formed AND declared in cdk.json; the title is PascalCase of the name', () => {

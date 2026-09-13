@@ -315,9 +315,9 @@ describe('ZenTax-GithubOidc', () => {
     const sidOf = (name: string) => statements.find((s) => s.Sid === name)!;
 
     test('grants exactly the six ACM certificate actions on "*" (certificate ARNs are generated), nothing else', () => {
-      // Three statements, no more: ACM plus the two Cloud Map zone ones below.
+      // Four statements, no more: ACM, the two Cloud Map zone ones below, and SES.
       expect(statements.map((s) => s.Sid)).toEqual([
-        'AcmCertificates', 'CloudMapPrivateDnsNamespace', 'CloudMapPrivateDnsNamespaceDelete',
+        'AcmCertificates', 'CloudMapPrivateDnsNamespace', 'CloudMapPrivateDnsNamespaceDelete', 'SesConfigurationSets',
       ]);
       const acm = sidOf('AcmCertificates');
       expect(acm.Effect).toBe('Allow');
@@ -388,6 +388,51 @@ describe('ZenTax-GithubOidc', () => {
       const dns = synthDns().template.toJSON();
       expect(dns.Parameters?.BootstrapVersion).toBeUndefined();
       expect(dns.Rules?.CheckBootstrapVersion).toBeUndefined();
+    });
+
+    /**
+     * ADR-0027. The Api stack creates one SES configuration set per cell, so
+     * the execution role must be able to make it — but nothing more. The
+     * sending IDENTITY is created by the admin-deployed ZenTax-Dns stack, which
+     * never runs through this role: a pipeline can therefore neither verify,
+     * replace nor delete the domain the product sends as, and no verb here can
+     * send anything or touch account-level sending state.
+     */
+    test('carries the SES configuration-set verbs the Api stack needs, scoped to configuration-set/zentax-* — and no identity, account or sending power', () => {
+      // The need: every cell's Api stack creates exactly one.
+      for (const env of ENVS) synthEnv(env).api.resourceCountIs('AWS::SES::ConfigurationSet', 1);
+
+      const ses = sidOf('SesConfigurationSets');
+      expect(ses.Effect).toBe('Allow');
+      expect(actionsOf(ses).sort()).toEqual([
+        'ses:CreateConfigurationSet', 'ses:DeleteConfigurationSet', 'ses:GetConfigurationSet',
+        'ses:ListTagsForResource',
+        'ses:PutConfigurationSetDeliveryOptions', 'ses:PutConfigurationSetReputationOptions',
+        'ses:PutConfigurationSetSendingOptions', 'ses:PutConfigurationSetSuppressionOptions',
+        'ses:PutConfigurationSetTrackingOptions', 'ses:PutConfigurationSetVdmOptions',
+        'ses:TagResource', 'ses:UntagResource',
+      ]);
+      for (const r of resourcesOf(ses)) expect(JSON.stringify(r)).toMatch(/:ses:\*:\d+:configuration-set\/zentax-\*"/);
+      expect(resourcesOf(ses)).toHaveLength(1);
+
+      // Every SES action in the whole policy is one of those — in particular
+      // nothing that sends, verifies an identity, or moves the account out of
+      // the sandbox.
+      const sesActions = statements.flatMap(actionsOf).filter((a: string) => a.startsWith('ses:'));
+      expect(sesActions.sort()).toEqual(actionsOf(ses).sort());
+      // Configuration-set verbs and the tag verbs the ARN above scopes — no wildcard.
+      expect(sesActions.filter((a: string) => !/ConfigurationSet|TagResource|TagsForResource/i.test(a))).toEqual([]);
+      expect(sesActions.filter((a: string) => a.includes('*'))).toEqual([]);
+      // Nothing that sends, and nothing that touches an identity, DKIM, the
+      // MAIL FROM domain, the account's sending state or a dedicated IP.
+      expect(sesActions.filter((a: string) => /^ses:Send|Identity|Dkim|MailFrom|Account|DedicatedIp/i.test(a))).toEqual([]);
+
+      // ...and the identity really is somewhere a pipeline cannot reach: it is
+      // in ZenTax-Dns, which is admin-deployed (no bootstrap version check).
+      const dns = synthDns().template;
+      dns.resourceCountIs('AWS::SES::EmailIdentity', 1);
+      expect(dns.toJSON().Parameters?.BootstrapVersion).toBeUndefined();
+      for (const env of ENVS) synthEnv(env).api.resourceCountIs('AWS::SES::EmailIdentity', 0);
     });
 
     test('fits the 6144 non-whitespace character limit and is exported for the bootstrap command', () => {

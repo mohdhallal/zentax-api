@@ -8,13 +8,14 @@ import * as rds from 'aws-cdk-lib/aws-rds';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as servicediscovery from 'aws-cdk-lib/aws-servicediscovery';
+import * as ses from 'aws-cdk-lib/aws-ses';
 import * as sns from 'aws-cdk-lib/aws-sns';
 import { Construct } from 'constructs';
 import { wireAlarm } from './alarms';
-import { EnvConfig } from './config';
+import { EnvConfig, mailConfigurationSetName } from './config';
 import { LogGroups, Repositories } from './data-stack';
 import { makeExecutionRole, makeTaskRole } from './ecs-roles';
-import { apiDbEnvironment, apiDbSecrets, apiStorageEnvironment, runtimePlatformFor } from './cluster-stack';
+import { apiDbEnvironment, apiDbSecrets, apiMailEnvironment, apiStorageEnvironment, runtimePlatformFor } from './cluster-stack';
 import { exportName } from './exports';
 import { API_PORT } from './network-stack';
 
@@ -86,11 +87,33 @@ export class ApiStack extends cdk.Stack {
   public readonly cluster: ecs.ICluster;
   public readonly service: ecs.FargateService;
   public readonly taskDefinition: ecs.FargateTaskDefinition;
+  /** The cell's own SES sending channel (ADR-0027 decision 8). */
+  public readonly mailConfigurationSet: ses.ConfigurationSet;
 
   constructor(scope: Construct, id: string, props: ApiStackProps) {
     super(scope, id, props);
     const { cfg } = props;
     this.cluster = props.cluster;
+
+    // ---- mail: the cell's sending channel (ADR-0027) -------------------------
+    // The identity itself is account-level and admin-deployed (ZenTax-Dns): one
+    // verified domain for both cells, because an SES identity is per account +
+    // region and a domain identity covers its subdomains. What IS per cell is
+    // this configuration set — so staging's bounces, complaints and delivery
+    // metrics are measured apart from production's, and either can be stopped
+    // without the other. TLS is required rather than opportunistic: this
+    // product carries filing data, and a recipient whose server offers no TLS
+    // gets a visible failure instead of a plaintext hop.
+    this.mailConfigurationSet = new ses.ConfigurationSet(this, 'MailConfigurationSet', {
+      configurationSetName: mailConfigurationSetName(cfg.name),
+      tlsPolicy: ses.ConfigurationSetTlsPolicy.REQUIRE,
+      reputationMetrics: true,
+      sendingEnabled: true,
+      // Bounces and complaints suppress the address for this channel only:
+      // reputation is per account, so continuing to mail a dead address is how
+      // one cell gets the other throttled.
+      suppressionReasons: ses.SuppressionReasons.BOUNCES_AND_COMPLAINTS,
+    });
 
     // ---- roles + data-plane grants ---------------------------------------------
     const apiTaskRole = makeTaskRole(this, cfg, 'api');
@@ -108,6 +131,28 @@ export class ApiStack extends cdk.Stack {
       resources: [props.documentsBucket.bucketArn],
     }));
     props.dataKey.grantEncryptDecrypt(apiTaskRole);
+    // Mail: the task role IS the SES credential, so this statement is the whole
+    // of what the api may send — and it is narrow in three directions at once.
+    // The identity ARN is FORMATTED, not imported: ZenTax-Dns is admin-deployed
+    // and deliberately outside the pipeline's dependency graph (ADR-0025), and
+    // a domain identity's ARN is fully determined by partition, region, account
+    // and name. Both resources are required, not alternatives: a send that
+    // names a configuration set is authorized against the identity AND the set.
+    // The condition pins the From header to the one address the container is
+    // configured with (cfg.mailFromAddress feeds both), so the permission and
+    // the configuration cannot drift apart and a bug cannot make the product
+    // send as anyone else in the domain. SendRawEmail rides along because in
+    // SESv2 it is the same call with MIME content — what a message with an
+    // attachment needs.
+    apiTaskRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'MailSend',
+      actions: ['ses:SendEmail', 'ses:SendRawEmail'],
+      resources: [
+        this.formatArn({ service: 'ses', resource: 'identity', resourceName: cfg.mailIdentityDomain }),
+        this.formatArn({ service: 'ses', resource: 'configuration-set', resourceName: this.mailConfigurationSet.configurationSetName }),
+      ],
+      conditions: { StringEquals: { 'ses:FromAddress': cfg.mailFromAddress } },
+    }));
 
     // ---- task definition ----------------------------------------------------------
     this.taskDefinition = new ecs.FargateTaskDefinition(this, 'ApiTask', {
@@ -127,6 +172,7 @@ export class ApiStack extends cdk.Stack {
         // The public origin (CloudFront / custom domain) is the UI app's; it is
         // configured, not referenced — see EnvConfig.corsAllowedOrigins.
         ...apiStorageEnvironment(cfg, props.documentsBucket, cfg.corsAllowedOrigins),
+        ...apiMailEnvironment(cfg),
         ...apiPublicEnvironment(cfg),
         ...apiTrustedProxyEnvironment(cfg),
       },

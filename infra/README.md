@@ -18,23 +18,23 @@ hosted zone ID, see "ZenTax-Dns").
 infra/
   bin/zentax.ts            CDK app entry: --context env=staging-eu|production-eu [--context imageTag=<sha>]
   cdk.json                 per-cell settings (context.environments.*), context.dns, feature flags; "// ..." keys are comments
-  lib/config.ts            typed loader/validator for that context (cell names, tier/regionLabel, publicHostname, dns; refuses the UI app's keys)
+  lib/config.ts            typed loader/validator for that context (cell names, tier/regionLabel, publicHostname, mail sender, dns; refuses the UI app's keys)
   lib/exports.ts           THE EXPORT CONTRACT — same file as zentax-ui/infra/lib/exports.ts, byte for byte
   lib/network-stack.ts     ZenTax-<Title>-Network  VPC, endpoints, ALL security groups (incl. alb + web), flow-log group
   lib/data-stack.ts        ZenTax-<Title>-Data     KMS, RDS Postgres 16, secrets, documents bucket, api + migrate ECR, log groups, alarm topic + RDS alarms
   lib/cluster-stack.ts     ZenTax-<Title>-Cluster  ECS cluster + Cloud Map namespace, migrate + seed task definitions
-  lib/api-stack.ts         ZenTax-<Title>-Api      Fargate api service (Cloud Map "api"), its roles + grants, running-task alarm
+  lib/api-stack.ts         ZenTax-<Title>-Api      Fargate api service (Cloud Map "api"), its roles + grants, SES configuration set, running-task alarm
   lib/alarms.ts            alarm topic / wiring helpers, RDS max_connections table
   lib/ecs-roles.ts         task/execution role naming shared by Cluster and Api
   lib/github-oidc-stack.ts ZenTax-GithubOidc       GitHub OIDC provider, api + web deploy roles per cell, ZenTaxCfnExecutionPolicy (+ …Edge)
-  lib/dns-stack.ts         ZenTax-Dns              Route 53 hosted zone for zentax.software + the Squarespace / Google Workspace records, SPF, DMARC
+  lib/dns-stack.ts         ZenTax-Dns              Route 53 hosted zone for zentax.software + the Squarespace / Google Workspace records, SPF, DMARC, and the SES sending identity (DKIM + MAIL FROM)
   test/                    jest + aws-cdk-lib/assertions (both cells, OIDC, Dns, the contract, the split rules)
 ```
 
 ```bash
 cd infra
 npm ci
-npm test                                   # 133 tests over staging-eu + production-eu + OIDC + Dns + the export contract
+npm test                                   # 156 tests over staging-eu + production-eu + OIDC + Dns + the export contract
 npx cdk synth --context env=staging-eu     # no AWS calls: account/region/AZs are explicit
 npx cdk synth --context env=production-eu
 npx cdk synth --context env=staging-eu --context imageTag=$(git rev-parse --short=12 HEAD)   # what the pipeline does
@@ -231,7 +231,8 @@ completeness so this table stays the one picture of the cell.
 | web service | UI | 0.25 vCPU / 0.5 GB, **1 task**, autoscale 1–2 | **2 tasks**, autoscale 2–4 |
 | One-off jobs (Cluster stack) | API | `zentax-<cell>-migrate` (migrate image) and `zentax-<cell>-seed` (api image, entrypoint `seed-admin`, `SEED_ADMIN_PASSWORD` from the seed-admin secret) task definitions, 0.25 vCPU / 0.5 GB; families and pinned-revision ARNs exported | same |
 | ALB (Web) + CloudFront (Edge, us-east-1) | UI | Web stack: internet-facing HTTP:80 ALB (default 403, one rule on `X-Origin-Verify-v<n>`). Edge stack: the CloudFront distribution and, with the custom domain on, the ACM certificate for `eu.staging.zentax.software`, A/AAAA aliases in the ZenTax-Dns zone, HSTS, the CloudFront 5xx alarm (see the UI app's README) | same for `eu.app.zentax.software` + the `app.zentax.software` entry hostname (alias + 301 redirect to the public hostname) |
-| IAM | API | task/execution roles `zentax-<cell>-{api,migrate,seed}-{task,exec}`; api task role: `s3:GetObject/PutObject/DeleteObject/AbortMultipartUpload` on the documents bucket's objects + `s3:ListBucket` on the bucket (no `*Version` action: versioning is the undo log) + encrypt/decrypt on the CMK, nothing else | same |
+| SES (Api stack) | API | configuration set `zentax-<cell>`: TLS **required**, reputation metrics on, bounces and complaints suppressed — the cell's own sending channel, so staging's behaviour is measured apart from production's. The sending *identity* is account-level (`ZenTax-Dns`) | same |
+| IAM | API | task/execution roles `zentax-<cell>-{api,migrate,seed}-{task,exec}`; api task role: `s3:GetObject/PutObject/DeleteObject/AbortMultipartUpload` on the documents bucket's objects + `s3:ListBucket` on the bucket (no `*Version` action: versioning is the undo log), encrypt/decrypt on the CMK, and `ses:SendEmail`/`ses:SendRawEmail` on the identity + the configuration set, conditioned on `ses:FromAddress = noreply@staging.zentax.software` — nothing else | same, `ses:FromAddress = noreply@zentax.software` |
 | IAM | UI | `zentax-<cell>-web-{task,exec}` | same |
 | VPC flow logs | API | REJECT traffic to `/zentax/<cell>/vpc-flow-logs` | same |
 | Alarms (SNS `zentax-<cell>-alarms`, optional e-mail via context `alarmEmail`) | API | RDS: CPU > 80 % (5 min), free storage < 10 % of the allocated GB, connections > 80 % of the class's default `max_connections` (`LEAST(RAM/9531392, 5000)`: 225 for t4g.small), freeable memory < 10 % of the class RAM; ECS: api `RunningTaskCount` < desired for 5 min (Container Insights); all notify on ALARM and OK | same (450 connections for t4g.medium) |
@@ -307,9 +308,40 @@ zone would get different name servers) and tagged `Project=ZenTax`.
 | `TXT @` | `google-site-verification=<TOKEN>` **and** `v=spf1 include:_spf.google.com ~all` | token from `context.dns.googleSiteVerification`; SPF is new (missing at Squarespace). Route 53 allows one TXT record set per name, so both values share it |
 | `TXT google._domainkey` | `v=DKIM1;k=rsa;p=<KEY>` | key from `context.dns.googleDkimPublicKey`; longer than 255 characters, emitted as 255-character quoted chunks (a test proves it on the synthesized template) |
 | `TXT _dmarc` | `v=DMARC1; p=none; rua=mailto:dmarc@zentax.software` | new (missing at Squarespace); monitor-only |
+| `CNAME <token>._domainkey` ×3 | `<token>.dkim.amazonses.com` | **SES Easy DKIM** (2048-bit) for the sending identity below — names and values are `Fn::GetAtt`s on the identity; SES mints and rotates the tokens |
+| `MX bounce` | `10 feedback-smtp.eu-central-1.amazonses.com` | SES **custom MAIL FROM** domain |
+| `TXT bounce` | `v=spf1 include:amazonses.com ~all` | SES custom MAIL FROM domain — SPF for the *envelope* sender |
 
 Not recreated on purpose: Squarespace's HTTPS/SVCB record and the
 `_domainconnect` CNAME (they serve Squarespace's own DNS, not the site).
+
+**The sending identity (ADR-0027).** This stack also owns the SES **domain
+identity** for `zentax.software` — the one the product sends deadline reminders,
+digests and invites through. It lives here, not in a cell, because its
+verification and signing records belong in the zone this stack owns, and because
+an SES identity is per account + region while a domain identity covers its
+subdomains: one identity serves both cells (`noreply@zentax.software` in
+production, `noreply@staging.zentax.software` in staging). Easy DKIM publishes
+the three CNAMEs above — no private key is ever in the template — and the custom
+MAIL FROM domain `bounce.zentax.software` carries SES's own MX and SPF, which is
+the point of it: aligning SPF without a MAIL FROM subdomain would mean adding
+`include:amazonses.com` to the **apex** TXT record, where Google Workspace's SPF
+for the company's real mailboxes lives. `BehaviorOnMxFailure` is
+`REJECT_MESSAGE`: while DNS propagates, a send fails loudly and the outbox
+retries, rather than quietly reverting to an `amazonses.com` envelope.
+
+Per cell, the **Api** stack adds an SES configuration set (`zentax-<cell>`, TLS
+required, reputation metrics on, bounces and complaints suppressed) and the api
+task role's `ses:SendEmail`/`ses:SendRawEmail`, scoped to the identity and that
+set and conditioned on the cell's exact From address. There is no SMTP
+credential anywhere: the task role *is* the credential.
+
+After deploying: the identity must read **Verified** and its DKIM **Success** in
+the SES console before any cell can send (SES polls DNS — minutes to hours), a
+new account is in the **sandbox** until production access is granted, and
+`noreply@zentax.software` needs to exist as a Workspace alias because bounce and
+complaint feedback is forwarded to the From address until an event destination
+exists. See ADR-0027, "What an operator must still do by hand".
 
 **The two Google values** are pasted in `infra/cdk.json` (2026-09-05, the
 untruncated values from the Squarespace panel — click each record there to see
@@ -337,9 +369,9 @@ zone by ID.
 
 | Container | Owner | Environment | Secrets (`ValueFrom`, never a value in the template) |
 |---|---|---|---|
-| api | API | `APP_ENV=<cell>`, `DB_HOST`, `DB_PORT`, `DB_NAME=zentax`, `DB_USER=zentax_app`, `DB_SSLMODE=require`, `CORS_ALLOWED_ORIGINS` (see below), `STORAGE_DRIVER=s3`, `STORAGE_S3_BUCKET`, `STORAGE_S3_REGION`, `LOG_FORMAT=json`, `PUBLIC_BASE_URL=https://<publicHostname>` (the Go config's `app.publicBaseUrl`: the base for the absolute links the api will hand out — no consumer yet, the invite link is built by the UI from its own origin until e-mail delivery lands; omitted when no public hostname is configured) | `DB_PASSWORD` ← app-db `.password`, `AUTH_ENCRYPTION_KEY` ← auth-encryption-key |
+| api | API | `APP_ENV=<cell>`, `DB_HOST`, `DB_PORT`, `DB_NAME=zentax`, `DB_USER=zentax_app`, `DB_SSLMODE=require`, `CORS_ALLOWED_ORIGINS` (see below), `STORAGE_DRIVER=s3`, `STORAGE_S3_BUCKET`, `STORAGE_S3_REGION`, `LOG_FORMAT=json`, `MAIL_DRIVER=ses`, `MAIL_FROM_ADDRESS`, `MAIL_FROM_NAME`, `MAIL_SES_REGION`, `MAIL_SES_CONFIGURATION_SET=zentax-<cell>` (see below), `PUBLIC_BASE_URL=https://<publicHostname>` (the Go config's `app.publicBaseUrl`: the base for the absolute links the api hands out, e-mail included; omitted when no public hostname is configured) | `DB_PASSWORD` ← app-db `.password`, `AUTH_ENCRYPTION_KEY` ← auth-encryption-key — **no mail credential: the task role is the credential** |
 | migrate | API | `PGHOST`, `PGPORT`, `PGDATABASE=zentax`, `PGSSLMODE=require`, `APP_DB_USER=zentax_app` | `PGUSER`/`PGPASSWORD` ← db-master, `APP_DB_PASSWORD` ← app-db `.password` |
-| seed | API | the api's whole non-secret block (`APP_ENV`, `DB_*`, `LOG_FORMAT`, `STORAGE_*`; `CORS_ALLOWED_ORIGINS=https://seed.invalid` — the same config loader validates it, seed-admin serves no HTTP; no `PUBLIC_BASE_URL`, it builds no links) | `DB_PASSWORD`, `AUTH_ENCRYPTION_KEY`, `SEED_ADMIN_PASSWORD` ← seed-admin (used when `--password` is absent) |
+| seed | API | the api's whole non-secret block (`APP_ENV`, `DB_*`, `LOG_FORMAT`, `STORAGE_*`, `MAIL_*`; `CORS_ALLOWED_ORIGINS=https://seed.invalid` — the same config loader validates all of it, seed-admin serves no HTTP and sends nothing; no `PUBLIC_BASE_URL`, it builds no links) | `DB_PASSWORD`, `AUTH_ENCRYPTION_KEY`, `SEED_ADMIN_PASSWORD` ← seed-admin (used when `--password` is absent) |
 | web | UI | `NODE_ENV=production`, `PORT=5000`, `GO_API_URL=http://api.zentax-<cell>.local:3000` (the `api-internal-url` export), `STORAGE_MAX_UPLOAD_BYTES` (optional) | – |
 
 **`CORS_ALLOWED_ORIGINS`.** The api's config loader refuses to boot in
@@ -354,6 +386,17 @@ table above); the seed task gets neither a real origin nor that variable.
 Nothing depends on it in practice: the web tier proxies every browser call to
 the api and strips the `Origin` header (ZenTax-UI `server/go-proxy.ts`), so the
 api never performs a CORS check for real traffic.
+
+**`MAIL_*` (ADR-0027).** `MAIL_FROM_ADDRESS` defaults to `noreply@<zoneName>` in
+production and `noreply@staging.<zoneName>` in staging, with `MAIL_FROM_NAME`
+`ZenTax` / `ZenTax Staging`; both can be set per cell
+(`environments.<cell>.mailFromAddress` / `.mailFromName`), and synth refuses an
+address outside `context.dns.zoneName` or its subdomains, because the one
+verified SES identity is that zone. That same string is the api task role's
+`ses:FromAddress` condition, so the role may send only as the address the
+container is configured with — permission and configuration cannot drift apart.
+The seed task carries the block only to satisfy the loader; it has no send
+permission.
 
 ### Rough monthly cost (eu-central-1, on-demand, 730 h, excluding data transfer and free tiers)
 
@@ -376,6 +419,7 @@ it. **Owner** says which app's stacks carry the line.
 | Alarms + SNS | API 5 / UI 3 (+1 Edge) | ~$1 | ~$1 | 8 alarms in eu-central-1 + 1 in us-east-1 × $0.10; e-mail delivery is free |
 | KMS, Secrets Manager, ECR, S3 | API (4 secrets, 2 repos, key) / UI (1 secret, 1 repo) | ~$5 | ~$8 | $1/key, $0.40/secret (5 secrets), ECR $0.10/GB |
 | Route 53 + ACM | API (zone, account-level) / UI (certificate) | ~$1 (shared) | — | $0.50/hosted zone + $0.40/M queries; public ACM certificates are free |
+| SES | API (identity account-level, configuration set per cell) | <$1 | <$1 | $0.10 per 1 000 messages, $0.12/GB of attachments; the identity, DKIM and the configuration set are free |
 | **Total** | | **≈ $220/month** | **≈ $410/month** | production autoscaling to 2× adds up to ~$60 under load |
 
 Note on endpoints: they are the standard "no image pulls or secrets over NAT"
@@ -413,16 +457,22 @@ role. That is why it can be deployed before the bootstrap exists, why CI (whose
 deploy roles have no CloudFormation write permission) can never change it, and
 why the execution policies never need — and never get — any permission over
 IAM policies, including themselves. Changing the deploy roles or the policies
-is always an admin action: edit, `cdk deploy ZenTax-GithubOidc`.
+is always an admin action: edit, `cdk deploy ZenTax-GithubOidc`. It is also why
+**adding a resource type to a cell means redeploying this stack first**: the
+most recent instance is the SES configuration set of ADR-0027 — without
+`ZenTaxCfnExecutionPolicyEdge`'s `SesConfigurationSets` statement, the next Api
+deploy stops on an `AccessDenied` for `ses:CreateConfigurationSet`.
 
 ### 1b. The DNS zone (admin credentials; once per account)
 
 ```bash
 # The two Google values (context.dns.googleSiteVerification, context.dns.googleDkimPublicKey)
 # are already in cdk.json; `cdk synth` must print NO dns warning (it warns while either is empty).
-npx cdk deploy ZenTax-Dns   # termination protection on; the zone + every record set are RETAINed
-# outputs: HostedZoneId  -> zentax-ui/infra/cdk.json, environments.<cell>.hostedZoneId (both cells)
-#          NameServers   -> Squarespace: Domains -> zentax.software -> DNS -> use custom nameservers
+npx cdk deploy ZenTax-Dns   # termination protection on; everything in it is RETAINed
+# outputs: HostedZoneId        -> zentax-ui/infra/cdk.json, environments.<cell>.hostedZoneId (both cells)
+#          NameServers         -> Squarespace: Domains -> zentax.software -> DNS -> use custom nameservers
+#          SendingIdentityArn  -> the SES identity to watch turn Verified
+#          MailFromDomain      -> bounce.zentax.software
 ```
 
 Verify before switching the delegation: `dig @<one of the NameServers> zentax.software MX`,
@@ -431,6 +481,24 @@ return the values above. Then change the nameservers at Squarespace; the site
 and mail keep working because the records are identical. The
 `app.zentax.software` / `eu.*.zentax.software` records appear only once the UI
 app's Edge stack is deployed with the custom domain on.
+
+**Then, before the product can send anything** (ADR-0027 — none of this is
+instantaneous, so start it early):
+
+1. Watch the identity in the SES console (eu-central-1) until it reads
+   **Verified** and DKIM reads **Success**. SES polls DNS; it takes minutes to
+   hours, and it cannot even start until the delegation above is live.
+2. **Request production access.** A new account is in the SES **sandbox**:
+   ~200 messages/day, 1/s, and only to verified addresses or domains — a
+   customer invite bounces. It is a support case (use case, volume, bounce
+   handling), answered in hours to a day. Staging can stay sandboxed
+   deliberately; production cannot ship without it.
+3. **Make `noreply@zentax.software` receivable** — a Google Workspace alias or
+   group. With no SES event destination yet, bounce and complaint feedback is
+   forwarded to the From address; point `dmarc@zentax.software` (already in the
+   DMARC record) at the same place.
+4. After a fortnight of DMARC reports showing our own traffic passing, tighten
+   `_dmarc` from `p=none` to `p=quarantine` (edit `dmarcRecordValue`).
 
 ### 2. Bootstrap once per account/region with the scoped execution policies
 

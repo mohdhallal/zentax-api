@@ -1,5 +1,6 @@
 import * as cdk from 'aws-cdk-lib';
 import * as route53 from 'aws-cdk-lib/aws-route53';
+import * as ses from 'aws-cdk-lib/aws-ses';
 import { Construct, IConstruct } from 'constructs';
 import { DnsConfig } from './config';
 
@@ -31,19 +32,38 @@ export function dmarcRecordValue(zoneName: string): string {
   return `v=DMARC1; p=none; rua=mailto:dmarc@${zoneName}`;
 }
 
+/**
+ * The envelope-sender subdomain of the product's own mail (ADR-0027 decision
+ * 8). A custom MAIL FROM domain is not decoration: without one SES's envelope
+ * is `amazonses.com`, and aligning SPF to our domain would mean adding
+ * `include:amazonses.com` to the APEX TXT record — the record that carries
+ * Google Workspace's SPF for the company's real mailboxes. A subdomain keeps
+ * the two apart: SES publishes its MX and SPF under `bounce.<zone>`, the apex
+ * TXT set is untouched, and DMARC aligns through DKIM either way.
+ */
+export const SES_MAIL_FROM_LABEL = 'bounce';
+export function sesMailFromDomain(zoneName: string): string {
+  return `${SES_MAIL_FROM_LABEL}.${zoneName}`;
+}
+
 const TTL = cdk.Duration.hours(1);
 
 /**
- * RETAIN every `AWS::Route53::RecordSet` of the stack (DeletionPolicy and
- * UpdateReplacePolicy). The zone is RETAINed already, but a retained zone
- * whose records are deleted with the stack is just as fatal: the registrar
- * delegates to it, so an empty zone takes the site and the mail down at
- * once. An aspect rather than a call per record, so a record added later
- * cannot forget it (the test suite checks every record set).
+ * RETAIN **everything** in this stack (DeletionPolicy and UpdateReplacePolicy).
+ * The zone is RETAINed already, but a retained zone whose records are deleted
+ * with the stack is just as fatal: the registrar delegates to it, so an empty
+ * zone takes the site and the mail down at once. The same holds for the SES
+ * sending identity and its DKIM records — dropping them un-signs live mail and
+ * re-verification is not instantaneous.
+ *
+ * An aspect rather than a call per resource, so anything added later cannot
+ * forget it, and the resource types are deliberately not enumerated: every
+ * resource that ever belongs in this stack is one nothing may delete by
+ * accident (the test suite asserts exactly that over the whole template).
  */
-class RetainRecordSets implements cdk.IAspect {
+class RetainEverything implements cdk.IAspect {
   visit(node: IConstruct): void {
-    if (cdk.CfnResource.isCfnResource(node) && node.cfnResourceType === route53.CfnRecordSet.CFN_RESOURCE_TYPE_NAME) {
+    if (cdk.CfnResource.isCfnResource(node)) {
       node.applyRemovalPolicy(cdk.RemovalPolicy.RETAIN);
     }
   }
@@ -52,7 +72,9 @@ class RetainRecordSets implements cdk.IAspect {
 /**
  * ZenTax-Dns: account-level, the public hosted zone for the apex domain and
  * every record it carries — the Squarespace site and Google Workspace mail
- * records copied from the registrar's panel, plus SPF and DMARC. It is
+ * records copied from the registrar's panel, plus SPF and DMARC — and the
+ * product's own SES sending identity, whose DKIM and MAIL FROM records are
+ * created here with it rather than pasted in afterwards (ADR-0027). It is
  * deployed by the admin identity with the CLI's own credentials (the app gives
  * it the CliCredentialsStackSynthesizer, like ZenTax-GithubOidc): hosted-zone
  * creation stays out of the pipeline's execution policy on purpose.
@@ -74,6 +96,8 @@ class RetainRecordSets implements cdk.IAspect {
  */
 export class DnsStack extends cdk.Stack {
   public readonly zone: route53.PublicHostedZone;
+  /** The one SES domain identity both cells send through (ADR-0027). */
+  public readonly sendingIdentity: ses.EmailIdentity;
 
   constructor(scope: Construct, id: string, props: DnsStackProps) {
     // Termination protection on unless a caller says otherwise (the app never does).
@@ -88,8 +112,8 @@ export class DnsStack extends cdk.Stack {
     // Deleting the stack must never delete the zone: the name servers are
     // delegated at the registrar, and a recreated zone gets different ones.
     this.zone.applyRemovalPolicy(cdk.RemovalPolicy.RETAIN);
-    // ...nor any record in it (see RetainRecordSets).
-    cdk.Aspects.of(this).add(new RetainRecordSets());
+    // ...nor any record in it, nor the sending identity (see RetainEverything).
+    cdk.Aspects.of(this).add(new RetainEverything());
     // Explicit resource tags (`@aws-cdk/core:explicitStackTags` keeps the
     // stack-level tags off the resources): the zone outlives the stack.
     cdk.Tags.of(this.zone).add('Project', 'ZenTax');
@@ -156,6 +180,31 @@ export class DnsStack extends cdk.Stack {
       ttl: TTL,
     });
 
+    // ---- The product's own sending identity (ADR-0027) -----------------------
+    // Verified once, here, for BOTH cells: SES identities are per account +
+    // region, and a domain identity covers its subdomains, so production
+    // (noreply@<zone>) and staging (noreply@staging.<zone>) share it. It lives
+    // in this stack rather than a cell's because its verification and signing
+    // records belong in the zone this stack owns — created with the identity
+    // instead of pasted in afterwards, and RETAINed by the same aspect as
+    // everything else here (deleting a DKIM record un-signs live mail).
+    //
+    // Easy DKIM at 2048 bits publishes three CNAMEs (<token>._domainkey ->
+    // <token>.dkim.amazonses.com) that SES rotates on its own; no private key
+    // ever exists here. REJECT_MESSAGE on a missing MAIL FROM MX is the
+    // fail-closed choice: while DNS propagates, a send fails loudly and the
+    // outbox retries it, rather than quietly reverting to an amazonses.com
+    // envelope and a different bounce path.
+    this.sendingIdentity = new ses.EmailIdentity(this, 'SendingIdentity', {
+      identity: ses.Identity.publicHostedZone(this.zone),
+      dkimIdentity: ses.DkimIdentity.easyDkim(ses.EasyDkimSigningKeyLength.RSA_2048_BIT),
+      mailFromDomain: sesMailFromDomain(zoneName),
+      mailFromBehaviorOnMxFailure: ses.MailFromBehaviorOnMxFailure.REJECT_MESSAGE,
+    });
+    // No event destination yet, so SES forwards bounces and complaints to the
+    // From address: `noreply@<zone>` has to be a real Workspace alias before
+    // the first send (ADR-0027, "What an operator must still do").
+
     // ---- Outputs (plain: the UI app reads the zone ID from its own cdk.json) --
     new cdk.CfnOutput(this, 'HostedZoneId', {
       value: this.zone.hostedZoneId,
@@ -164,6 +213,14 @@ export class DnsStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'NameServers', {
       value: cdk.Fn.join(', ', this.zone.hostedZoneNameServers ?? []),
       description: `The four name servers to enter at the registrar (Squarespace) for ${zoneName}`,
+    });
+    new cdk.CfnOutput(this, 'SendingIdentityArn', {
+      value: this.sendingIdentity.emailIdentityArn,
+      description: `SES sending identity for ${zoneName} — deploy, then wait for it to read Verified and its DKIM Success (SES polls DNS; minutes to hours). Until both, every send fails`,
+    });
+    new cdk.CfnOutput(this, 'MailFromDomain', {
+      value: sesMailFromDomain(zoneName),
+      description: 'Custom MAIL FROM (envelope sender) domain: its MX and SPF are in this zone, so SES\'s SPF stays out of the apex TXT record Google Workspace uses',
     });
   }
 }

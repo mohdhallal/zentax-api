@@ -68,6 +68,28 @@ describe.each(ENVS)('ZenTax-%s-Cluster', (env) => {
     cluster.hasOutput('SeedAdminSecretArn', { Export: { Name: `zentax-${env}-seed-admin-secret-arn` } });
   });
 
+  /**
+   * ADR-0027. The seed CLI shares the Go config loader, and a deployed profile
+   * validates the whole configuration at start-up — so a `seed-admin` run must
+   * not fail on a mail setting it will never use. Carrying the block is safe
+   * because configuration does not authorize anything: only the api's task role
+   * has ses:SendEmail, so the seed task cannot send whatever its env says.
+   */
+  test('the seed task carries the mail config so the loader is satisfied, and has no permission to send', () => {
+    const seed = taskDefinition(cluster, '-seed').Properties.ContainerDefinitions[0];
+    const byName = Object.fromEntries(seed.Environment.map((e: any) => [e.Name, e.Value]));
+    expect(byName.MAIL_DRIVER).toBe('ses');
+    expect(byName.MAIL_SES_CONFIGURATION_SET).toBe(`zentax-${env}`);
+    expect(byName.MAIL_FROM_ADDRESS).toMatch(/^noreply@(staging\.)?zentax\.software$/);
+    // No SES anything in this stack: no configuration set, no send permission,
+    // no policy on the seed or migrate task roles that names the service.
+    cluster.resourceCountIs('AWS::SES::ConfigurationSet', 0);
+    expect(JSON.stringify(cluster.toJSON())).not.toContain('ses:');
+    for (const [, td] of resourcesOfType(cluster, 'AWS::ECS::TaskDefinition')) {
+      expect(JSON.stringify(td.Properties.ContainerDefinitions[0].Secrets ?? [])).not.toContain('MAIL_');
+    }
+  });
+
   test('both jobs log to their own /zentax/<env>/* log group and export families + pinned-revision ARNs for CI', () => {
     for (const [, td] of resourcesOfType(cluster, 'AWS::ECS::TaskDefinition')) {
       const logging = td.Properties.ContainerDefinitions[0].LogConfiguration;

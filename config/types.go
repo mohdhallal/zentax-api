@@ -21,6 +21,7 @@ type Config struct {
 	Auth             AuthConfig             `json:"auth"`
 	Storage          StorageConfig          `json:"storage"`
 	RateLimit        RateLimitConfig        `json:"rateLimit"`
+	Mail             MailConfig             `json:"mail"`
 }
 
 // Storage drivers (ADR-0022): the filesystem adapter (self-host default, tests)

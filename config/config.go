@@ -177,6 +177,11 @@ func (c *Config) validate() error {
 	if err := validatePublicBaseURL(c.App.PublicBaseURL); err != nil {
 		return err
 	}
+	// Mail defaults are applied before the deployed rules run, because the
+	// rules judge the effective configuration: a deployed tier that says
+	// nothing about mail has defaulted to the log driver, and that is exactly
+	// the case validateDeployed must refuse.
+	c.Mail.ApplyDefaults()
 	if c.IsDeployed() {
 		if err := c.validateDeployed(); err != nil {
 			return err
@@ -193,6 +198,11 @@ func (c *Config) validate() error {
 	c.RateLimit.ApplyDefaults()
 	if err := c.RateLimit.validate(); err != nil {
 		return fmt.Errorf("invalid rate limit config: %w", err)
+	}
+	// Mail defaults, like the rate limiter's, are code rather than file — see
+	// the ApplyDefaults call above, which had to run before validateDeployed.
+	if err := c.Mail.validate(); err != nil {
+		return fmt.Errorf("invalid mail config: %w", err)
 	}
 	return nil
 }
@@ -250,6 +260,8 @@ func (c *Config) validateDeployed() error {
 		errs = append(errs, fmt.Errorf("app.publicBaseUrl must use https in %s, got %q (set %s to the https public origin)",
 			c.App.Env, c.App.PublicBaseURL, EnvPublicBaseURL))
 	}
+
+	errs = append(errs, c.Mail.validateDeployed(c.App.Env)...)
 
 	return errors.Join(errs...)
 }
@@ -325,6 +337,7 @@ func mergeEnvOverrides(conf *Config) {
 	}
 	mergeStorageEnvOverrides(&conf.Storage)
 	mergeRateLimitEnvOverrides(&conf.RateLimit)
+	mergeMailEnvOverrides(&conf.Mail)
 }
 
 // mergeAppEnvOverrides applies PUBLIC_BASE_URL over app.publicBaseUrl. An

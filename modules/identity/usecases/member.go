@@ -103,8 +103,27 @@ func (uc *UseCases) Invite(ctx context.Context, input domain.CreateMemberInput) 
 		return nil, err
 	}
 
-	raw, expiresAt, err := uc.issueInvite(ctx, user.ID, tenantID)
+	issued, err := uc.issueInvite(ctx, user.ID, tenantID)
 	if err != nil {
+		return nil, err
+	}
+
+	// The link now goes to the invited address, queued on THIS transaction (see
+	// deliverInvite) rather than sent from here. The cleartext token STAYS in
+	// the response for the moment, because the seeding tool and the demo oracle
+	// read it from there; taking it out is the follow-up once delivery is proven
+	// in a deployment, and it is what turns the invite into a credential the
+	// administrator never sees.
+	if err := uc.deliverInvite(ctx, domain.InviteMail{
+		TokenID:  issued.TokenID,
+		RawToken: issued.Raw,
+		// The PERSISTED address and name, not the request's: the mail must
+		// greet the account that now exists, and the row is the only thing that
+		// says what that is.
+		Email:     user.Email,
+		Name:      user.Name,
+		ExpiresAt: issued.ExpiresAt,
+	}); err != nil {
 		return nil, err
 	}
 
@@ -125,10 +144,10 @@ func (uc *UseCases) Invite(ctx context.Context, input domain.CreateMemberInput) 
 	// plus the window of the credential the invite just minted, so an invite
 	// and a re-issue (member.invite_reissued) also compare directly.
 	if err := uc.audit.Record(ctx, "member.invited", "user", member.ID,
-		audit.Changes(nil, auditInvitedValues(member, expiresAt))); err != nil {
+		audit.Changes(nil, auditInvitedValues(member, issued.ExpiresAt))); err != nil {
 		return nil, err
 	}
-	return &domain.InviteResult{Member: member, RawToken: raw, ExpiresAt: expiresAt}, nil
+	return &domain.InviteResult{Member: member, RawToken: issued.Raw, ExpiresAt: issued.ExpiresAt}, nil
 }
 
 // ReissueInvite mints a fresh token for a still-invited member and revokes
@@ -148,8 +167,20 @@ func (uc *UseCases) ReissueInvite(ctx context.Context, memberID string) (*domain
 	if _, err := uc.invites.RevokeUnusedForUser(ctx, member.ID); err != nil {
 		return nil, err
 	}
-	raw, expiresAt, err := uc.issueInvite(ctx, member.ID, tenantID)
+	issued, err := uc.issueInvite(ctx, member.ID, tenantID)
 	if err != nil {
+		return nil, err
+	}
+	// A re-issue is the "resend the link" action, so it delivers too — and
+	// because the dedupe key is the TOKEN's id and this is a new token, it is a
+	// new message rather than one the outbox suppresses as already owed.
+	if err := uc.deliverInvite(ctx, domain.InviteMail{
+		TokenID:   issued.TokenID,
+		RawToken:  issued.Raw,
+		Email:     member.Email,
+		Name:      member.Name,
+		ExpiresAt: issued.ExpiresAt,
+	}); err != nil {
 		return nil, err
 	}
 	// A re-issue is one-sided: nothing on the member row moves, a credential is
@@ -160,20 +191,29 @@ func (uc *UseCases) ReissueInvite(ctx context.Context, memberID string) (*domain
 	if err := uc.audit.Record(ctx, "member.invite_reissued", "user", member.ID,
 		audit.Changes(nil, audit.Values{
 			"status":          member.Status,
-			"inviteExpiresAt": expiresAt,
+			"inviteExpiresAt": issued.ExpiresAt,
 			"grants":          auditMemberGrants(member.Grants),
 		})); err != nil {
 		return nil, err
 	}
-	return &domain.InviteResult{Member: member, RawToken: raw, ExpiresAt: expiresAt}, nil
+	return &domain.InviteResult{Member: member, RawToken: issued.Raw, ExpiresAt: issued.ExpiresAt}, nil
+}
+
+// issuedInvite is a freshly minted invite credential: the row's id (which
+// identifies the ONE mail it is worth — see the outbox dedupe key), the
+// cleartext the recipient needs, and the window it is valid for.
+type issuedInvite struct {
+	TokenID   string
+	Raw       string
+	ExpiresAt time.Time
 }
 
 // issueInvite mints "zti_" + 32 random bytes (base64url), stores its SHA-256
 // and returns the cleartext + expiry.
-func (uc *UseCases) issueInvite(ctx context.Context, userID, tenantID string) (string, time.Time, error) {
+func (uc *UseCases) issueInvite(ctx context.Context, userID, tenantID string) (issuedInvite, error) {
 	secret, err := crypto.NewSessionToken()
 	if err != nil {
-		return "", time.Time{}, err
+		return issuedInvite{}, err
 	}
 	raw := domain.InviteTokenPrefix + secret
 
@@ -183,16 +223,23 @@ func (uc *UseCases) issueInvite(ctx context.Context, userID, tenantID string) (s
 		createdBy = &id
 	}
 	expiresAt := uc.now().Add(domain.InviteTTL).UTC()
-	if _, err := uc.invites.Create(ctx, domain.CreateInviteTokenInput{
+	token, err := uc.invites.Create(ctx, domain.CreateInviteTokenInput{
 		TokenHash: crypto.HashToken(raw),
 		UserID:    userID,
 		TenantID:  tenantID,
 		CreatedBy: createdBy,
 		ExpiresAt: expiresAt,
-	}); err != nil {
-		return "", time.Time{}, err
+	})
+	if err != nil {
+		return issuedInvite{}, err
 	}
-	return raw, expiresAt, nil
+	// The row's id, not a second identifier: it is what makes "this invite has
+	// already queued its mail" a fact Postgres can enforce.
+	var tokenID string
+	if token != nil {
+		tokenID = token.ID
+	}
+	return issuedInvite{TokenID: tokenID, Raw: raw, ExpiresAt: expiresAt}, nil
 }
 
 // UpdateMember renames and/or enables/disables a member. Disabling revokes

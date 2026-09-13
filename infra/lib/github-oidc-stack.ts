@@ -392,6 +392,12 @@ export class GithubOidcStack extends cdk.Stack {
   /**
    * The overflow policy — everything the first one has no character budget for.
    *
+   * 0. SES configuration sets, one per cell (ADR-0027): the api's sending
+   *    channel, created by the Api stack. Scoped to `configuration-set/zentax-*`.
+   *    The sending identity is NOT here — it belongs to the admin-deployed
+   *    ZenTax-Dns stack, so a pipeline can neither create, verify nor replace
+   *    the domain the product sends as, and no verb here can send anything.
+   *
    * 1. ACM, for the UI app's Edge stack once a custom domain is on: the
    *    certificate it creates in-stack (DNS validation into the ZenTax-Dns
    *    hosted zone — the Route 53 *record* calls are in the first policy, on
@@ -426,7 +432,7 @@ export class GithubOidcStack extends cdk.Stack {
   private makeCfnExecutionPolicyEdge(): iam.ManagedPolicy {
     return new iam.ManagedPolicy(this, 'CfnExecutionPolicyEdge', {
       managedPolicyName: CFN_EXECUTION_POLICY_EDGE_NAME,
-      description: 'ZenTax: second CloudFormation execution policy for the CDK bootstrap — what the first one has no room for: ACM for the UI app\'s Edge stack (custom-domain certificate) and the Route 53 zone calls behind each cell\'s Cloud Map private DNS namespace',
+      description: 'ZenTax: second CloudFormation execution policy for the CDK bootstrap — what the first one has no room for: ACM for the UI app\'s Edge stack (custom-domain certificate), the Route 53 zone calls behind each cell\'s Cloud Map private DNS namespace, and the per-cell SES configuration set',
       statements: [
         new iam.PolicyStatement({
           sid: 'AcmCertificates',
@@ -450,6 +456,22 @@ export class GithubOidcStack extends cdk.Stack {
           sid: 'CloudMapPrivateDnsNamespaceDelete',
           actions: ['route53:DeleteHostedZone'],
           resources: [`arn:${this.partition}:route53:::hostedzone/*`],
+        }),
+        // 3. The per-cell SES configuration set each Api stack creates
+        // (ADR-0027 decision 8) — the cell's own sending channel and metrics.
+        // Only the configuration set: the sending IDENTITY is created by the
+        // admin-deployed ZenTax-Dns stack, so no identity or DKIM verb belongs
+        // in a pipeline policy, and neither does any verb that sends.
+        new iam.PolicyStatement({
+          sid: 'SesConfigurationSets',
+          actions: [
+            'ses:CreateConfigurationSet', 'ses:DeleteConfigurationSet', 'ses:GetConfigurationSet',
+            'ses:PutConfigurationSetDeliveryOptions', 'ses:PutConfigurationSetReputationOptions',
+            'ses:PutConfigurationSetSendingOptions', 'ses:PutConfigurationSetSuppressionOptions',
+            'ses:PutConfigurationSetTrackingOptions', 'ses:PutConfigurationSetVdmOptions',
+            'ses:TagResource', 'ses:UntagResource', 'ses:ListTagsForResource',
+          ],
+          resources: [`arn:${this.partition}:ses:*:${this.account}:configuration-set/zentax-*`],
         }),
       ],
     });

@@ -166,6 +166,7 @@ func TestCellNameTakesTheDeployedValidationPath(t *testing.T) {
 		c.CORS.AllowedOrigins = []string{"https://eu.app.zentax.software"}
 		c.Log.Format = "json"
 		c.App.PublicBaseURL = "https://eu.app.zentax.software"
+		c.Mail = MailConfig{Driver: MailDriverSES, FromAddress: "no-reply@zentax.software", SES: MailSESConfig{Region: "eu-central-1"}}
 		require.NoError(t, c.validate(), cell)
 	}
 }
@@ -238,6 +239,11 @@ func deployedTaskEnv(t *testing.T) {
 	t.Setenv(EnvStorageS3Bucket, "zentax-documents-staging-eu")
 	t.Setenv(EnvStorageS3Region, "eu-central-1")
 	t.Setenv(EnvLogFormat, "json")
+	// A deployed tier must be able to deliver mail (config/mail.go), so the
+	// task injects the transport alongside the database and the bucket.
+	t.Setenv(EnvMailDriver, MailDriverSES)
+	t.Setenv(EnvMailFromAddress, "no-reply@zentax.software")
+	t.Setenv(EnvMailSESRegion, "eu-central-1")
 }
 
 // TestLoad_CellBootsFromItsTierFile is the other half of the regression: the

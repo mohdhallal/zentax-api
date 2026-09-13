@@ -6,7 +6,7 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as servicediscovery from 'aws-cdk-lib/aws-servicediscovery';
 import { Construct } from 'constructs';
-import { EnvConfig } from './config';
+import { EnvConfig, mailConfigurationSetName } from './config';
 import { APP_DB_USER, DB_NAME, LogGroups, Repositories } from './data-stack';
 import { makeExecutionRole, makeTaskRole } from './ecs-roles';
 import { exportName } from './exports';
@@ -49,6 +49,28 @@ export function apiStorageEnvironment(cfg: EnvConfig, documentsBucket: s3.IBucke
     STORAGE_DRIVER: 's3',
     STORAGE_S3_BUCKET: documentsBucket.bucketName,
     STORAGE_S3_REGION: cfg.region,
+  };
+}
+
+/**
+ * How the api sends mail in a cell (ADR-0027): the `ses` adapter, the cell's
+ * own From identity and its own configuration set. There is no credential —
+ * the task role IS the credential, which is why `ses` and not SMTP is the
+ * hosted adapter (ADR-0014: the safest secret is the one that does not exist).
+ *
+ * The seed CLI shares the config loader and gets the same block, exactly as it
+ * gets a placeholder CORS origin: a deployed profile validates the whole
+ * configuration at start-up, and a `seed-admin` run must not fail on a mail
+ * setting it will never use. It cannot send regardless — sending is gated by
+ * the task role, and only the api's has `ses:SendEmail` (api-stack.ts).
+ */
+export function apiMailEnvironment(cfg: EnvConfig): Record<string, string> {
+  return {
+    MAIL_DRIVER: 'ses',
+    MAIL_FROM_ADDRESS: cfg.mailFromAddress,
+    MAIL_FROM_NAME: cfg.mailFromName,
+    MAIL_SES_REGION: cfg.region,
+    MAIL_SES_CONFIGURATION_SET: mailConfigurationSetName(cfg.name),
   };
 }
 
@@ -157,6 +179,8 @@ export class ClusterStack extends cdk.Stack {
         ...apiDbEnvironment(cfg, props.database),
         // seed-admin serves no HTTP; the placeholder only satisfies config validation.
         ...apiStorageEnvironment(cfg, props.documentsBucket, 'https://seed.invalid'),
+        // ...and it sends nothing; the block is here for the same reason.
+        ...apiMailEnvironment(cfg),
       },
       secrets: {
         ...apiDbSecrets(props.appDbSecret, props.authEncryptionKeySecret),

@@ -28,6 +28,12 @@ func deployedValid() *Config {
 		Log:      &logger.Config{Level: "info", Format: "json"},
 		Auth:     AuthConfig{EncryptionKey: testKeyB64, SessionCookieSecure: true},
 		Storage:  StorageConfig{Driver: StorageDriverFS, FS: StorageFSConfig{Root: "/var/lib/zentax/documents"}},
+		// A deployed tier must be able to deliver mail — see mail_test.go.
+		Mail: MailConfig{
+			Driver:      MailDriverSES,
+			FromAddress: "no-reply@zentax.software",
+			SES:         MailSESConfig{Region: "eu-central-1"},
+		},
 	}
 }
 
@@ -234,6 +240,7 @@ func TestDeployed_AllViolationsReportedAtOnce(t *testing.T) {
 	require.Error(t, err)
 	for _, want := range []string{
 		EnvAuthEncryptionKey, EnvAuthSessionCookieSecure, EnvDatabaseURL, EnvCORSAllowedOrigins, EnvLogFormat, EnvPublicBaseURL,
+		EnvMailDriver, // a config that says nothing about mail cannot deliver any
 	} {
 		assert.Contains(t, err.Error(), want)
 	}
@@ -429,6 +436,9 @@ func TestShippedDeployedConfigFiles_BootWithEnv(t *testing.T) {
 	t.Setenv(EnvStorageS3Bucket, "zentax-documents-staging")
 	t.Setenv(EnvStorageS3Region, "eu-central-1")
 	t.Setenv(EnvPublicBaseURL, "https://eu.staging.zentax.software/")
+	t.Setenv(EnvMailDriver, MailDriverSES)
+	t.Setenv(EnvMailFromAddress, "no-reply@zentax.software")
+	t.Setenv(EnvMailSESRegion, "eu-central-1")
 
 	for _, env := range []string{EnvStaging, EnvProduction} {
 		raw, err := os.ReadFile(filepath.Join("..", configDir, env+".json"))
@@ -455,6 +465,9 @@ func TestShippedDeployedConfigFiles_BootWithoutPublicBaseURL(t *testing.T) {
 	t.Setenv(EnvStorageS3Bucket, "zentax-documents-staging")
 	t.Setenv(EnvStorageS3Region, "eu-central-1")
 	t.Setenv(EnvPublicBaseURL, "")
+	t.Setenv(EnvMailDriver, MailDriverSES)
+	t.Setenv(EnvMailFromAddress, "no-reply@zentax.software")
+	t.Setenv(EnvMailSESRegion, "eu-central-1")
 
 	for _, env := range []string{EnvStaging, EnvProduction} {
 		raw, err := os.ReadFile(filepath.Join("..", configDir, env+".json"))

@@ -114,8 +114,11 @@ func MemberToJSON(m *domain.Member) map[string]any {
 }
 
 // InviteToJSON renders a freshly issued invite. The cleartext invite token
-// appears HERE AND ONLY HERE (only its hash is stored). withMember embeds the
-// member (first invite) or not (re-issue).
+// exists in three places, each with its own lifetime: this response, once, to
+// the administrator who issued it; the outbox row that carries the mail, sealed
+// at rest and cleared the moment the message settles (platform/outbox/seal.go);
+// and the rendered message itself. Only its hash is stored on the invite.
+// withMember embeds the member (first invite) or not (re-issue).
 func InviteToJSON(res *domain.InviteResult, withMember bool) map[string]any {
 	out := map[string]any{
 		"inviteToken":     res.RawToken,

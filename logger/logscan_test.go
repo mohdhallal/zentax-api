@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"io/fs"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -36,15 +37,27 @@ import (
 //     request target. The handler would redact it at runtime; failing here
 //     instead puts the message in front of the author, who can log the
 //     reference id they actually meant.
+//  4. RENDERED CONTENT AND CREDENTIALS, by three routes at once — the key
+//     ("text", "subject", "html"), the VALUE's origin (anything read out of a
+//     .Text / .Body / .Payload / .Token field), and the literal shape of a
+//     credential ("zti_…", "token=…", "Bearer …"). All three exist because the
+//     leak this rule was written for slipped past every one of the others: the
+//     log mail driver wrote `logger.String("text", msg.Text)`, a whole rendered
+//     invite mail — a live single-use token, the recipient's name, a tenant's
+//     task data — under a key the runtime redactor does not know and the gate
+//     did not ban, while the IDENTICAL content under "body" would have failed
+//     the build. A rule that only bans one spelling of "the message" bans
+//     nothing.
 //
 // It runs inside `go test ./...`, so it is a gate for every developer and not
 // only for CI; ci.yml also runs it as a named step so a failure reads as what
 // it is.
 
 // bannedKeys are keys that are not personal data themselves but name a value
-// that reliably is: the request target, or a payload blob. Matched whole
-// (normalized), so "detailsType" — the shape of a details value, which is
-// log-safe — is unaffected.
+// that reliably is: the request target, a payload blob, or a rendered message.
+// Matched whole (normalized), so "detailsType" — the shape of a details value,
+// which is log-safe — is unaffected, and so are the sizes an adapter SHOULD log
+// in place of the thing itself ("textBytes", "subjectBytes", "payloadBytes").
 var bannedKeys = map[string]string{
 	"url":         "a URL carries its query string; log route + logger.RedactPath/RedactQuery instead",
 	"uri":         "a URI carries its query string; log route + logger.RedactPath/RedactQuery instead",
@@ -54,6 +67,20 @@ var bannedKeys = map[string]string{
 	"payload":     "a payload must never be logged (ADR-0015)",
 	"querystring": "log the query keys only: logger.RedactQuery",
 	"rawquery":    "log the query keys only: logger.RedactQuery",
+
+	// A rendered message, under every name it goes by. ADR-0027 decision 9: a
+	// delivery may not log the recipient, the subject, the body or the
+	// rendered template. Log the template name and the byte counts instead.
+	"text":         "a rendered body must never be logged (ADR-0027 d9); log the template and textBytes",
+	"subject":      "a subject is the tenant's content and can name a person; log the template",
+	"html":         "a rendered body must never be logged (ADR-0027 d9); log htmlBytes",
+	"htmlbody":     "a rendered body must never be logged (ADR-0027 d9); log htmlBytes",
+	"textbody":     "a rendered body must never be logged (ADR-0027 d9); log textBytes",
+	"messagebody":  "a rendered body must never be logged (ADR-0027 d9); log its byte count",
+	"renderedbody": "a rendered body must never be logged (ADR-0027 d9); log its byte count",
+	"rendered":     "a rendered message must never be logged (ADR-0027 d9); log the template it came from",
+	"content":      "content is the caller's or the tenant's; log its size or its type",
+	"link":         "an activation or download link carries the credential that makes it work",
 }
 
 // bannedSelectors are the request fields whose content is the caller's, in the
@@ -62,6 +89,39 @@ var bannedSelectors = map[string]string{
 	"RequestURI": "the raw target includes the query string (?search=<an e-mail>)",
 	"RawQuery":   "a query value is the caller's data",
 	"RemoteAddr": "a network address is personal data, and behind a proxy it is not even the caller's",
+}
+
+// bannedValueSelectors are fields whose VALUE is content or a credential
+// wherever it goes and whatever key it is given. The key-based rules can only
+// catch an author who names the field honestly; this one follows the value.
+//
+// A length is exempt, because `len(msg.Text)` is a number and numbers are the
+// point of the replacement line — see isLenCall.
+var bannedValueSelectors = map[string]string{
+	"Text":        "a rendered text body (ADR-0027 d9); log len() of it",
+	"HTML":        "a rendered HTML body (ADR-0027 d9); log len() of it",
+	"Body":        "a request, response or message body (ADR-0015); log len() of it",
+	"Subject":     "a subject line is the tenant's content; log the template name",
+	"Payload":     "a frozen payload can hold a credential and a person's data; log the template",
+	"Token":       "a token is a credential; log the id of the thing it grants, never the token",
+	"RawToken":    "the cleartext credential itself; log the token's id",
+	"InviteToken": "a live invite credential; log the invite's id",
+	"Secret":      "a secret is never loggable, redacted or not",
+	"Password":    "a password is never loggable, redacted or not",
+	"Plaintext":   "the opened form of something that was encrypted for a reason",
+}
+
+// credentialShapes match a STRING LITERAL that is, or contains, a credential.
+// A leak does not have to come from a variable: a debug line pasted with a real
+// token in it, or a message built around "?token=", writes the same bytes to
+// the same unerasable store.
+var credentialShapes = []struct {
+	pattern *regexp.Regexp
+	why     string
+}{
+	{regexp.MustCompile(`zti_[A-Za-z0-9_\-]{6,}`), "a zti_ credential (invite / API token) is in this literal"},
+	{regexp.MustCompile(`(?i)(token|secret|password|apikey|api_key)=[^\s"']`), "a credential in a key=value or query string"},
+	{regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._\-]{8,}`), "a bearer credential is in this literal"},
 }
 
 var fieldConstructors = map[string]bool{
@@ -125,26 +185,68 @@ func scanFile(fset *token.FileSet, file *ast.File) []violation {
 		redacting := onLoggerPkg && strings.HasPrefix(name, "Redact")
 
 		if !redacting {
-			for _, arg := range call.Args {
-				ast.Inspect(arg, func(inner ast.Node) bool {
-					// logger.RedactQuery(r.URL.RawQuery) is the sanctioned use,
-					// wherever it appears: stop before its arguments.
-					if isRedactCall(inner) {
-						return false
+			var walkArg func(inner ast.Node) bool
+			walkArg = func(inner ast.Node) bool {
+				// logger.RedactQuery(r.URL.RawQuery) is the sanctioned use,
+				// wherever it appears: stop before its arguments.
+				if isRedactCall(inner) {
+					return false
+				}
+				// len(msg.Text) is a number, not a body — and it is the
+				// replacement this gate wants authors to reach for, so it
+				// must not be what the gate refuses.
+				if isLenCall(inner) {
+					return false
+				}
+				// A SUMMARISING method on a content field: digest.Payload
+				// .SummaryFields() returns counts, and the counts are the one
+				// description of a digest a log may carry. The receiver is
+				// skipped, the arguments are not — a summariser handed a body
+				// is still a body reaching a log line.
+				if summary, ok := summarizingCall(inner); ok {
+					for _, a := range summary.Args {
+						ast.Inspect(a, walkArg)
 					}
-					innerSel, ok := inner.(*ast.SelectorExpr)
-					if !ok {
-						return true
-					}
-					if why, banned := bannedSelectors[innerSel.Sel.Name]; banned {
-						add(violation{
-							pos:  fset.Position(innerSel.Pos()),
-							rule: "r." + innerSel.Sel.Name + " reaches a log line",
-							why:  why,
-						})
+					return false
+				}
+				if lit, ok := inner.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+					if value, err := strconv.Unquote(lit.Value); err == nil {
+						for _, shape := range credentialShapes {
+							if shape.pattern.MatchString(value) {
+								add(violation{
+									pos:  fset.Position(lit.Pos()),
+									rule: "a credential-shaped literal reaches a log line",
+									why:  shape.why,
+								})
+								break
+							}
+						}
 					}
 					return true
-				})
+				}
+				innerSel, ok := inner.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				if why, banned := bannedSelectors[innerSel.Sel.Name]; banned {
+					add(violation{
+						pos:  fset.Position(innerSel.Pos()),
+						rule: "r." + innerSel.Sel.Name + " reaches a log line",
+						why:  why,
+					})
+				}
+				if why, banned := bannedValueSelectors[innerSel.Sel.Name]; banned {
+					add(violation{
+						pos:  fset.Position(innerSel.Pos()),
+						rule: "." + innerSel.Sel.Name + " reaches a log line, whatever key it is under",
+						why:  why,
+					})
+				}
+				return true
+			}
+
+			for _, arg := range call.Args {
+				ast.Inspect(arg, walkArg)
 				if urlStringCall(arg) {
 					add(violation{
 						pos:  fset.Position(arg.Pos()),
@@ -203,6 +305,45 @@ func isRedactCall(n ast.Node) bool {
 	}
 	pkgIdent, ok := sel.X.(*ast.Ident)
 	return ok && pkgIdent.Name == "logger" && strings.HasPrefix(sel.Sel.Name, "Redact")
+}
+
+// summarizingMethods are the method names allowed to describe a content field
+// in a log line. Each one's contract is "counts and sizes, never content", and
+// each is tested where it is defined (modules/notifications/domain.DigestPayload
+// .SummaryFields is the one this exists for). The list is deliberately tiny: a
+// method whose name is not here is treated as returning the content itself,
+// which is the safe assumption for a gate that cannot look inside a call.
+var summarizingMethods = map[string]bool{
+	"SummaryFields": true,
+	"Summary":       true,
+	"Len":           true,
+	"Count":         true,
+}
+
+// summarizingCall reports whether a node is <receiver>.Summary…() and returns
+// the call, so the walk can skip the receiver but still inspect the arguments.
+func summarizingCall(n ast.Node) (*ast.CallExpr, bool) {
+	call, ok := n.(*ast.CallExpr)
+	if !ok {
+		return nil, false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || !summarizingMethods[sel.Sel.Name] {
+		return nil, false
+	}
+	return call, true
+}
+
+// isLenCall reports whether a node is the builtin len(...). Its result is an
+// int, so nothing inside it can reach the log as content — and logging
+// len(msg.Text) instead of msg.Text is exactly the fix this gate asks for.
+func isLenCall(n ast.Node) bool {
+	call, ok := n.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	ident, ok := call.Fun.(*ast.Ident)
+	return ok && ident.Name == "len"
 }
 
 // urlStringCall reports whether an expression is <something>.URL.String().
@@ -290,6 +431,107 @@ func f() {
 	logger.Log.Info("hit", logger.String("url", somethingAlreadySafe))
 }`,
 			want: "is not loggable",
+		},
+		// --- the rendered-content / credential rules -----------------------
+		//
+		// Each of these is the leak PLANTED: the first is the line the log mail
+		// driver actually shipped, and the rest are the ways an author would
+		// write the same thing after only the first one was banned.
+		{
+			name: "the rendered body as the log mail driver wrote it",
+			src: `package logmail
+func f(msg mail.Message) {
+	s.log.Info("mail rendered", logger.String("text", msg.Text))
+}`,
+			want: "is not loggable",
+		},
+		{
+			name: "the subject beside it",
+			src: `package logmail
+func f(msg mail.Message) {
+	s.log.Info("mail rendered", logger.String("subject", msg.Subject))
+}`,
+			want: "is not loggable",
+		},
+		{
+			name: "the same body under an innocent key",
+			src: `package logmail
+func f(msg mail.Message) {
+	s.log.Info("mail rendered", logger.String("detail", msg.Text))
+}`,
+			want: ".Text reaches a log line",
+		},
+		{
+			name: "the frozen payload, however it is named",
+			src: `package outbox
+func f(m Message) {
+	logger.Log.Error("could not render", logger.String("variables", string(m.Payload)))
+}`,
+			want: ".Payload reaches a log line",
+		},
+		{
+			name: "the credential itself, under a key nobody would question",
+			src: `package usecases
+func f(invite Invite) {
+	logger.Log.Info("invited", logger.String("reference", invite.RawToken))
+}`,
+			want: ".RawToken reaches a log line",
+		},
+		{
+			name: "a live token pasted into a literal",
+			src: `package usecases
+func f() {
+	logger.Log.Info("follow http://localhost:5000/accept-invite?token=zti_Hf_ttLMtYrwHQjmaltCYUy8q06AGUVwjmfXan3yDkAI")
+}`,
+			want: "credential-shaped literal",
+		},
+		{
+			name: "a credential spliced into a message with a format verb",
+			src: `package delivery
+func f(tok string) {
+	logger.Log.Debug(fmt.Sprintf("calling with token=%s", tok))
+}`,
+			want: "credential-shaped literal",
+		},
+		{
+			name: "a counts-only summariser on a payload is the sanctioned description",
+			src: `package usecases
+func f(digest Digest) {
+	logIfConfigured(ctx).Debug("notifications: digest queued",
+		logger.String("messageId", receipt.ID),
+		logger.String("digest", digest.Payload.SummaryFields()))
+}`,
+			want: "",
+		},
+		{
+			name: "but a summariser handed a body is still a body",
+			src: `package usecases
+func f(msg mail.Message) {
+	logger.Log.Debug("queued", logger.String("digest", report.Summary(msg.Text)))
+}`,
+			want: ".Text reaches a log line",
+		},
+		{
+			name: "and any other method on a content field is assumed to return it",
+			src: `package usecases
+func f(msg mail.Message) {
+	logger.Log.Debug("queued", logger.String("digest", msg.Body.String()))
+}`,
+			want: ".Body reaches a log line",
+		},
+		{
+			name: "the size of a body is what the fixed adapter logs",
+			src: `package logmail
+func f(msg mail.Message) {
+	s.log.Info("mail rendered, not sent (log mail driver)",
+		logger.String("template", msg.Kind),
+		logger.String("recipient", logger.Redacted),
+		logger.Int("subjectBytes", len(msg.Subject)),
+		logger.Int("textBytes", len(msg.Text)),
+		logger.Int("htmlBytes", len(msg.HTML)),
+	)
+}`,
+			want: "",
 		},
 		{
 			name: "the fixed request logger",

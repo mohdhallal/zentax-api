@@ -49,6 +49,7 @@ type UseCases struct {
 	invites domain.InviteTokenRepository
 	tx      database.ExecerPgTx // the public /auth routes open their own transactions
 	audit   *audit.Recorder     // nil = no-op
+	mail    domain.InviteMailer // nil = the invite link is not delivered
 }
 
 // WithMembers injects the member-administration repositories.
@@ -82,6 +83,35 @@ func (uc *UseCases) withinTx(ctx context.Context, fn func(ctx context.Context) e
 func (uc *UseCases) WithAudit(r *audit.Recorder) *UseCases {
 	uc.audit = r
 	return uc
+}
+
+// WithInviteMail injects the invite-delivery seam (domain.InviteMailer), which
+// queues the activation link on the invite's own transaction.
+//
+// Nil-safe, and the nil case is a real deployment rather than only a test
+// fixture: an edition with no mail provider configured still issues invites,
+// and the cleartext token is still in the response for an administrator to
+// hand over. What changes when this IS wired is that the administrator no
+// longer has to.
+func (uc *UseCases) WithInviteMail(m domain.InviteMailer) *UseCases {
+	uc.mail = m
+	return uc
+}
+
+// deliverInvite queues the invitation, if delivery is wired at all.
+//
+// It runs on the CALLER'S transaction — the same one that just inserted the
+// token row — which is the entire point: the credential and the message that
+// carries it commit together, so there is no invite nobody was going to be told
+// about and no link mailed for an invite that rolled back. A failure here
+// therefore FAILS THE INVITE, deliberately: an invite that cannot be delivered
+// has not happened, and answering 201 with a token the admin must copy by hand
+// is the behaviour this replaces.
+func (uc *UseCases) deliverInvite(ctx context.Context, m domain.InviteMail) error {
+	if uc.mail == nil {
+		return nil
+	}
+	return uc.mail.EnqueueInviteMail(ctx, m)
 }
 
 func NewUseCases(

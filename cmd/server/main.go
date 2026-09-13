@@ -83,6 +83,18 @@ func main() {
 		}
 	})
 
+	// Recurring work (outbox delivery, pruning) runs in this process. Every API
+	// task starts it; the Postgres advisory lock inside makes exactly one of
+	// them the runner, and the others sit idle at no cost. It stops when ctx is
+	// cancelled and hands its leadership back on the way out, so a rolling
+	// deploy moves the runner within one probe interval instead of waiting for
+	// the old task's database session to be reaped.
+	if application.Scheduler != nil {
+		wg.Go(func() {
+			application.Scheduler.Run(ctx)
+		})
+	}
+
 	wg.Go(func() {
 		sigChan := make(chan os.Signal, 1)
 		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -94,6 +106,11 @@ func main() {
 		}
 
 		shutdown(srv, cfg.Server.ShutdownTimeoutMs)
+		// Only after the HTTP server has drained: an in-flight request may
+		// still be enqueuing a message, and the scheduler's lease release needs
+		// the database connection that application.Close (deferred above, so it
+		// runs after wg.Wait) will close.
+		cancel()
 	})
 
 	wg.Wait()

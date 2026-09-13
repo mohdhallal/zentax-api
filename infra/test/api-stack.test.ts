@@ -2,9 +2,11 @@ import { Match } from 'aws-cdk-lib/assertions';
 import { API_EXPORTS, exportName } from '../lib/exports';
 import { ENVS, exportNamesOf, PUBLIC_HOSTNAME_OF, resourcesOfType, synthEnv, synthEnvWith, taskDefinition, TIER_OF } from './helpers';
 
+const ZONE = 'zentax.software';
+
 const expected = {
-  'staging-eu': { desired: 1 },
-  'production-eu': { desired: 2 },
+  'staging-eu': { desired: 1, from: `noreply@staging.${ZONE}`, fromName: 'ZenTax Staging' },
+  'production-eu': { desired: 2, from: `noreply@${ZONE}`, fromName: 'ZenTax' },
 } as const;
 
 describe.each(ENVS)('ZenTax-%s-Api', (env) => {
@@ -31,6 +33,7 @@ describe.each(ENVS)('ZenTax-%s-Api', (env) => {
       expect.arrayContaining([
         'APP_ENV', 'DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER', 'DB_SSLMODE',
         'CORS_ALLOWED_ORIGINS', 'STORAGE_DRIVER', 'STORAGE_S3_BUCKET', 'STORAGE_S3_REGION', 'LOG_FORMAT',
+        'MAIL_DRIVER', 'MAIL_FROM_ADDRESS', 'MAIL_FROM_NAME', 'MAIL_SES_REGION', 'MAIL_SES_CONFIGURATION_SET',
       ]),
     );
     expect(envNames).not.toContain('DB_PASSWORD');
@@ -85,6 +88,76 @@ describe.each(ENVS)('ZenTax-%s-Api', (env) => {
     expect(cidr).toMatch(/^10\.\d+\.0\.0\/16$/);
     const moved = synthEnvWith(env, { envOverrides: { cidr: '10.99.0.0/16' } });
     expect(byName(moved.api).RATE_LIMIT_TRUSTED_PROXIES).toBe('10.99.0.0/16');
+  });
+
+  // ---- ADR-0027: the api can send, as exactly one address ------------------
+
+  test('the api task can send through the ZenTax-Dns identity and its own configuration set, as ONE From address and nothing else', () => {
+    const policies = resourcesOfType(api, 'AWS::IAM::Policy');
+    const statements = policies.find(([id]) => id.startsWith('apiTaskRole'))![1].Properties.PolicyDocument.Statement as any[];
+    const mail = statements.find((s) => s.Sid === 'MailSend');
+    expect(mail).toBeDefined();
+    expect(mail.Effect).toBe('Allow');
+    // SESv2's SendEmail is the same call with simple or MIME content; both verbs, nothing else.
+    expect((Array.isArray(mail.Action) ? mail.Action : [mail.Action]).sort()).toEqual(['ses:SendEmail', 'ses:SendRawEmail']);
+
+    // Two resources, both required for a send that names a configuration set:
+    // the identity (formatted, never imported — ZenTax-Dns is admin-deployed
+    // and outside the pipeline's dependency graph) and this cell's own set.
+    const resources = (Array.isArray(mail.Resource) ? mail.Resource : [mail.Resource]).map((r: unknown) => JSON.stringify(r));
+    expect(resources).toHaveLength(2);
+    expect(resources).toContain(JSON.stringify(`arn:aws:ses:eu-central-1:160117555326:identity/${ZONE}`));
+    // The set's ARN is a real reference to the resource next door, so the policy
+    // cannot exist without it.
+    const set = resources.find((r: string) => r.includes(':configuration-set/'))!;
+    expect(set).toContain('"Ref":"MailConfigurationSet');
+    for (const r of resources) {
+      expect(r).toContain(':ses:eu-central-1:160117555326:');
+      expect(r).not.toContain('*');
+    }
+    // Nothing from the identity-management or account surface, and no import.
+    const text = JSON.stringify(statements);
+    expect(text).not.toMatch(/ses:(Create|Delete|Put|Update|Verify|Get|List)/);
+    expect(text).not.toContain('ses:*');
+    expect(JSON.stringify(mail)).not.toContain('Fn::ImportValue');
+
+    // The condition is the point: the role may send only as the cell's address.
+    expect(mail.Condition).toEqual({ StringEquals: { 'ses:FromAddress': want.from } });
+  });
+
+  test('the same From address feeds the container and the IAM condition, so permission and configuration cannot drift apart', () => {
+    const byName = Object.fromEntries(
+      taskDefinition(api, '-api').Properties.ContainerDefinitions[0].Environment.map((e: any) => [e.Name, e.Value]),
+    );
+    expect(byName.MAIL_DRIVER).toBe('ses');
+    expect(byName.MAIL_FROM_ADDRESS).toBe(want.from);
+    expect(byName.MAIL_FROM_NAME).toBe(want.fromName);
+    expect(byName.MAIL_SES_REGION).toBe('eu-central-1');
+    expect(byName.MAIL_SES_CONFIGURATION_SET).toBe(`zentax-${env}`);
+    // Staging is visibly staging in the From line, on a subdomain of the same
+    // verified identity — a message that escaped from it cannot be mistaken for
+    // the product talking to a customer.
+    expect(byName.MAIL_FROM_ADDRESS.endsWith(`@${ZONE}`)).toBe(env === 'production-eu');
+    expect(byName.MAIL_FROM_ADDRESS.endsWith(ZONE)).toBe(true);
+    // No credential: the task role IS the credential (nothing to store or rotate).
+    const secretNames = taskDefinition(api, '-api').Properties.ContainerDefinitions[0].Secrets.map((s: any) => s.Name);
+    expect(secretNames.filter((n: string) => n.startsWith('MAIL_'))).toEqual([]);
+    expect(JSON.stringify(api.toJSON())).not.toContain('SMTP');
+  });
+
+  test('the cell\'s SES configuration set: its own channel, TLS required, reputation measured, bounces and complaints suppressed', () => {
+    api.resourceCountIs('AWS::SES::ConfigurationSet', 1);
+    api.hasResourceProperties('AWS::SES::ConfigurationSet', {
+      Name: `zentax-${env}`,
+      DeliveryOptions: Match.objectLike({ TlsPolicy: 'REQUIRE' }),
+      ReputationOptions: Match.objectLike({ ReputationMetricsEnabled: true }),
+      SendingOptions: Match.objectLike({ SendingEnabled: true }),
+      SuppressionOptions: Match.objectLike({ SuppressedReasons: Match.arrayWith(['BOUNCE', 'COMPLAINT']) }),
+    });
+    // The identity is not a cell resource: it is verified once, account-level,
+    // by the admin-deployed ZenTax-Dns stack.
+    api.resourceCountIs('AWS::SES::EmailIdentity', 0);
+    expect(JSON.stringify(api.toJSON())).not.toContain('DkimAttributes');
   });
 
   test('PUBLIC_BASE_URL is https://<publicHostname> on the api task, and absent when no public hostname is configured', () => {

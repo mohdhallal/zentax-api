@@ -89,6 +89,28 @@ export interface EnvConfig {
    * fail-closed validation until a browser talks to the api directly.
    */
   readonly corsAllowedOrigins: string;
+  /**
+   * The From address the api sends as (`MAIL_FROM_ADDRESS`, ADR-0027 decision
+   * 8). Its domain must be the DNS zone or a subdomain of it, because the one
+   * verified SES identity is the zone itself: production sends as
+   * `noreply@<zone>`, staging as `noreply@staging.<zone>` so a message that
+   * escaped from staging is identifiable at a glance. The api task role may
+   * send only as this exact address (an IAM `ses:FromAddress` condition), and
+   * it is the same string the container is configured with — permission and
+   * configuration cannot drift apart.
+   */
+  readonly mailFromAddress: string;
+  /** Display name in front of it (`MAIL_FROM_NAME`), e.g. `ZenTax`. */
+  readonly mailFromName: string;
+  /**
+   * The domain of the SES identity the cell sends through — the DNS zone,
+   * which `ZenTax-Dns` verifies once for both cells. Held here (rather than
+   * imported) so the api task role can name the identity's ARN: that stack is
+   * admin-deployed and deliberately outside the pipeline's dependency graph
+   * (ADR-0025), and a domain identity's ARN is fully determined by partition,
+   * region, account and name.
+   */
+  readonly mailIdentityDomain: string;
   /** RemovalPolicy for data-bearing resources: RETAIN in production, DESTROY elsewhere. */
   readonly dataRemovalPolicy: cdk.RemovalPolicy;
 }
@@ -120,6 +142,14 @@ export interface DnsConfig {
 }
 
 const HOSTNAME_PATTERN = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
+/** Deliberately narrow: an address this product sends *as*, not one it accepts. */
+const SENDER_ADDRESS_PATTERN = /^[a-z0-9](?:[a-z0-9._+-]{0,62}[a-z0-9])?@(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
+/**
+ * A From display name that needs no RFC 5322 quoting and cannot smuggle a
+ * second header: no angle brackets, quotes, commas, colons, semicolons or
+ * control characters.
+ */
+const SENDER_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9 .'&()–-]{0,62}$/;
 
 function requireString(obj: Record<string, unknown>, key: string, fallback?: string): string {
   const v = obj[key] ?? fallback;
@@ -173,6 +203,38 @@ export function isEnvNameSyntax(s: unknown): s is EnvName {
 /** `staging-eu` -> `StagingEu`: the `ZenTax-<Title>-*` stack-name segment. */
 export function envTitle(name: EnvName): string {
   return name.split('-').map((part) => `${part[0].toUpperCase()}${part.slice(1)}`).join('');
+}
+
+/**
+ * The apex zone from `context.dns` — read *softly* here (`loadDnsConfig` owns
+ * its validation and its errors), because a cell's mail defaults derive from
+ * it: the hosted deployment verifies one SES domain identity, the zone itself
+ * (ADR-0027 decision 8), so a cell can only send from that zone or a subdomain.
+ */
+export function configuredZoneName(scope: cdk.App): string | undefined {
+  const raw = scope.node.tryGetContext('dns');
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const zone = (raw as Record<string, unknown>).zoneName;
+  return typeof zone === 'string' && zone.length > 0 ? zone.replace(/\.$/, '') : undefined;
+}
+
+/**
+ * The cell's SES configuration set: its own sending channel, so staging's
+ * bounce and complaint behaviour is measured apart from production's. Named
+ * like every other per-cell resource.
+ */
+export function mailConfigurationSetName(name: EnvName): string {
+  return `zentax-${name}`;
+}
+
+/** `noreply@<zone>` in production; `noreply@staging.<zone>` in staging. */
+export function defaultMailFromAddress(tier: Tier, zoneName: string): string {
+  return tier === 'production' ? `noreply@${zoneName}` : `noreply@${tier}.${zoneName}`;
+}
+
+/** The display name in front of it — the tier is visible in staging's. */
+export function defaultMailFromName(tier: Tier): string {
+  return tier === 'production' ? 'ZenTax' : 'ZenTax Staging';
 }
 
 /**
@@ -253,6 +315,29 @@ export function loadEnvConfig(scope: cdk.App, name: EnvName): EnvConfig {
     }
   }
 
+  // Sender identity (ADR-0027 decision 8). The default follows the zone the
+  // ZenTax-Dns stack verifies; an explicit value must still sit inside it,
+  // because a domain identity authorizes its own name and its subdomains and
+  // nothing else — a send from anywhere else is an AccessDenied at run time
+  // rather than a synth error, which is exactly the failure to catch here.
+  const zoneName = configuredZoneName(scope);
+  const mailFromAddress = optionalString(raw, 'mailFromAddress')
+    ?? (zoneName ? defaultMailFromAddress(tier, zoneName) : undefined);
+  if (!mailFromAddress) {
+    throw new Error(`context: environments.${name}.mailFromAddress has no default because context.dns.zoneName is unset — set one of the two`);
+  }
+  if (!SENDER_ADDRESS_PATTERN.test(mailFromAddress)) {
+    throw new Error(`context: environments.${name}.mailFromAddress must be a lowercase e-mail address (e.g. noreply@zentax.software), got "${mailFromAddress}"`);
+  }
+  const senderDomain = mailFromAddress.slice(mailFromAddress.indexOf('@') + 1);
+  if (zoneName && senderDomain !== zoneName && !senderDomain.endsWith(`.${zoneName}`)) {
+    throw new Error(`context: environments.${name}.mailFromAddress must be at ${zoneName} or a subdomain of it (the verified SES identity is the zone), got "${senderDomain}"`);
+  }
+  const mailFromName = optionalString(raw, 'mailFromName') ?? defaultMailFromName(tier);
+  if (!SENDER_NAME_PATTERN.test(mailFromName)) {
+    throw new Error(`context: environments.${name}.mailFromName must be a plain display name with no quoting characters, got "${mailFromName}"`);
+  }
+
   return {
     name,
     tier,
@@ -278,6 +363,9 @@ export function loadEnvConfig(scope: cdk.App, name: EnvName): EnvConfig {
     cloudFrontPrefixListId: optionalString(raw, 'cloudFrontPrefixListId'),
     publicHostname,
     corsAllowedOrigins,
+    mailFromAddress,
+    mailFromName,
+    mailIdentityDomain: zoneName ?? senderDomain,
     dataRemovalPolicy: production ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
   };
 }

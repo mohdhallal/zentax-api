@@ -1,11 +1,20 @@
 import * as cdk from 'aws-cdk-lib';
 import { Annotations, Match, Template } from 'aws-cdk-lib/assertions';
 import { loadDnsConfig } from '../lib/config';
-import { dmarcRecordValue, GOOGLE_MX, GOOGLE_SPF, SQUARESPACE_APEX_IPS, SQUARESPACE_WWW_CNAME } from '../lib/dns-stack';
+import { dmarcRecordValue, GOOGLE_MX, GOOGLE_SPF, SES_MAIL_FROM_LABEL, sesMailFromDomain, SQUARESPACE_APEX_IPS, SQUARESPACE_WWW_CNAME } from '../lib/dns-stack';
 import { cdkJsonContext, exportNamesOf, resourcesOfType, synthDns, synthDnsWith } from './helpers';
 
 const ZONE = 'zentax.software';
+const MAIL_FROM = `${SES_MAIL_FROM_LABEL}.${ZONE}`;
 const SPF_QUOTED = '"v=spf1 include:_spf.google.com ~all"';
+/**
+ * Literal-named record sets: A, CNAME www, MX apex, TXT apex, TXT _dmarc, plus
+ * the SES MAIL FROM pair (MX + TXT on bounce.<zone>). The Google DKIM TXT adds
+ * one when cdk.json carries the key; the three SES DKIM CNAMEs are named by
+ * `Fn::GetAtt` and counted separately.
+ */
+const NAMED_WITHOUT_GOOGLE_DKIM = 7;
+const SES_DKIM_CNAMES = 3;
 const FAKE_TOKEN = 'AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_AbCdEf';
 // 400 characters of base64 alphabet: with the 16-char "v=DKIM1;k=rsa;p=" prefix
 // the record value is 416 characters, i.e. two chunks (255 + 161).
@@ -14,11 +23,31 @@ const FAKE_DKIM_KEY = 'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA'.repeat(10).
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{8,}$/;
 const DKIM_KEY_PATTERN = /^[A-Za-z0-9+/]{64,}={0,2}$/;
 
-/** Route 53 record sets of a template by "<TYPE> <fqdn>" -> properties. */
+/**
+ * Route 53 record sets of a template by "<TYPE> <fqdn>" -> properties. A DKIM
+ * record's name is an `Fn::GetAtt` on the SES identity (SES mints the tokens),
+ * so those keys carry the reference rather than a literal name.
+ */
 function recordSets(template: Template): Record<string, any> {
   return Object.fromEntries(
-    resourcesOfType(template, 'AWS::Route53::RecordSet').map(([, r]) => [`${r.Properties.Type} ${r.Properties.Name}`, r.Properties]),
+    resourcesOfType(template, 'AWS::Route53::RecordSet').map(([, r]) => [
+      `${r.Properties.Type} ${typeof r.Properties.Name === 'string' ? r.Properties.Name : JSON.stringify(r.Properties.Name)}`,
+      r.Properties,
+    ]),
   );
+}
+
+/** The literal-named record sets — the ones a human reads in the zone. */
+function namedRecordSets(template: Template): string[] {
+  return Object.keys(recordSets(template)).filter((k) => !k.includes('Fn::GetAtt'));
+}
+
+/** The three Easy DKIM CNAMEs SES asks for, in token order. */
+function dkimCnames(template: Template): any[] {
+  return resourcesOfType(template, 'AWS::Route53::RecordSet')
+    .filter(([id, r]) => r.Properties.Type === 'CNAME' && id.includes('DkimDnsToken'))
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([, r]) => r.Properties);
 }
 
 /**
@@ -82,7 +111,7 @@ describe('ZenTax-Dns (account-level hosted zone + records, admin-deployed)', () 
     for (const s of every) {
       expect(s.stack.terminationProtection).toBe(true);
       const sets = resourcesOfType(s.template, 'AWS::Route53::RecordSet');
-      expect(sets.length).toBeGreaterThanOrEqual(5);
+      expect(sets.length).toBeGreaterThanOrEqual(NAMED_WITHOUT_GOOGLE_DKIM + SES_DKIM_CNAMES);
       for (const [id, r] of sets) {
         expect({ id, DeletionPolicy: r.DeletionPolicy, UpdateReplacePolicy: r.UpdateReplacePolicy })
           .toEqual({ id, DeletionPolicy: 'Retain', UpdateReplacePolicy: 'Retain' });
@@ -172,10 +201,10 @@ describe('ZenTax-Dns (account-level hosted zone + records, admin-deployed)', () 
     }
   });
 
-  test('empty Google values (explicit fixture): those records are omitted and the stack WARNS — synth succeeds, 5 record sets, SPF only at the apex', () => {
+  test('empty Google values (explicit fixture): those records are omitted and the stack WARNS — synth succeeds, the named record sets minus the DKIM one, SPF only at the apex', () => {
     expect(recordSets(empty.template)[`TXT google._domainkey.${ZONE}.`]).toBeUndefined();
     expect(JSON.stringify(empty.template.toJSON())).not.toContain('google-site-verification');
-    expect(Object.keys(recordSets(empty.template))).toHaveLength(5);
+    expect(namedRecordSets(empty.template)).toHaveLength(NAMED_WITHOUT_GOOGLE_DKIM);
     expect(warningsOf(empty.stack)).toHaveLength(2);
     Annotations.fromStack(empty.stack).hasWarning('*', Match.stringLikeRegexp('dns\\.googleSiteVerification is empty'));
     Annotations.fromStack(empty.stack).hasWarning('*', Match.stringLikeRegexp('dns\\.googleDkimPublicKey is empty'));
@@ -187,10 +216,10 @@ describe('ZenTax-Dns (account-level hosted zone + records, admin-deployed)', () 
     const tokenOnly = synthDnsWith({ googleSiteVerification: FAKE_TOKEN, googleDkimPublicKey: '' });
     expect(warningsOf(tokenOnly.stack)).toHaveLength(1);
     Annotations.fromStack(tokenOnly.stack).hasWarning('*', Match.stringLikeRegexp('googleDkimPublicKey'));
-    expect(Object.keys(recordSets(tokenOnly.template))).toHaveLength(5);
+    expect(namedRecordSets(tokenOnly.template)).toHaveLength(NAMED_WITHOUT_GOOGLE_DKIM);
   });
 
-  test('cdk.json as committed, whatever its state: each Google value is "" or valid, warnings = the number of empty values, record sets = 5 + DKIM', () => {
+  test('cdk.json as committed, whatever its state: each Google value is "" or valid, warnings = the number of empty values, named record sets = the base set + Google DKIM', () => {
     const dns = cdkJsonContext().dns as Record<string, unknown>;
     expect(dns.zoneName).toBe(ZONE);
     for (const key of ['googleSiteVerification', 'googleDkimPublicKey']) expect(typeof dns[key]).toBe('string');
@@ -203,7 +232,7 @@ describe('ZenTax-Dns (account-level hosted zone + records, admin-deployed)', () 
     const missing = [committedToken, committedDkim].filter((v) => !v).length;
     expect(warningsOf(stack)).toHaveLength(missing);
     Annotations.fromStack(stack).hasNoError('*', Match.anyValue());
-    expect(Object.keys(recordSets(template))).toHaveLength(5 + (committedDkim ? 1 : 0));
+    expect(namedRecordSets(template)).toHaveLength(NAMED_WITHOUT_GOOGLE_DKIM + (committedDkim ? 1 : 0));
     expect(JSON.stringify(template.toJSON()).includes('google-site-verification')).toBe(!!committedToken);
   });
 
@@ -219,9 +248,9 @@ describe('ZenTax-Dns (account-level hosted zone + records, admin-deployed)', () 
     expect(committedDkim).toMatch(/^MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA/);
     expect(committedDkim).toMatch(/IDAQAB$/);
     expect(committedDkim).toHaveLength(392);
-    // No "record omitted" warning, six record sets.
+    // No "record omitted" warning; every named record set present.
     expect(warningsOf(stack)).toHaveLength(0);
-    expect(Object.keys(recordSets(template))).toHaveLength(6);
+    expect(namedRecordSets(template)).toHaveLength(NAMED_WITHOUT_GOOGLE_DKIM + 1);
     // Apex TXT: the token AND SPF in the one set.
     expect(recordSets(template)[`TXT ${ZONE}.`].ResourceRecords).toEqual([
       `"google-site-verification=${committedToken}"`,
@@ -255,8 +284,8 @@ describe('ZenTax-Dns (account-level hosted zone + records, admin-deployed)', () 
     expect(() => loadDnsConfig(noDns)).toThrow(/"dns" must be an object/);
   });
 
-  test('nothing else: no HTTPS/SVCB, no _domainconnect, no cell hostnames (those are the UI app\'s Edge stack), exactly 6 record sets when complete', () => {
-    const names = Object.keys(recordSets(full.template)).sort();
+  test('nothing else: no HTTPS/SVCB, no _domainconnect, no cell hostnames (those are the UI app\'s Edge stack), exactly the eight named record sets when complete', () => {
+    const names = namedRecordSets(full.template).sort();
     expect(names).toEqual([
       `A ${ZONE}.`,
       `CNAME www.${ZONE}.`,
@@ -264,12 +293,14 @@ describe('ZenTax-Dns (account-level hosted zone + records, admin-deployed)', () 
       `TXT ${ZONE}.`,
       `TXT _dmarc.${ZONE}.`,
       `TXT google._domainkey.${ZONE}.`,
+      `MX ${MAIL_FROM}.`,
+      `TXT ${MAIL_FROM}.`,
     ].sort());
-    expect(names).toHaveLength(6);
-    // Without the Google values: 5 (no DKIM set; the apex TXT set still exists, SPF only).
-    expect(Object.keys(recordSets(empty.template))).toHaveLength(5);
-    // Committed: 5 or 6, never anything but those names.
-    expect(Object.keys(recordSets(template)).every((n) => names.includes(n))).toBe(true);
+    expect(names).toHaveLength(NAMED_WITHOUT_GOOGLE_DKIM + 1);
+    // Without the Google values: one fewer (no DKIM set; the apex TXT set still exists, SPF only).
+    expect(namedRecordSets(empty.template)).toHaveLength(NAMED_WITHOUT_GOOGLE_DKIM);
+    // Committed: 7 or 8, never anything but those names.
+    expect(namedRecordSets(template).every((n) => names.includes(n))).toBe(true);
     for (const s of every) {
       const text = JSON.stringify(s.template.toJSON());
       expect(text).not.toContain('_domainconnect');
@@ -280,15 +311,86 @@ describe('ZenTax-Dns (account-level hosted zone + records, admin-deployed)', () 
       expect(text).not.toContain('AWS::IAM');
       // Not a single AWS lookup at synth: no cdk.context.json is needed (Zone is created, never looked up).
       expect(text).not.toContain('Fn::ImportValue');
-      expect(Object.values(s.template.toJSON().Resources as Record<string, any>).every((r) => ['AWS::Route53::HostedZone', 'AWS::Route53::RecordSet'].includes(r.Type))).toBe(true);
+      expect(Object.values(s.template.toJSON().Resources as Record<string, any>).every(
+        (r) => ['AWS::Route53::HostedZone', 'AWS::Route53::RecordSet', 'AWS::SES::EmailIdentity'].includes(r.Type),
+      )).toBe(true);
+      // A configuration set is a CELL resource (the Api stack's), never this one.
+      expect(text).not.toContain('AWS::SES::ConfigurationSet');
     }
   });
 
-  test('outputs HostedZoneId and NameServers (the four NS joined by ", "), as plain outputs — no export the UI app would import', () => {
+  // ---- ADR-0027: the product's own sending identity -------------------------
+
+  test('one SES domain identity for the zone, in the zone\'s own stack, Easy DKIM at 2048 bits, and RETAINed like everything else here', () => {
+    for (const s of every) {
+      s.template.resourceCountIs('AWS::SES::EmailIdentity', 1);
+      s.template.hasResource('AWS::SES::EmailIdentity', {
+        Properties: Match.objectLike({
+          EmailIdentity: ZONE,
+          DkimSigningAttributes: Match.objectLike({ NextSigningKeyLength: 'RSA_2048_BIT' }),
+        }),
+        // Deleting the identity un-signs live mail and re-verification is slow.
+        DeletionPolicy: 'Retain',
+        UpdateReplacePolicy: 'Retain',
+      });
+      // A domain identity, not an address: it covers eu.staging/eu.app senders too.
+      const [, identity] = resourcesOfType(s.template, 'AWS::SES::EmailIdentity')[0];
+      expect(identity.Properties.EmailIdentity).not.toContain('@');
+      // No BYO DKIM: no private key is ever in this template.
+      expect(JSON.stringify(identity)).not.toContain('DomainSigningPrivateKey');
+    }
+  });
+
+  test('Easy DKIM publishes three CNAMEs whose names AND values are the identity\'s own tokens (SES mints and rotates them; nothing is a literal here)', () => {
+    const records = dkimCnames(template);
+    expect(records).toHaveLength(SES_DKIM_CNAMES);
+    const [identityId] = resourcesOfType(template, 'AWS::SES::EmailIdentity')[0];
+    records.forEach((r, i) => {
+      expect(r.Type).toBe('CNAME');
+      // Name and value are attributes of the identity, never literals we invented.
+      expect(r.Name).toEqual({ 'Fn::GetAtt': [identityId, `DkimDNSTokenName${i + 1}`] });
+      expect(r.ResourceRecords).toEqual([{ 'Fn::GetAtt': [identityId, `DkimDNSTokenValue${i + 1}`] }]);
+    });
+    // They are in this zone and retained with everything else.
+    const [zoneId] = resourcesOfType(template, 'AWS::Route53::HostedZone')[0];
+    for (const r of records) expect(r.HostedZoneId).toEqual({ Ref: zoneId });
+  });
+
+  test('a custom MAIL FROM domain (bounce.<zone>) carries SES\'s MX and SPF, so the apex TXT set stays Google-only', () => {
+    expect(sesMailFromDomain(ZONE)).toBe(`${SES_MAIL_FROM_LABEL}.${ZONE}`);
+    const sets = recordSets(template);
+    // The envelope sender is a subdomain of the identity, and it is where SES's SPF lives.
+    expect(sets[`TXT ${MAIL_FROM}.`].ResourceRecords).toEqual(['"v=spf1 include:amazonses.com ~all"']);
+    // ...in the identity's home region, priority 10.
+    expect(sets[`MX ${MAIL_FROM}.`].ResourceRecords).toEqual(['10 feedback-smtp.eu-central-1.amazonses.com']);
+    // The point of the whole arrangement: Google's SPF at the apex is untouched
+    // and SES's include never appears in it.
+    const apex = sets[`TXT ${ZONE}.`].ResourceRecords as string[];
+    expect(apex).toContain(SPF_QUOTED);
+    expect(apex.join('')).not.toContain('amazonses.com');
+    expect(apex.filter((v) => v.includes('v=spf1'))).toHaveLength(1);
+    // And the apex MX is still only Google's five hosts (a MAIL FROM MX at the
+    // apex would have collided with the company's inbound mail).
+    expect(sets[`MX ${ZONE}.`].ResourceRecords).toHaveLength(5);
+    expect(JSON.stringify(sets[`MX ${ZONE}.`].ResourceRecords)).not.toContain('amazonses');
+    // Fail closed while DNS propagates: no silent fallback to an amazonses.com envelope.
+    const [, identity] = resourcesOfType(template, 'AWS::SES::EmailIdentity')[0];
+    expect(identity.Properties.MailFromAttributes).toEqual({
+      MailFromDomain: MAIL_FROM,
+      BehaviorOnMxFailure: 'REJECT_MESSAGE',
+    });
+  });
+
+  test('outputs HostedZoneId, NameServers (the four NS joined by ", ") and the sending identity, as plain outputs — no export the UI app or a cell would import', () => {
     template.hasOutput('HostedZoneId', { Value: { Ref: Match.stringLikeRegexp('^Zone') } });
     template.hasOutput('NameServers', {
       Value: { 'Fn::Join': [', ', { 'Fn::GetAtt': [Match.stringLikeRegexp('^Zone'), 'NameServers'] }] },
     });
+    // The identity ARN is an output for the operator to check, NOT an export: a
+    // cell formats the same ARN itself, so no pipeline-deployed stack ever
+    // depends on this admin-deployed one (ADR-0025).
+    template.hasOutput('SendingIdentityArn', { Value: Match.anyValue() });
+    template.hasOutput('MailFromDomain', { Value: MAIL_FROM });
     expect(exportNamesOf(template)).toEqual([]);
   });
 });
