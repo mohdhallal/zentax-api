@@ -116,6 +116,12 @@ func (r *UserRepo) ListByKind(ctx context.Context, tenantID, kind string) ([]dom
 //     threshold-th attempt is still inside the budget: it is the one that arms
 //     the lock, not the first one refused by it.
 //
+// It reports the two facts separately. `allowed` is about this attempt;
+// `engaged` is true only for the attempt whose own UPDATE stamped locked_until,
+// which is the only moment at which "the account just locked" is knowable from
+// inside the statement that made it true. Deriving it outside would mean reading
+// the row afterwards, and the read would race every other attempt in flight.
+//
 // "now" is the caller's clock — the one that also produced lockUntil — so
 // expiry is judged against the clock that wrote the stamp.
 //
@@ -128,9 +134,12 @@ func (r *UserRepo) ListByKind(ctx context.Context, tenantID, kind string) ([]dom
 // ever changes, this statement needs a tenant-bound transaction of its own.
 func (r *UserRepo) ConsumeLoginAttempt(
 	ctx context.Context, id string, lockThreshold int, now, lockUntil time.Time,
-) (bool, error) {
-	var allowed bool
-	err := r.db.GetContext(ctx, &allowed,
+) (bool, bool, error) {
+	var decision struct {
+		Allowed bool `db:"allowed"`
+		Engaged bool `db:"engaged"`
+	}
+	err := r.db.GetContext(ctx, &decision,
 		`UPDATE users
 		    SET failed_login_attempts = CASE
 		            WHEN base.live_lock THEN base.attempts
@@ -152,15 +161,16 @@ func (r *UserRepo) ConsumeLoginAttempt(
 		          FROM users WHERE id = $1 FOR UPDATE
 		   ) AS base
 		  WHERE users.id = base.id
-		  RETURNING NOT base.live_lock AS allowed`,
+		  RETURNING NOT base.live_lock AS allowed,
+		            (NOT base.live_lock AND base.attempts + 1 >= $2) AS engaged`,
 		id, lockThreshold, now, lockUntil)
 	if errors.Is(err, sql.ErrNoRows) {
 		// The row went away between the lookup and here (a deleted member).
 		// No account, no budget to spend: refuse, without an error the caller
 		// would have to log.
-		return false, nil
+		return false, false, nil
 	}
-	return allowed, err
+	return decision.Allowed, decision.Engaged, err
 }
 
 func (r *UserRepo) ResetFailedLogin(ctx context.Context, id string) error {

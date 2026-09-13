@@ -50,6 +50,19 @@ export interface EnvConfig {
   readonly natGateways: number;
   readonly apiDesiredCount: number;
   readonly logRetentionDays: logs.RetentionDays;
+  /**
+   * How long the audit-export bucket's S3 Object Lock holds each object, in
+   * days (ADR-0008's WORM copy of the per-tenant hash chain).
+   *
+   * The *mode* is not configurable — COMPLIANCE in both tiers, see
+   * data-stack.ts — because a knob that can turn immutability off is not
+   * immutability. Only the length of the hold is a per-cell policy input:
+   * production carries the statutory window ADR-0007 names for tax-record
+   * evidence (6-10 years; the default is the top of it), staging carries a
+   * single day, because a staging cell holds synthetic data and a ten-year
+   * COMPLIANCE lock on it is a bill nobody can cancel.
+   */
+  readonly auditExportRetentionDays: number;
   readonly deletionProtection: boolean;
   /**
    * Tag of the images in the zentax/<env>/{api,migrate} ECR repositories. A
@@ -182,6 +195,34 @@ function optionalString(obj: Record<string, unknown>, key: string): string | und
 export const WEB_ONLY_KEYS = [
   'webDesiredCount', 'originVerifyVersion', 'domainName', 'certificateArn', 'hostedZoneId', 'hostedZoneName', 'entryHostnames', 'maxUploadBytes',
 ] as const;
+
+/**
+ * Calendar years as whole days, leap days included (10 y -> 3653). S3 Object
+ * Lock's smallest unit is a day, and `Years` in the API means 365-day years —
+ * so a "ten-year" hold expressed as 3650 days expires two days before the tenth
+ * anniversary of the write. On a retention nobody can extend downwards that
+ * rounding is the wrong way round, hence 365.25 and a ceiling.
+ */
+export function yearsInDays(years: number): number {
+  return Math.ceil(years * 365.25);
+}
+
+/** Ten years: the top of ADR-0007's statutory tax-record range, so the strictest jurisdiction in it is covered. */
+export const DEFAULT_PRODUCTION_AUDIT_EXPORT_RETENTION_DAYS = yearsInDays(10);
+/**
+ * Six years: the bottom of that range, and the floor a production cell may not
+ * go under. Below it the archive stops being evidence for the period the
+ * customer is legally obliged to be able to produce.
+ */
+export const MIN_PRODUCTION_AUDIT_EXPORT_RETENTION_DAYS = yearsInDays(6);
+/**
+ * One day in a non-production cell. Staging rehearses the mechanism (the same
+ * COMPLIANCE lock, the same api role that can add an object and not remove
+ * one), not the policy: its objects are synthetic, and the shortest lock S3
+ * offers is what keeps `cdk destroy` on staging from leaving a bucket nobody
+ * can empty for a decade.
+ */
+export const DEFAULT_STAGING_AUDIT_EXPORT_RETENTION_DAYS = 1;
 
 export function toRetentionDays(days: number): logs.RetentionDays {
   const allowed = Object.values(logs.RetentionDays).filter((v): v is number => typeof v === 'number');
@@ -338,6 +379,26 @@ export function loadEnvConfig(scope: cdk.App, name: EnvName): EnvConfig {
     throw new Error(`context: environments.${name}.mailFromName must be a plain display name with no quoting characters, got "${mailFromName}"`);
   }
 
+  // WORM retention of the audit export (ADR-0008). Validated here rather than
+  // at the bucket, because the failure it guards against is silent: an S3
+  // Object Lock retention is set once per object at write time and can only
+  // ever be lengthened, so a cell deployed with too short a window produces an
+  // archive that quietly stops being evidence — and nothing about the running
+  // system looks wrong until an auditor asks for a year that has lapsed.
+  const auditExportRetentionDays = requireNumber(
+    raw,
+    'auditExportRetentionDays',
+    production ? DEFAULT_PRODUCTION_AUDIT_EXPORT_RETENTION_DAYS : DEFAULT_STAGING_AUDIT_EXPORT_RETENTION_DAYS,
+  );
+  if (!Number.isInteger(auditExportRetentionDays) || auditExportRetentionDays < 1) {
+    throw new Error(`context: environments.${name}.auditExportRetentionDays must be a whole number of days >= 1 (a day is Object Lock's smallest unit), got ${auditExportRetentionDays}`);
+  }
+  if (production && auditExportRetentionDays < MIN_PRODUCTION_AUDIT_EXPORT_RETENTION_DAYS) {
+    throw new Error(
+      `context: environments.${name}.auditExportRetentionDays=${auditExportRetentionDays} is under the ${MIN_PRODUCTION_AUDIT_EXPORT_RETENTION_DAYS}-day (6-year) floor ADR-0007 puts under statutory tax-record evidence — a production cell may not lock its audit export for less`,
+    );
+  }
+
   return {
     name,
     tier,
@@ -354,6 +415,7 @@ export function loadEnvConfig(scope: cdk.App, name: EnvName): EnvConfig {
     natGateways: requireNumber(raw, 'natGateways'),
     apiDesiredCount: requireNumber(raw, 'apiDesiredCount'),
     logRetentionDays: toRetentionDays(requireNumber(raw, 'logRetentionDays')),
+    auditExportRetentionDays,
     deletionProtection,
     imageTag,
     cpuArchitecture: cpuArch,

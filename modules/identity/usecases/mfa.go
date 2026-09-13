@@ -9,6 +9,7 @@ import (
 	"github.com/mohamadhallal/zentax-api/logger"
 	"github.com/mohamadhallal/zentax-api/modules/identity/domain"
 	"github.com/mohamadhallal/zentax-api/platform/crypto"
+	"github.com/mohamadhallal/zentax-api/platform/securityevent"
 )
 
 // THE SECOND-FACTOR ATTEMPT BUDGET. This is the one place it is stated; the
@@ -93,6 +94,18 @@ func (uc *UseCases) MfaEnroll(ctx context.Context, userID string) (*domain.MfaEn
 		return nil, err
 	}
 
+	// A change to HOW an account can authenticate is a security event even
+	// though nobody signed in: an attacker holding a stolen session enrolling
+	// their own authenticator is the classic account-takeover step, and it is
+	// invisible in a stream that records only sign-ins.
+	uc.note(ctx, securityevent.Event{
+		Event:       securityevent.EventMFAEnrolled,
+		Outcome:     securityevent.OutcomeSuccess,
+		Method:      securityevent.MethodTOTP,
+		TenantID:    user.TenantID,
+		PrincipalID: user.ID,
+	})
+
 	return &domain.MfaEnrollResult{Secret: key.Secret(), OtpauthURL: key.URL()}, nil
 }
 
@@ -136,7 +149,8 @@ func (uc *UseCases) MfaEnable(ctx context.Context, sessionToken, code string) er
 
 	allowed, spent := uc.consumeMFAAttempt(ctx, session.ID)
 	if !allowed {
-		uc.destroyEnrollment(ctx, session.ID, user.ID)
+		uc.destroyEnrollment(ctx, session.TenantID, session.ID, user.ID)
+		uc.noteMFAFailure(ctx, securityevent.ReasonBudgetSpent, session.TenantID, user.ID, session.ID)
 		return apperrors.NewUnauthorized(domain.MsgInvalidMFACode)
 	}
 
@@ -146,19 +160,32 @@ func (uc *UseCases) MfaEnable(ctx context.Context, sessionToken, code string) er
 	}
 	if !totp.Validate(code, string(secret)) {
 		if spent >= maxMFAAttempts {
-			uc.destroyEnrollment(ctx, session.ID, user.ID)
+			uc.destroyEnrollment(ctx, session.TenantID, session.ID, user.ID)
 		}
+		uc.noteMFAFailure(ctx, securityevent.ReasonBadCredential, session.TenantID, user.ID, session.ID)
 		return apperrors.NewUnauthorized(domain.MsgInvalidMFACode)
 	}
 
 	// Enable, and clear what the confirmation spent, together: MFA is never on
 	// for a session still carrying the debt of the attempts that turned it on.
-	return uc.withinTx(ctx, func(txCtx context.Context) error {
+	if err := uc.withinTx(ctx, func(txCtx context.Context) error {
 		if err := uc.users.SetTOTP(txCtx, user.ID, user.TOTPSecretEnc, true); err != nil {
 			return err
 		}
 		return uc.sessions.ClearMFAAttempts(txCtx, session.ID)
+	}); err != nil {
+		return err
+	}
+
+	uc.note(ctx, securityevent.Event{
+		Event:       securityevent.EventMFAEnabled,
+		Outcome:     securityevent.OutcomeSuccess,
+		Method:      securityevent.MethodTOTP,
+		TenantID:    session.TenantID,
+		PrincipalID: user.ID,
+		SessionID:   session.ID,
 	})
+	return nil
 }
 
 // MfaVerify completes an mfa_pending session: it charges an attempt, validates
@@ -178,6 +205,16 @@ func (uc *UseCases) MfaVerify(ctx context.Context, sessionToken, code string) (*
 		return nil, err
 	}
 	if session == nil || !session.IsValid(now) || !session.MFAPending {
+		// Nothing here identifies anybody: the cookie matched no live pending
+		// session, so there is no principal and no address to correlate by. The
+		// row is still worth keeping — a run of these is somebody firing codes
+		// at cookies they do not have — and it is the one shape in the stream
+		// with neither correlator, which is why both columns are nullable.
+		var tenantID, principalID, sessionID string
+		if session != nil {
+			tenantID, principalID, sessionID = session.TenantID, session.UserID, session.ID
+		}
+		uc.noteMFAFailure(ctx, securityevent.ReasonNoPendingSession, tenantID, principalID, sessionID)
 		return nil, apperrors.NewUnauthorized(domain.MsgInvalidMFACode)
 	}
 
@@ -190,7 +227,8 @@ func (uc *UseCases) MfaVerify(ctx context.Context, sessionToken, code string) (*
 		// earlier destroy did not stick (a caller that went away, a write that
 		// failed). Destroying is idempotent, so do it again rather than leave a
 		// pending session alive with nothing left protecting it.
-		uc.destroyPendingSession(ctx, session.ID, session.UserID)
+		uc.destroyPendingSession(ctx, session.TenantID, session.ID, session.UserID)
+		uc.noteMFAFailure(ctx, securityevent.ReasonBudgetSpent, session.TenantID, session.UserID, session.ID)
 		return nil, apperrors.NewUnauthorized(domain.MsgInvalidMFACode)
 	}
 
@@ -199,6 +237,7 @@ func (uc *UseCases) MfaVerify(ctx context.Context, sessionToken, code string) (*
 		return nil, err
 	}
 	if user == nil || user.TOTPSecretEnc == nil {
+		uc.noteMFAFailure(ctx, securityevent.ReasonNotEnrolled, session.TenantID, session.UserID, session.ID)
 		return nil, apperrors.NewUnauthorized(domain.MsgInvalidMFACode)
 	}
 	secret, err := crypto.Decrypt(uc.settings.EncryptionKey, *user.TOTPSecretEnc)
@@ -209,8 +248,9 @@ func (uc *UseCases) MfaVerify(ctx context.Context, sessionToken, code string) (*
 		// The attempt that reached the threshold has just been spent on a wrong
 		// code: the budget is gone, so the session goes with it.
 		if spent >= maxMFAAttempts {
-			uc.destroyPendingSession(ctx, session.ID, session.UserID)
+			uc.destroyPendingSession(ctx, session.TenantID, session.ID, session.UserID)
 		}
+		uc.noteMFAFailure(ctx, securityevent.ReasonBadCredential, session.TenantID, user.ID, session.ID)
 		return nil, apperrors.NewUnauthorized(domain.MsgInvalidMFACode)
 	}
 
@@ -231,7 +271,39 @@ func (uc *UseCases) MfaVerify(ctx context.Context, sessionToken, code string) (*
 		return nil, err
 	}
 
+	// The session id survives the token rotation, so this row and the
+	// auth.login.succeeded that minted the pending session name the same
+	// session: an investigator can see the login and its second factor as one
+	// act, and — the more useful case — can see a login that never completed one.
+	uc.note(ctx, securityevent.Event{
+		Event:       securityevent.EventMFASucceeded,
+		Outcome:     securityevent.OutcomeSuccess,
+		Method:      securityevent.MethodTOTP,
+		TenantID:    session.TenantID,
+		PrincipalID: user.ID,
+		SessionID:   session.ID,
+	})
+
 	return &domain.LoginResult{SessionToken: newToken, MFARequired: false, User: user}, nil
+}
+
+// noteMFAFailure records a refused second-factor attempt (ADR-0008 stream 2).
+//
+// Every one of them answers the caller in the same words — an expired pending
+// session, a spent budget, a destroyed session and a wrong code are all
+// MsgInvalidMFACode, because telling them apart tells a script where the budget
+// ends. The reason CLASS is where that distinction lives instead, for the reader
+// who is entitled to it.
+func (uc *UseCases) noteMFAFailure(ctx context.Context, reason, tenantID, principalID, sessionID string) {
+	uc.note(ctx, securityevent.Event{
+		Event:       securityevent.EventMFAFailed,
+		Outcome:     securityevent.OutcomeFailure,
+		Method:      securityevent.MethodTOTP,
+		Reason:      reason,
+		TenantID:    tenantID,
+		PrincipalID: principalID,
+		SessionID:   sessionID,
+	})
 }
 
 // fullSession resolves a session cookie to its (session, user) for a route that
@@ -281,7 +353,7 @@ func (uc *UseCases) consumeMFAAttempt(ctx context.Context, sessionID string) (bo
 // survived" without saying it to the attacker too. This log line is the only
 // server-side trace that the control fired — the response deliberately carries
 // none.
-func (uc *UseCases) destroyPendingSession(ctx context.Context, sessionID, userID string) {
+func (uc *UseCases) destroyPendingSession(ctx context.Context, tenantID, sessionID, userID string) {
 	ctx = context.WithoutCancel(ctx)
 	logger.Log.WithContext(ctx).Warn(
 		"identity: pending session destroyed — its second-factor attempt budget is spent",
@@ -291,7 +363,20 @@ func (uc *UseCases) destroyPendingSession(ctx context.Context, sessionID, userID
 		logger.Log.WithContext(ctx).Error(
 			"identity: pending session could not be destroyed after its MFA budget was spent",
 			logger.String("sessionId", sessionID), logger.Error(err))
+		return
 	}
+	// A session ended, so the stream says so — and this is the one death that a
+	// control caused rather than a person: nobody logged out, the second-factor
+	// budget ran out underneath them.
+	uc.note(ctx, securityevent.Event{
+		Event:       securityevent.EventSessionRevoked,
+		Outcome:     securityevent.OutcomeSuccess,
+		Method:      securityevent.MethodTOTP,
+		Reason:      securityevent.ReasonBudgetSpent,
+		TenantID:    tenantID,
+		PrincipalID: userID,
+		SessionID:   sessionID,
+	})
 }
 
 // destroyEnrollment discards a pending TOTP secret whose confirmation budget is
@@ -302,7 +387,7 @@ func (uc *UseCases) destroyPendingSession(ctx context.Context, sessionID, userID
 // It only ever runs for a user with an UNCONFIRMED enrolment (MfaEnable refuses
 // before the charge when TOTP is already on), so it can never become a way of
 // turning a protected account's MFA off.
-func (uc *UseCases) destroyEnrollment(ctx context.Context, sessionID, userID string) {
+func (uc *UseCases) destroyEnrollment(ctx context.Context, tenantID, sessionID, userID string) {
 	ctx = context.WithoutCancel(ctx)
 	logger.Log.WithContext(ctx).Warn(
 		"identity: pending MFA enrolment discarded — its confirmation budget is spent",
@@ -317,5 +402,19 @@ func (uc *UseCases) destroyEnrollment(ctx context.Context, sessionID, userID str
 		logger.Log.WithContext(ctx).Error(
 			"identity: pending MFA enrolment could not be discarded after its budget was spent",
 			logger.String("userId", userID), logger.Error(err))
+		return
 	}
+
+	// The account's second factor went from "half configured" back to "none",
+	// which is a change to how it can authenticate and belongs beside the
+	// enrolment that preceded it.
+	uc.note(ctx, securityevent.Event{
+		Event:       securityevent.EventMFAEnrollmentDiscarded,
+		Outcome:     securityevent.OutcomeSuccess,
+		Method:      securityevent.MethodTOTP,
+		Reason:      securityevent.ReasonBudgetSpent,
+		TenantID:    tenantID,
+		PrincipalID: userID,
+		SessionID:   sessionID,
+	})
 }

@@ -22,8 +22,9 @@ import (
 // trail reads one tenant's whole chain from the rows, oldest first. audit_log
 // is RLS'd, so the read binds the tenant GUC on its own transaction.
 func (s *TenantSuite) trail(tenantID string) []audit.Entry {
-	const columns = `event_id, tenant_id, seq, actor_id, action, resource_type, resource_id,
-	                 occurred_at, request_id, details, prev_hash, hash`
+	// audit.ChainColumns, not a copy of it: a verifier that reads a column list
+	// of its own drifts behind the envelope and reports sound rows as tampering.
+	const columns = audit.ChainColumns
 	var entries []audit.Entry
 	tx, err := s.DB.Beginx()
 	s.Require().NoError(err)

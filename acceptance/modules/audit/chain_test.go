@@ -66,7 +66,9 @@ func (s *AuditChainSuite) chainActor(tenantID string) string {
 func (s *AuditChainSuite) chainContext(tenantID, actorID string) context.Context {
 	ctx := app.WithTenantID(s.T().Context(), tenantID)
 	ctx = app.WithRequester(ctx, &app.Requester{Kind: app.RequesterUser, ID: actorID})
-	return app.WithRequestId(ctx, "acc-chain-"+uuid.NewString())
+	// A canonical request id: the envelope stores only that shape (see
+	// app.NormalizeRequestID), so an ad-hoc string would be dropped.
+	return app.WithRequestId(ctx, uuid.NewString())
 }
 
 // chainOf reads the tenant's whole chain back through the same loader an
@@ -118,7 +120,7 @@ func (s *AuditChainSuite) insertPreCutoverEntry(exec *database.Exec, ctx context
 		ResourceType: "entity",
 		ResourceID:   uuid.NewString(),
 		OccurredAt:   stored.Add(217 * time.Nanosecond), // what the old writer hashed
-		RequestID:    "pre-cut-over",
+		RequestID:    uuid.NewString(),
 		Details:      json.RawMessage(`{}`),
 		PrevHash:     prevHash,
 	}

@@ -31,6 +31,53 @@ func TestWithRequestId_OverwritesPreviousValue(t *testing.T) {
 	assert.Equal(t, "second", GetRequestId(ctx))
 }
 
+// NormalizeRequestID is the shape gate on the one value in the request envelope
+// a caller supplies. Everything it lets through is written into an append-only,
+// hash-covered, WORM-exported table, so the accepted set is exactly the
+// canonical UUID and the returned form is always lowercase.
+func TestNormalizeRequestID(t *testing.T) {
+	t.Parallel()
+
+	const canonical = "0f8fad5b-d9cb-469f-a165-70867728950e"
+
+	accepted := []struct{ in, want string }{
+		{canonical, canonical},
+		{"0F8FAD5B-D9CB-469F-A165-70867728950E", canonical},
+		{"0f8FAD5b-d9cb-469F-a165-70867728950e", canonical},
+		{"00000000-0000-0000-0000-000000000000", "00000000-0000-0000-0000-000000000000"},
+	}
+	for _, tc := range accepted {
+		got, ok := NormalizeRequestID(tc.in)
+		require.True(t, ok, "%q must be accepted", tc.in)
+		assert.Equal(t, tc.want, got)
+	}
+
+	minted := NewRequestID()
+	got, ok := NormalizeRequestID(minted)
+	require.True(t, ok, "a minted id must satisfy the gate that admits one")
+	assert.Equal(t, minted, got)
+
+	refused := []string{
+		"",
+		"trace-abc",
+		"my-custom-request-id-123",
+		"'; DROP TABLE audit_log; --",
+		"jane.doe@example.com",
+		"0f8fad5b-d9cb-469f-a165-70867728950",  // one short
+		"0f8fad5bd9cb469fa16570867728950e",     // unhyphenated
+		"0f8fad5b-d9cb-469f-a165-7086772895ZZ", // not hex
+		"0f8fad5b_d9cb_469f_a165_70867728950e", // wrong separators
+		" 0f8fad5b-d9cb-469f-a165-70867728950e",
+		"urn:uuid:0f8fad5b-d9cb-469f-a165-70867728950e",
+		"{0f8fad5b-d9cb-469f-a165-70867728950e}",
+	}
+	for _, in := range refused {
+		got, ok := NormalizeRequestID(in)
+		assert.False(t, ok, "%q must be refused", in)
+		assert.Empty(t, got, "a refused id must yield nothing to store")
+	}
+}
+
 // --- Requester ---
 
 func TestWithRequester_GetRequester_RoundTrip(t *testing.T) {

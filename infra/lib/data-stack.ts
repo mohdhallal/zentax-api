@@ -2,6 +2,7 @@ import * as cdk from 'aws-cdk-lib';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecr from 'aws-cdk-lib/aws-ecr';
+import * as iam from 'aws-cdk-lib/aws-iam';
 import * as kms from 'aws-cdk-lib/aws-kms';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as rds from 'aws-cdk-lib/aws-rds';
@@ -41,8 +42,8 @@ export interface Repositories {
 
 /**
  * ZenTax-<Env>-Data: everything that holds state or that a deployment must
- * never accidentally delete — KMS key, RDS, secrets, the documents bucket,
- * the api/migrate ECR registries and the log groups.
+ * never accidentally delete — KMS key, RDS, secrets, the documents bucket, the
+ * WORM audit-export bucket, the api/migrate ECR registries and the log groups.
  *
  * The web tier's state (its ECR repository, its log group, the origin-verify
  * secret CloudFront and the ALB share) lives in the UI app's Web stack.
@@ -59,6 +60,8 @@ export class DataStack extends cdk.Stack {
   /** Generated initial password of the first admin (seed task: SEED_ADMIN_PASSWORD). */
   public readonly seedAdminSecret: secretsmanager.Secret;
   public readonly documentsBucket: s3.Bucket;
+  /** WORM copy of the audit hash chain: Object Lock, COMPLIANCE mode (ADR-0008). */
+  public readonly auditExportBucket: s3.Bucket;
   public readonly repositories: Repositories;
   public readonly logGroups: LogGroups;
   /** The environment's alarm topic (eu-central-1); Api and the UI app's Web stack reuse it. */
@@ -272,6 +275,102 @@ export class DataStack extends cdk.Stack {
       autoDeleteObjects: removal === cdk.RemovalPolicy.DESTROY,
     });
 
+    // ---- Audit-export bucket: the WORM copy of the chain (ADR-0008) ----------
+    //
+    // The audit trail is already append-only twice over in Postgres and
+    // hash-chained per tenant, but every one of those guards lives inside the
+    // database the same operator administers. This bucket is the off-box half:
+    // once the export job has put an object here, no credential in this account
+    // can change or remove it.
+    //
+    // COMPLIANCE, not GOVERNANCE. The two differ in exactly one place — who may
+    // shorten a retention. GOVERNANCE lets any principal holding
+    // `s3:BypassGovernanceRetention` delete a locked version, which makes the
+    // lock a policy: real against accident, worth nothing against the privileged
+    // insider ADR-0008 names as the threat ("a rogue DBA cannot silently rewrite
+    // history"). COMPLIANCE cannot be bypassed, shortened, or switched off by
+    // anyone — not an administrator, not the account root, not AWS Support, not
+    // us — until the retention expires. That is the property being bought, and
+    // the price is that every byte written here is billable storage for the whole
+    // window with no way to delete it early: a bug that exports too much, or
+    // exports the wrong thing, cannot be cleaned up, only waited out. Two
+    // consequences follow, and both are already true of the envelope this
+    // exports: it must contain no PII (ADR-0007/0008 — actor by UUID, values
+    // redacted to presence tokens), because an unlawful field cannot be erased
+    // from here; and the exporter must batch, because per-object costs and the
+    // 128 KB minimum billable object size of the archive class below are paid
+    // for the full retention too.
+    //
+    // The one residual erase path is the KMS key: destroy it and the objects
+    // remain but no longer decrypt. That is deliberate — the alternative,
+    // SSE-S3, would make the archive proof against the key holder too, but
+    // ADR-0006 decision 1 puts all data at rest under the cell CMK, and a
+    // scheduled key deletion is a 30-day, CloudTrail-visible administrative act
+    // rather than a silent one. In staging it is also the intended way out (the
+    // key is DESTROY there); in production the key is RETAIN.
+    this.auditExportBucket = new s3.Bucket(this, 'AuditExportBucket', {
+      bucketName: `zentax-${cfg.name}-audit-export-${cfg.account}-${cfg.region}`,
+      encryption: s3.BucketEncryption.KMS,
+      encryptionKey: this.dataKey,
+      bucketKeyEnabled: true,
+      // Object Lock requires versioning and forbids ever suspending it, so an
+      // overwrite of an existing key can only ever add a version next to the
+      // locked one — the original stays readable and locked.
+      versioned: true,
+      objectLockEnabled: true,
+      objectLockDefaultRetention: s3.ObjectLockRetention.compliance(cdk.Duration.days(cfg.auditExportRetentionDays)),
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      objectOwnership: s3.ObjectOwnership.BUCKET_OWNER_ENFORCED,
+      enforceSSL: true,
+      minimumTLSVersion: 1.2,
+      lifecycleRules: [
+        // NOTHING here expires. A `NoncurrentVersionExpiration` shorter than the
+        // lock is worse than no rule at all — it reads like a retention policy
+        // and cannot fire, because lifecycle deletion of a locked version simply
+        // fails — and one longer than the lock would erase the archive the hour
+        // its protection lapsed. The end of the window is a deliberate act
+        // (README, "Decommissioning"), never a background job.
+        //
+        // What is safe to expire is the debris of a failed upload: parts of an
+        // incomplete multipart are not objects and Object Lock does not cover
+        // them, so they are the one thing here that could accumulate silently.
+        // This rule is also why the api task needs no abort permission.
+        { id: 'abort-incomplete-multipart', abortIncompleteMultipartUploadAfter: cdk.Duration.days(7), enabled: true },
+        // Ten years of STANDARD for something read during an audit and never
+        // otherwise is the avoidable part of the bill: Glacier Instant Retrieval
+        // is ~1/5 the price at the same millisecond access. 90 days is its
+        // minimum storage duration, so transitioning at 90 costs nothing extra.
+        {
+          id: 'archive-after-90-days',
+          transitions: [{ storageClass: s3.StorageClass.GLACIER_INSTANT_RETRIEVAL, transitionAfter: cdk.Duration.days(90) }],
+          enabled: true,
+        },
+      ],
+      // RETAIN in BOTH cells, and never auto-emptied: an evidence archive is not
+      // something a stack teardown may take with it, and `autoDeleteObjects`
+      // could not empty it anyway (its custom resource deletes versions, which
+      // COMPLIANCE refuses). A destroyed staging cell leaves this bucket behind
+      // on purpose; it is deleted by hand once its one-day locks have lapsed.
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      autoDeleteObjects: false,
+    });
+    // The second lock, stated in the place an auditor reads first. Object Lock
+    // is what actually holds; this Deny adds the intent — no principal in this
+    // account has any business deleting an audit object or asking for a
+    // governance bypass — and it catches the case Object Lock does not: a
+    // future task role, or a template deployed through the pipeline (whose
+    // execution policy carries `s3:*` on `zentax-*`), quietly acquiring a delete
+    // verb. Unlike the lock it is revocable — a principal with
+    // `s3:PutBucketPolicy` can drop it — which is exactly the difference between
+    // a policy and an immutability mode, and the reason both are here.
+    this.auditExportBucket.addToResourcePolicy(new iam.PolicyStatement({
+      sid: 'DenyObjectRemoval',
+      effect: iam.Effect.DENY,
+      principals: [new iam.AnyPrincipal()],
+      actions: ['s3:DeleteObject', 's3:DeleteObjectVersion', 's3:BypassGovernanceRetention'],
+      resources: [this.auditExportBucket.arnForObjects('*')],
+    }));
+
     // ---- ECR -----------------------------------------------------------------
     // Repository names are per environment (zentax/<env>/api ...): both
     // environments live in one account+region today, and ECR names must be
@@ -317,6 +416,14 @@ export class DataStack extends cdk.Stack {
     // topic; the pipelines read the bucket and repository URIs.
     new cdk.CfnOutput(this, 'AlarmTopicArn', { value: this.alarmTopic.topicArn, exportName: exportName(cfg.name, 'alarm-topic-arn') });
     new cdk.CfnOutput(this, 'DocumentsBucketName', { value: this.documentsBucket.bucketName, exportName: exportName(cfg.name, 'documents-bucket') });
+    // Deliberately NOT a CloudFormation export: nothing outside this app reads
+    // it (the api gets the name as container config, from the stack next door),
+    // and lib/exports.ts must stay byte-identical in both repositories — an
+    // export nobody imports is a name that can never be changed again.
+    new cdk.CfnOutput(this, 'AuditExportBucketName', {
+      value: this.auditExportBucket.bucketName,
+      description: `WORM audit archive: Object Lock COMPLIANCE, ${cfg.auditExportRetentionDays} days, not removable by anyone until then`,
+    });
     new cdk.CfnOutput(this, 'ApiRepositoryUri', { value: this.repositories.api.repositoryUri, exportName: exportName(cfg.name, 'ecr-api') });
     new cdk.CfnOutput(this, 'MigrateRepositoryUri', { value: this.repositories.migrate.repositoryUri, exportName: exportName(cfg.name, 'ecr-migrate') });
   }

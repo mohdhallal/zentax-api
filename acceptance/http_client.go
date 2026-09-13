@@ -91,6 +91,13 @@ func (b *RequestBuilder) WithOrigin(origin string) *RequestBuilder {
 	return b.withHeader("Origin", origin)
 }
 
+// WithRequestID sets X-Request-Id — the one value in the request envelope a
+// CALLER supplies and the audit trail stores, so the suite can send both a
+// legitimate correlation id and a hostile one.
+func (b *RequestBuilder) WithRequestID(id string) *RequestBuilder {
+	return b.withHeader("X-Request-Id", id)
+}
+
 func (b *RequestBuilder) do(t *testing.T, method, path string, body any) *TestResponse {
 	t.Helper()
 	var bodyReader io.Reader

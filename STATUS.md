@@ -3,9 +3,9 @@
 > Single source of truth for the state of the ZenTax Go backend. Updated as work
 > lands. The cross-session roadmap lives in `../zentax-ui/PROJECT_PLAN.md` (the UI
 > repository, `github.com/mohdhallal/zentax-ui`, formerly `TaxFlowReports`);
-> architecture decisions in `../zentax-ui/docs/adr/` (ADRs 0001–0026).
+> architecture decisions in `../zentax-ui/docs/adr/` (ADRs 0001–0027).
 
-**Last updated:** 2026-09-13 · **Toolchain:** Go 1.27 via gvm (`~/.gvm/gos/go1.27`;
+**Last updated:** 2026-09-13 (**fifth pass** of the day, after the attribution wave — the records half. The fourth-pass line below still stands for what it covered; this pass re-derived the *record* claims from the code and found five kinds of drift: a resource-type count the code had outgrown (twelve → thirteen), `client_ip_source` described in terms that are wrong for a cell, `-sealed` described as covering one unbound-header case when it covers two, the runbook's Logs Insights fields and queries naming keys the API does not emit, and `security_events`' append-only trigger recorded with the wrong SQLSTATE (`ZT031`, not `ZT030` — which is `audit_export_segments`' freeze). The retention job landed during this pass and item 9 was rewritten from the code rather than from the plan. The two **deployment** properties the resolver rests on — the origin refusing anything that did not come through the distribution, and the self-hosted stack trusting its whole container network — are now written down here and in `../zentax-ui/docs/ops/environments.md` §6.10 rather than living in Go comments. *Fourth pass, kept:* after the hardening wave that followed the ADR-0008 security-stream + WORM-export work; the third-pass line claimed every *What is left* entry had been re-derived from the code at the end of that work; it had not — the stream had thirteen events where this file said eleven, and three columns it named nowhere. What follows was checked against the code, and the two auditor-facing procedures against real output rather than by reading them) · **Toolchain:** Go 1.27 via gvm (`~/.gvm/gos/go1.27`;
 the system `/usr/local/go` is a stale 1.19).
 
 **Gate** — from the repository root, main module then `acceptance/`:
@@ -34,15 +34,22 @@ checks out without `infra/node_modules`.)
 Everything above *What is missing / remaining* is finished work. In rough order of what
 would hurt first:
 
-1. **Holes in code that already shipped** — no rate limiting anywhere and no attempt counter on
-   `POST /auth/mfa/verify`; deleting a workflow or an
-   entity cascades through approved records; the audit trail now records what changed but still
-   records no authentication events beyond the credential lifecycle; nothing ever runs the chain
-   verifier on a schedule and there is no write-once export of the chain. (Log redaction landed
-   2026-09-13; request URIs and search terms no longer reach the logs.)
-   → *🔴 Holes in code that has already shipped*
-2. **No notifications, no e-mail, no scheduler** — invites are copy-paste and the reminder/digest
-   feature does not exist server-side. → *🟠 Domain features still to build*
+1. **Holes in code that already shipped** — deleting a workflow or an entity cascades through
+   approved records, and `entity_closure` is still unpopulated so read scope walks the parent chain
+   per read. (Struck through on 2026-09-13, all verified against the code: rate limiting and the
+   MFA-verify attempt counter landed with `419efe6`; log redaction landed the same day; the audit
+   trail records what changed, records authentication events, runs its verifier on every export
+   pass, and has a write-once copy — see items 8 and 9 below for the parts of that which are
+   genuinely still missing.) → *🔴 Holes in code that has already shipped*
+2. **Notifications and mail exist; three of the jobs they unblocked do not.** ADR-0027 landed the
+   `Mailer` seam (log/smtp/ses), the transactional outbox and an in-process scheduler elected by a
+   Postgres advisory lock, with `notifications.deadline-reminder`, `outbox.delivery`,
+   `outbox.prune` and — since the audit wave — `audit.worm-export` and `securityevents.retention`
+   registered on it. **Still not written:** expired-session reaping, the ADR-0007 purge, and the
+   ADR-0020 partition top-up as a *job* for `audit_log` / `sessions` / `api_tokens` /
+   `invite_tokens` (they are still created ahead at deploy time only; `security_events` now has its
+   own, see item 9). Nothing routes UNASSIGNED work, so a task with
+   no assignee is in nobody's digest. → *🟠 Domain features still to build*
 3. **Credential recovery — brokered, not built (decided 2026-09-12).** Nothing exists today and a lost
    authenticator is a permanent lockout, but the fix is the WorkOS broker (Phase 2), not a first-party
    reset; a placeholder pass makes the absence visible meanwhile. A broker-less self-host is the one
@@ -56,6 +63,52 @@ would hurt first:
    the ADR-0016 supply-chain controls the shipped pipeline still lacks. → *🟡 Platform / infra*
 7. **Frontend** — notification preferences and the workflow-clone action are the only surfaces still
    on the legacy Express handlers. → *🟡 Frontend integration*
+8. **The security stream is recorded and unreadable through the product.** `security_events` and
+   `platform/securityevent` write all **thirteen** authentication events (ADR-0008 stream 2 — the
+   eleven of the first pass plus `auth.invite.{accepted,rejected}`, which put the *establishment* of
+   a credential in a stream that had only recorded its use), each with `client_ip_source` saying how
+   its address was arrived at; and `securityevent.Reader` exists — but **no route mounts it**, so the
+   stream is reachable by SQL and nothing else. A tenant admin cannot see their own sign-ins; an
+   operator investigating a lockout needs a `psql`. → *🟠 Auth & authorization*
+9. **One retention window is now enforced; the rest are still decisions.** ~~Not one partition is
+   ever dropped anywhere in the tree~~ — **changed 2026-09-13:** `platform/securityevent.Retention`
+   runs as the scheduler job `securityevents.retention` every six hours and, in one pass, creates a
+   partition for every month inside the window plus the run-ahead **and drops every month wholly
+   past it** (`security_events_maintain_partitions`, a `SECURITY DEFINER` function in migration
+   `20260913000035` — the app role does not own the table and `DROP TABLE` needs ownership).
+   Thirteen months by default, floor twelve enforced in the schema (`ZT032`) *and* in config
+   validation, so a bad value refuses the boot. A month ages out whole, so the window is a floor:
+   a row lives thirteen to fourteen months. `deployment/docker/migrate.sh` still tops up
+   `audit_log`, `sessions`, `api_tokens` and `invite_tokens` and not `security_events`, which is now
+   correct — the job's create half is the mechanism. **Still decisions with no mechanism:** the
+   ADR-0007 purge (soft-delete exists on `documents` alone), and `audit_log` / `sessions`, which are
+   created ahead at deploy time and never aged out at all. And none of it has run in a deployed
+   cell. → *🟡 Platform / infra*
+10. **Nothing has ever run against AWS.** The Object-Lock audit bucket, the SES identity and the
+   whole ADR-0027 mail path are CDK and code; no cell has been deployed. → *🟡 Platform / infra*
+11. **A deployed cell would attribute nothing, and that costs a rate-limit control as well as the
+   evidence.** The api declares `RATE_LIMIT_EDGE_VIEWER_HEADER=CloudFront-Viewer-Address`
+   (`infra/lib/api-stack.ts`), which is the correct answer for the CloudFront → ALB → web → api
+   topology — but the header must survive two hops in `zentax-ui`, and as of 2026-09-13 **one is
+   fixed and one is not**: the Edge stack's origin-request policy is now
+   `ALL_VIEWER_AND_CLOUDFRONT_2022` (plain `ALL_VIEWER` forwards none of CloudFront's own headers),
+   pinned by `infra/test/edge-stack.test.ts`; `server/go-proxy.ts`'s fixed header allowlist still
+   drops it at the web tier. Until both hold, every request
+   resolves to the web task's own address with `client_ip_source='proxy'` — honest, disclosed by one
+   `WARN` per task, and not attribution — and because `clientaddr.Client.Identifies()` is false for
+   `proxy`, `ratelimit.ByAddress` **skips the anonymous per-address budget** on `/auth/login`,
+   `/auth/mfa/verify` and `/auth/accept-invite`. The per-account budget and the verification
+   semaphore remain; what loses its ceiling is one source spraying single guesses across many
+   accounts. Nothing in either repository ties the three declarations together.
+   → *🟠 Auth & authorization*
+12. **The self-host edition trusts its whole container network.** `zentax-ui/docker-compose.yml`
+   defaults `RATE_LIMIT_TRUSTED_PROXIES` to `172.16.0.0/12`, which contains the entire Compose
+   bridge and the bridge gateway, and the api's port is published — so any container, or anything
+   reaching that port from the host, can write an `X-Forwarded-For` that is believed and stored as
+   `client_ip_source='forwarded'` in an append-only table. The right-to-left walk is spoof-proof
+   only while the appending hop lies **outside** the trust set. The cell half of this was narrowed
+   (private subnets instead of `cfg.cidr`); the compose half was not. Remedy and reasoning:
+   `../zentax-ui/docs/ops/environments.md` §6.10. → *🟡 Platform / infra*
 
 ---
 
@@ -673,7 +726,8 @@ Migrations (sqitch): `tenants`, `entities`, `obligation_types`, `entity_obligati
 `audit_log`, `service_accounts`, `entity_obligation_details`, `reporting_indexes`, `invite_tokens`,
 `documents`, `data_templates`, `fiscal_calendar`, `tenant_timezone`, `canonical_tax_keys`,
 `pagination_indexes`, `attested_delete_guard`, `storage_reclaim`, `session_mfa_attempts`,
-`audit_chain_version`
+`audit_chain_version`, `outbox_messages`, `outbox_payload_at_rest`, `outbox_dead_releases_dedupe`,
+`audit_export_segments`, `security_events`
 (+ boilerplate `appschema`, `internal_api_keys`, `nexus_accounts_api_keys`).
 
 **Auth / identity (Increments A + B):** first-party email/password + server-side sessions + TOTP MFA
@@ -1247,9 +1301,20 @@ measured figures say so.
     A machine's grants are projected through the same helper a person's grants use, so the two are
     byte-comparable in the trail; a token is named by its id and its `ztx_` scheme marker, never by
     any part of the secret or its hash (the ledger is append-only and cannot be redacted later).
+  - **The envelope names the credential, which is what joins the two streams** (migration
+    `20260913000033`, `hash_version` 3): `credential_id` (a `sessions.id` or an `api_tokens.id`) and
+    `credential_kind` (`session | api_token`), both `NULL` for work that authenticated with neither.
+    Until it landed, two live sessions of one account — the owner's and an attacker's — were the same
+    actor in the trail, and `request_id` does not bridge a login and a later mutation. It is inside
+    the hash, because attribution is exactly what a privileged operator would rewrite. Also on the
+    envelope: `audit_log.request_id` is now constrained (`…34`) to `''` or a canonical lowercase
+    UUID, `NOT VALID` so hash-covered history stands, closing the one door through which caller text
+    reached a decade-long compliance-locked store.
   - **The trail is readable and filterable.** Rows carry `resourceId`, `seq` and the whole `hash`
-    through to the page and the CSV/Excel export, and `GET /audit-log?resourceType=` accepts all
-    **twelve** recorded types — it accepted six until 2026-09-13, so tokens, service accounts, the
+    through to the page and the CSV/Excel export, and `GET /audit-log?resourceType=` accepts every
+    recorded type — **thirteen** as of 2026-09-13 (the twelve of the sweep plus `outbox_message`,
+    which ADR-0027's `notification.undeliverable` records; this file said twelve until the fifth
+    pass). It accepted six until 2026-09-13, so tokens, service accounts, the
     tenant record, members, documents and data templates could not be asked for at all. The
     vocabulary is one list (`modules/auditlog/dto.ResourceTypes`) and
     `modules/auditlog/dto/resource_types_test.go` re-derives it from the `audit.Record` call sites,
@@ -1258,29 +1323,172 @@ measured figures say so.
     subtree's events, tenant-level rows (tenant, member, service account, token, data template,
     obligation type) need a tenant-wide grant, and `seq` is withheld from a narrowed reader because
     the counter is dense and the gaps would count the rows it was not shown.
-  *Still missing:* **authentication events** — login, logout, MFA enrolment and session revocation
-  still write nothing (a signed-off Phase 2 deferral to the centralized security stream, not a
-  stream-1 gap; the credential-lifecycle half that WAS stream-1 work is now done). A couple of
-  payloads are also still a count rather than a change — `workflow.started` records
-  `{instancesCreated, periods, overrides}` and the predefined-template seeding records `{inserted}`
-  — and a token's death is dated individually only when it is revoked directly: the bulk revocation
-  that follows disabling an account writes no `api_token.revoked` entry per token, so *which*
-  credential stopped working, and when, is not in the trail. Half a day each.
+  *Authentication events — BUILT 2026-09-13, in their own store (ADR-0008 stream 2, amended).*
+  `platform/securityevent` + `security_events` (migrations `20260913000031` and `…32`) record all
+  **thirteen** declared events from `modules/identity/usecases/{login,logout,mfa,member,token}.go`:
+  `auth.login.{succeeded,failed}`, `auth.lockout.engaged`,
+  `auth.mfa.{enrolled,enabled,enrollment_discarded,succeeded,failed}`, `auth.session.revoked`,
+  `auth.sessions.revoked`, `auth.token.rejected`, `auth.invite.accepted`, `auth.invite.rejected`.
+  The invite pair (with its own `method`, `invite_token`, and a widened column `CHECK`) closed the
+  hole that `/auth/accept-invite` — the only public route that *establishes* a credential — recorded
+  nothing at all, so the birth of every human principal but the founding administrator was invisible.
+  **Not `audit_log`, and it could not have been:**
+  that table's append policy keys on `app.tenant_id` and `actor_id` is `NOT NULL`, so the event that
+  matters most — a failed login for an address that resolves to no account — can never be written
+  there. In `security_events` tenant, principal, actor and session are all nullable, and that
+  nullability is why the table exists.
+  - **No caller text can reach it.** Every column is a code constant (`event`, `outcome`, `method`,
+    `reason`), a UUID, an `INET`, a timestamp, or a 64-hex digest; there is deliberately no `details`
+    JSONB, and `request_id` is a `UUID` because it is caller-supplied when `X-Request-Id` is present.
+  - **The submitted address is never stored.** An unidentified attempt correlates by
+    `subject_digest`: a keyed HMAC-SHA256 of the normalised address under a key derived by label from
+    `AUTH_ENCRYPTION_KEY`, so an investigator can digest a candidate address and count, and a copy of
+    the table yields nothing. A `CHECK` on 64 lowercase hex characters makes that structural.
+  - **`client_ip` IS kept** — the deliberate exception to ADR-0015's no-addresses rule, meant to be
+    bounded by retention rather than obfuscation — and since 2026-09-13 it is: the
+    `securityevents.retention` job drops the months past the window (item 9) — because a security stream that cannot say "from where" cannot
+    serve an incident. **And it is stored with its provenance** (`client_ip_source`, migration
+    `20260913000032`): `peer` (the socket peer, not one of our proxies — a completed handshake, so
+    unforgeable), `forwarded` (a **believed** claim), `proxy` (our own hop — **a real row that reads
+    exactly like a caller and is not one**). `NULL` means unknown, including
+    every row written before the column. Never count addresses across sources.
+    **What `forwarded` and `proxy` mean depends on the topology, and this file described only one of
+    the two until the fifth pass.** The resolver is `delivery/httpkit/clientaddr`, bound once for
+    every route by `delivery/httpkit/middlewares/client_addr.go` (it also writes `sessions.ip`), and
+    it branches on whether `RATE_LIMIT_EDGE_VIEWER_HEADER` is set:
+    - **unset** (self-host, a bare load balancer, every test): the forwarded chain is walked
+      right-to-left from a trusted socket peer. `forwarded` = the header, believed because the peer
+      is in `RATE_LIMIT_TRUSTED_PROXIES`; `proxy` = the chain named no client, i.e. a proxy in front
+      is not appending.
+    - **set** (a cell sets `CloudFront-Viewer-Address`): the distribution's viewer header outranks
+      the chain and **the chain is not walked at all**. `forwarded` = the distribution's statement
+      about the viewer, taken whole; `proxy` = **this request did not come through the
+      distribution** — a different fault, and today the state of every row in a cell (item 11).
+    The resolver has a fourth answer, `FromNowhere` (no usable socket address at all), which the
+    middleware maps to *nothing*: the row carries no address and a `NULL` source, because `"unknown"`
+    is a rate-limit key and not an address. Trust is by network range, so what actually bounds this
+    is three **deployment** properties, two of them outside this repo — the trusted range naming only
+    the tier in front, the security group admitting only that tier, and the origin refusing any
+    request that did not come through the distribution (the ALB's 403 without the origin-verify
+    header). See `../zentax-ui/docs/ops/environments.md` §6.10.
+  - **Append-only twice over, and no hash chain, deliberately:** RLS `INSERT`/`SELECT` policies only,
+    plus a `BEFORE UPDATE OR DELETE` trigger (`SQLSTATE ZT031` — this file said ZT030 until the
+    fifth pass; ZT030 is `audit_export_segments`' freeze) that binds a superuser too. A chain
+    here would have to be ONE GLOBAL chain (the rows have no tenant), i.e. a cluster-wide advisory
+    lock on every login — a denial-of-service lever on the hottest unauthenticated path.
+  - **Reads:** a tenant sees its own identified events; tenant-less rows are invisible to every
+    tenant. The cross-tenant door is the `app.security_stream` GUC, `SET LOCAL`, set in exactly one
+    place (`securityevent.Reader.within`) and unreachable from any request path.
+  - **Retention is real, and it is the one window in the product with a mechanism** (2026-09-13).
+    `platform/securityevent.Retention` → the six-hourly scheduler job `securityevents.retention` →
+    `security_events_maintain_partitions` (`SECURITY DEFINER`, migration `20260913000035`), which
+    **creates and drops in the same pass**: a partition for every month inside the window and the
+    three-month run-ahead, and a drop of every month wholly past the window. The halves are one job
+    because the drop alone is worthless — a month with no partition lands in
+    `security_events_default`, which retention must never drop, and its rows leave the window's reach
+    permanently. Defaults thirteen months / three ahead; the twelve-month floor is enforced in the
+    schema (`ZT032`) and in config validation. A month ages out whole, so the window is a floor and a
+    row lives thirteen to fourteen months. The pass logs only what it did; `blocked` months are an
+    `ERROR` and the one outcome an operator must act on.
+  *Still missing:* **no HTTP surface** — `securityevent.Reader` is mounted by no route, so the stream
+  is reachable by SQL and nothing else; and **no `key_id` on
+  `subject_digest`** — the correlator is an HMAC under a key derived from `AUTH_ENCRYPTION_KEY`, so a
+  rotation splits the namespace permanently with nothing in the data marking where, and a query
+  spanning it under-counts instead of failing. That one cannot be repaired retroactively (the address
+  was never stored), so the mitigation today is procedural and lives in
+  `../zentax-ui/docs/ops/environments.md` §6.3 — read the stream before rotating, and record the
+  instant. Two stream-1 payloads
+  are also still partly a count — `workflow.started` records `{instancesCreated, periods, overrides}`
+  beside the `appliedOverrides` it gained, and the predefined-template seeding records `{inserted}`
+  (its resource type is at least no longer wrong) — and a token's death is still not dated **per
+  token**: disabling a principal writes `member.credentials_revoked` with counts by kind and a
+  stream-2 `auth.sessions.revoked` that dates the instant, but no `api_token.revoked` per token id.
 
-- **Nothing ever verifies the hash chain: the verifier has no route and no command.** Since the
-  2026-09-12 cut-over the chain genuinely verifies from the stored rows and `audit.Verify` reports
-  what it could prove (`audit chain: N entries, M pre-cut-over (links intact, not recomputable),
-  hash-verified seq X..Y`), but `Verify`/`VerifyChain` (`platform/audit/audit.go`) are called only
-  from tests — no endpoint, no `cmd/`, no scheduled check — so a broken chain would be found only by
-  whoever thought to run a test. The quarterly restore drill in `../zentax-ui/docs/ops/environments.md` nevertheless tells
-  the operator to verify the chain "with the API's VerifyChain tooling", a false claim in the one
-  procedure where ledger integrity would ever be questioned. Two further limits: `GET /audit-log`
-  returns `hash` but not `prevHash` (`modules/auditlog/dto/response.go`), so an external verifier
-  cannot recompute independently without the full contiguous page set; and `VerifyChain` hardcodes
-  `seq == i+1`, so it can only verify from seq 1 — the first partition drop under ADR-0020's
-  retention scheme breaks it permanently for that tenant, and there is no anchor table. Days for a
-  verify command/endpoint over a tenant's chain (WORM export to S3 Object Lock stays Phase 2 —
-  see *Platform / infra*).
+- **Chain verification and the WORM export — BUILT 2026-09-13; never run against AWS.** *Before:*
+  `Verify`/`VerifyChain` were called only from tests — no endpoint, no `cmd/`, no scheduled check —
+  so a broken chain would be found only by whoever thought to run a test, while the quarterly restore
+  drill in `../zentax-ui/docs/ops/environments.md` told the operator to verify the chain "with the
+  API's VerifyChain tooling". S3 Object Lock appeared in neither CDK app. *After:*
+  - **`platform/audit/worm`** exports each tenant's chain as **segments** — one file, one contiguous
+    stretch of `audit_log.seq`, carrying every entry in the form the hash covers, the chain state at
+    both ends, a pointer to the previous segment, a sha256 over its own bytes, and a `verification`
+    block naming the recipe. The file is `{"segment": …, "digest": "sha256:…"}` and the digest covers
+    the **exact bytes** of the segment member, so a reader never re-serialises anything.
+  - **The verifier now runs on every pass, before anything is written.** `worm.Build` calls
+    `VerifyDocument` and refuses to export a segment that does not recompute, so a broken chain fails
+    the export instead of being copied into the evidence store as though it were evidence.
+  - **`audit_export_segments`** (migration `20260913000030`) is the cursor and the receipt — and the
+    anchor table this file used to say did not exist. A partial unique index allows **at most one
+    pending segment per tenant**, so a crash between cutting a range and the file landing is finished
+    rather than re-cut; a state-only trigger (`SQLSTATE ZT030`) freezes the range, key, digest and
+    chain endpoints at the cut and freezes a landed row entirely; there is no DELETE policy.
+  - **`cmd/verify-audit-segment`** is the reference offline reader: no database, no session, no
+    running ZenTax. `-series` requires the files to join, `-genesis` requires the first to start the
+    tenant's chain, `-strict` refuses the cut-over exemption, and `-sealed` refuses an archive in
+    which **any** segment's header is unbound. There are **two** such cases, not one, and they close
+    differently: the **newest** segment's header is bound by an `audit.exported` entry written after
+    the cut, so it closes at the next export; a segment exported **before 2026-09-13** carries a
+    record that never restated the header, and **no later export will ever bind it**. Entries,
+    range, links and end hash are bound in both; `segmentId` and `exportedAt` are not. Without
+    `-sealed` each is a `note:` on **stderr** printed on every run, `-quiet`
+    included, precisely because the documented automation form is `-series -quiet … && echo ok`.
+    `-strict` and `-sealed` are preconditions rather than upgrades: on an installation with
+    pre-cut-over rows the first can never pass, and on one holding pre-2026-09-13 segments — this
+    one — the second can never pass either.
+    *Also not detected by any flag:* removal of the **newest** segment. Nothing inside an archive
+    says how far it should reach, so a truncated tail verifies clean; the `audit_export_segments`
+    receipts and the bucket's version listing are what catch it (§6.9 steps 1 and 4). Removal in the
+    middle is caught by the ordinals, the ranges and the predecessor digests.
+  - **One gap in the format itself:** the `verification` block the segments carry — the recipe an
+    independent reimplementer is told to follow — still says the sealed header fields "must agree"
+    with the export record, with no clause for the pre-seal shape both readers now accept by name
+    (`recipe()` in `platform/audit/worm/segment.go`). Someone coding that recipe literally over this
+    installation's own series reports tampering on an untampered file. The rule is written down in
+    `platform/audit/worm/README.md` and §6.9 only.
+  - **The job** is `audit.worm-export` on the ADR-0027 scheduler (`bootstrap/audit_export.go`),
+    hourly by default (`AUDIT_EXPORT_INTERVAL_MINUTES`), ≤5,000 entries per segment and ≤20 segments
+    per tenant per pass. **The interval is the exposure window**: an operator with `DELETE` on the
+    database can destroy at most the entries written since the last segment.
+  - **The destination** is a per-cell S3 bucket under **Object Lock, COMPLIANCE mode** — ten years in
+    production (six-year floor enforced by the CDK config loader), one day in staging — with the api
+    task role holding `s3:PutObject` and nothing else, a bucket policy denying every delete and
+    governance bypass, and `RETAIN` on teardown. Self-host writes the same segments through the same
+    `platform/storage` seam to the document store or a directory, where the product **does not claim**
+    they are immutable; pointing `AUDIT_EXPORT_STORAGE_DRIVER=s3` at MinIO with Object Lock gives the
+    real property.
+  - The operator procedure is `../zentax-ui/docs/ops/environments.md` **§6.9**, which is written to be
+    runnable by an auditor holding the files and nothing else, and
+    `platform/audit/worm/procedure_test.go` runs the page as written — extracting its reader and its
+    command lines, from the directory its own steps leave you in, against four forgeries.
+  *Still open:*
+  - `audit.Verify` (whole-chain, from the database) **still hardcodes `seq == i+1`**, so
+    it cannot start above seq 1 and a dropped partition would break it permanently — the segment
+    verifier is range-aware and is the practical route past that, but the database-side function was
+    not fixed.
+  - **Nothing has run against AWS**: no bucket, no lock, no object.
+
+  *Closed 2026-09-13 (third pass), both found by running §6.9 against this installation's own
+  segments rather than against fixtures, and both were the same class of defect — the shipped reader
+  disagreeing with the reader the page hands the auditor:*
+  - **`cmd/verify-audit-segment` misread an export record written before the sealed header.** Such a
+    record states only the ordinal, the range and the object key; `checkHeader` compared the header
+    against the zero values `json.Unmarshal` leaves for the absent fields and reported `segment N
+    disagrees with the export record … its id: the file says <uuid>, the record says` — **a false
+    tampering verdict on an untampered archive**, on every archive predating 2026-09-13, which §6.9
+    tells the operator to escalate. `exportRecords` now reads which of the four sealed fields the
+    record actually *states* from the bytes: all four are checked as before, none is the older shape
+    (the range is still held against the chain and the rest is reported as the file's own words, via
+    `Report.HeaderRecordPreSeal` / `SeriesReport.PreSealHeaders`), and *some* of them is refused —
+    no writer has produced that shape. The series line no longer claims a pre-cut-over prefix is
+    "bounded by the sealed export record" when the record carrying that bound predates the seal.
+  - **An empty directory got a syntax help screen.** `main.go` routed zero *collected* files into the
+    same `flag.Usage()`/exit-2 branch as "no arguments", so a tenant that has never been exported —
+    every new tenant — read it as their own typo. It now says `NOTHING TO VERIFY: no segment files
+    under …` and still exits 2. A path that does not exist is still `FAILED: stat …` with exit 1.
+  - Both are pinned where they can only be pinned: `procedure_test.go` now runs the two readers side
+    by side on a pre-seal archive (both must pass, and both must name the segment) and on an empty
+    directory (both must exit 2), alongside the four forgeries; `segment_test.go` carries the
+    pre-wave record fixture. §6.9 step 2a and its result table were corrected to match.
 
 - **Chain resolution — FIXED, with a cut-over (2026-09-12).** Until that date the chain could not be
   verified from the stored rows at all: `Record` stamped `time.Now()` at nanosecond precision and
@@ -1308,8 +1516,24 @@ measured figures say so.
   nanosecond clock and verifies the rows it reads back — the host's clock no longer decides whether
   the suite can fail (reverting the fix makes it fail at seq 1 on macOS).
 
-- **Request URIs, with their search terms, reach the logs in clear text.**
-  `delivery/httpkit/middlewares/request_logger.go:30` logs `r.RequestURI` verbatim on every
+- ~~**Request URIs, with their search terms, reach the logs in clear text.**~~ — **FIXED
+  2026-09-13** (`42ef6b7`): the request line now emits a route pattern, a segment-redacted path and
+  query **keys** with the values replaced; `remoteAddress` is gone (and is now recorded, deliberately,
+  in `security_events` instead — ADR-0008 stream 2); the error handler no longer dumps `Details`; and
+  an AST gate in `go test ./...` fails the build on the shapes a redaction handler cannot see.
+  **The runbook half is closed too, 2026-09-13 (fifth pass), and it was worse than recorded.**
+  `../zentax-ui/docs/ops/environments.md` §6.7 promised `tenant_id`, `actor_id`, `request_id`,
+  `duration_ms` and `err`; the API emits `requestId` (the only registered context field,
+  `cmd/server/main.go`), `method`/`route`/`path`/`query`/`userAgent`/`status`/`duration` (nanoseconds,
+  `slog.Duration`) and `error`. **Four** of the six queries were dead, not three: the errors query
+  additionally never matched, because slog writes `"level":"ERROR"` uppercase and Logs Insights `=`
+  is case-sensitive (only its `status >= 500` disjunct saved it). §6.7 now lists the emitted keys in
+  a table and the queries use them. ***Still open, and it is a gap rather than a wording fix:*** no
+  tenant or actor id reaches any log line, so per-tenant questions cannot be answered from logs at
+  all. Registering them as context fields (ids only, which ADR-0015 permits) is the decision PB-D4
+  carries. *The description below is what it looked like before, kept because the reasoning is still
+  the policy.*
+  `delivery/httpkit/middlewares/request_logger.go:30` logged `r.RequestURI` verbatim on every
   request, next to `remoteAddress`, and every list endpoint now takes `?search=`;
   `delivery/httpkit/httperr/handler.go:63` blind-dumps `appErr.Details`. Verified live:
   `GET /api/members?search=jane.doe%40example.com` came back out of `docker logs` with the address
@@ -1324,10 +1548,12 @@ measured figures say so.
   download and the audit trail all carry the read predicate; see the (superseded) 🔴 bullet above for
   what it looked like before. What is left of it is populating `entity_closure` so scope resolution
   stops doing a recursive parent-walk per read.
-- **Rate limiting** — per-IP and per-principal counters, an `/auth/mfa/verify` attempt counter, a
-  throttle on `POST /auth/accept-invite`, and a bounded semaphore around the argon2 verification.
-  Detail and measurements in the 🔴 bullet above; this is the missing piece for both gaps the
-  failed-login attempt budget explicitly does not close.
+- ~~**Rate limiting**~~ — **done 2026-09-13** (`419efe6`, hardened by `zentax-ui` f4ef98e):
+  `delivery/httpkit/middlewares/ratelimit` carries per-address and per-principal budgets and a
+  bounded semaphore around the argon2 verification; migration `20260912000025_session_mfa_attempts`
+  gives `/auth/mfa/verify` its attempt counter, and spending it destroys the pending session. The
+  forwarded caller address is believed only from a configured peer (`DefaultTrustedProxies` empty).
+  What is left is a throttle on `POST /auth/accept-invite`.
 - **Credential recovery — a broker responsibility, deferred by decision (2026-09-12). Do not build it
   here.** Nothing exists today, and the lockout is real: `PUT /members/{id}` writes name and
   active/disabled only, `ReissueInvite` 409s `MsgMemberNotInvited` unless the member is still `invited`
@@ -1363,22 +1589,20 @@ measured figures say so.
   oversight: an assignee picker needs the names.
 
 ### 🟠 Domain features still to build
-- **Notifications / e-mail / digests — nothing exists.** There is no `modules/notifications`, no
-  mailer, no provider seam and no SMTP/SES client anywhere in the Go tree (ADR-0009's e-mail seam is
-  one of the five that have no interface at all), and nothing to run a reminder *on*: no cron,
-  ticker, scheduler or worker, and `cmd/` is server, seed-admin, seed-demo, credentials.
-  `PUBLIC_BASE_URL` is plumbed and consumed by nothing, so an invite link is still copy-pasted out
-  of the API response by the admin. The consequences are not confined to this repo: the UI's
-  notification bell queries `/api/notifications`, which neither the proxy nor a Go module routes.
-  **Mitigated 2026-09-12:** that path now answers a JSON 404, and the component reads the error and
-  renders "Notifications are not available yet" instead of "You're all caught up" — an affirmative
-  claim of no pending compliance work, in a compliance product, was the worst of it. Settings'
-  reminder button and the per-member preferences button are **disabled** with the same explanation,
-  rather than toasting "Sent N overdue reminders" for deliveries that never happened. A provider seam
-  plus one adapter is days; the reminder/digest engine behind it is weeks, and the scheduler
-  decision (in-process with leader election, or an ECS scheduled task) has to be written down first
-  because the ADR-0007 purge, the WORM export and expired-session reaping all wait on the same
-  absence.
+- ~~**Notifications / e-mail / digests — nothing exists.**~~ — **BUILT 2026-09-13 (ADR-0027,
+  `5da2cdf`), and this file never said so.** `platform/mail` is the provider seam with three adapters
+  (`log`, `smtp`, `ses`), `platform/outbox` is the transactional queue a mutation writes on its own
+  transaction, `platform/scheduler` runs the work in-process with one task elected by a Postgres
+  advisory lock, and `modules/notifications` assembles the per-person daily digest in the tenant's own
+  civil day. Registered jobs: `notifications.deadline-reminder` (hourly), `outbox.delivery` (15 s),
+  `outbox.prune` (6 h) and `audit.worm-export` (hourly). Templates: `member.invited` and
+  `deadline.reminder`. **Still not built:** expired-session reaping, the ADR-0007 purge, the ADR-0020
+  partition top-up as a job, and any routing of UNASSIGNED work — a task with no assignee is in
+  nobody's digest. **Never sent a message from a real deployment:** the SES identity is CDK, not a
+  verified domain, and the account is presumably still in the sandbox (ADR-0027, *What an operator
+  must still do by hand*). The UI's notification bell still queries `/api/notifications`, which
+  neither the proxy nor a Go module routes; since 2026-09-12 that path answers a JSON 404 and the
+  component renders "Notifications are not available yet" rather than "You're all caught up".
 - ~~**Data Templates** module~~ — **done (2026-09-04, see Domain modules #9)**; the
   `data_template_id` columns are now composite FKs and tax data is validated server-side.
 - **Approvals — DONE (core, ADR-0018/0012).** `POST /task-instances/{id}/{submit-for-approval,approve,reject}`
@@ -1419,15 +1643,16 @@ measured figures say so.
   withheld from a narrowed reader; and a row **names the record it describes** (`resourceId`, `seq`,
   the whole `hash`, on the page and in the CSV/Excel export) with the `resourceType` filter widened
   from six values to the twelve the trail actually writes.
-  **Remaining, and read the 🔴 bullets above before quoting this one to an auditor:** **nothing ever
-  runs `Verify`/`VerifyChain`** — no route, no CLI, no job — and it still requires `seq == i+1`, so a
-  tenant whose first partition has been dropped can never be verified and there is no anchor table;
-  **no WORM export** — write-once retention of the chain (S3 Object Lock, compliance mode) is Phase 2
-  and Object Lock appears nowhere in either CDK app, so the ledger's only copy is the operational
-  database; **no authentication stream** — login, logout, MFA enrolment and session revocation write
-  nothing, pending the centralized regional security log store (Phase 2; interim: structured slog,
-  which nothing collects); and a couple of payloads that are still a count rather than a change
-  (`workflow.started`, the predefined-template seeding).
+  **Remaining, rewritten 2026-09-13 after the export/security wave — every claim this paragraph used
+  to make was falsified the same day it was written, so check it against the 🔴 bullets above rather
+  than quoting it:** the verifier now runs on every export pass and `cmd/verify-audit-segment` is the
+  offline reader, but **`audit.Verify` still requires `seq == i+1`**, so whole-chain verification
+  *from the database* still cannot start above seq 1 (the segment verifier is range-aware, and
+  `audit_export_segments` is the anchor table this line said did not exist); the **WORM export
+  exists** — hourly segments into a per-cell Object Lock bucket in compliance mode — but has never
+  run against AWS; the **authentication stream exists** as `security_events`, with no HTTP surface
+  and no partition maintenance behind its thirteen-month window; and two payloads are still partly a
+  count (`workflow.started`, the predefined-template seeding).
 - ~~**Team members / roles**~~ — done 2026-09-04, see *Member administration* under *What is built*.
 - ~~**Reports**~~ — **done.** The enriched task-instance list and per-workflow stats under `/reports`
   landed 2026-09-03; the **compliance aggregates landed 2026-09-04** —

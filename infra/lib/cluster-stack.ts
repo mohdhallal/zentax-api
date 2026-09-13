@@ -21,6 +21,8 @@ export interface ClusterStackProps extends cdk.StackProps {
   /** Generated initial admin password, injected into the seed task as SEED_ADMIN_PASSWORD. */
   readonly seedAdminSecret: secretsmanager.ISecret;
   readonly documentsBucket: s3.IBucket;
+  /** WORM audit archive (ADR-0008) — config only here; the seed task cannot write to it. */
+  readonly auditExportBucket: s3.IBucket;
   readonly repositories: Repositories;
   readonly logGroups: LogGroups;
 }
@@ -49,6 +51,37 @@ export function apiStorageEnvironment(cfg: EnvConfig, documentsBucket: s3.IBucke
     STORAGE_DRIVER: 's3',
     STORAGE_S3_BUCKET: documentsBucket.bucketName,
     STORAGE_S3_REGION: cfg.region,
+  };
+}
+
+/**
+ * Where the WORM export of the audit chain goes (ADR-0008, `config/auditexport.go`).
+ *
+ * All three values are stated explicitly, and the driver is the load-bearing
+ * one: the Go default for an unset `AUDIT_EXPORT_STORAGE_DRIVER` is "write the
+ * segments to the DOCUMENT store", which is the right answer for the
+ * self-hosted edition (one disk, one place to put bytes) and the wrong one for
+ * a cell — that bucket is deletable by design, so the export would look healthy
+ * and be worth nothing as evidence. Naming the driver here is what points the
+ * segments at the Object-Locked bucket instead.
+ *
+ * `AUDIT_EXPORT_ENABLED` is redundant with the Go default (an omitted section
+ * boots with the export on) and set anyway: a compliance control that a cell
+ * runs only because someone else's default happened to be right is one flipped
+ * default away from silently stopping.
+ *
+ * The seed CLI is handed the same block, for the same reason it is handed a
+ * placeholder CORS origin and the mail block — one loader, one deployed
+ * profile, and its `s3` driver requires a bucket and a region to validate. It
+ * exports nothing regardless: seed-admin runs no scheduler, and only the api
+ * task role carries `s3:PutObject` on that bucket (api-stack.ts).
+ */
+export function apiAuditExportEnvironment(cfg: EnvConfig, auditExportBucket: s3.IBucket): Record<string, string> {
+  return {
+    AUDIT_EXPORT_ENABLED: 'true',
+    AUDIT_EXPORT_STORAGE_DRIVER: 's3',
+    AUDIT_EXPORT_STORAGE_S3_BUCKET: auditExportBucket.bucketName,
+    AUDIT_EXPORT_STORAGE_S3_REGION: cfg.region,
   };
 }
 
@@ -179,7 +212,8 @@ export class ClusterStack extends cdk.Stack {
         ...apiDbEnvironment(cfg, props.database),
         // seed-admin serves no HTTP; the placeholder only satisfies config validation.
         ...apiStorageEnvironment(cfg, props.documentsBucket, 'https://seed.invalid'),
-        // ...and it sends nothing; the block is here for the same reason.
+        // ...and it neither sends nor exports; both blocks are here for the same reason.
+        ...apiAuditExportEnvironment(cfg, props.auditExportBucket),
         ...apiMailEnvironment(cfg),
       },
       secrets: {

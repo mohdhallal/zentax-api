@@ -204,6 +204,21 @@ func (c *Config) validate() error {
 	if err := c.Mail.validate(); err != nil {
 		return fmt.Errorf("invalid mail config: %w", err)
 	}
+	// The WORM export's defaults are code too, and for the same reason: an
+	// audit trail that is only exported where someone remembered to configure
+	// it is an audit trail with no off-box evidence.
+	c.AuditExport.ApplyDefaults()
+	if err := c.AuditExport.validate(); err != nil {
+		return fmt.Errorf("invalid audit export config: %w", err)
+	}
+	// The authentication stream's retention window, by the same rule once more.
+	// This one is the control that bounds the single piece of personal data the
+	// product deliberately keeps (ADR-0007), so an environment that says nothing
+	// about it gets the window rather than gets nothing.
+	c.SecurityEvents.ApplyDefaults()
+	if err := c.SecurityEvents.validate(); err != nil {
+		return fmt.Errorf("invalid security events config: %w", err)
+	}
 	return nil
 }
 
@@ -338,6 +353,8 @@ func mergeEnvOverrides(conf *Config) {
 	mergeStorageEnvOverrides(&conf.Storage)
 	mergeRateLimitEnvOverrides(&conf.RateLimit)
 	mergeMailEnvOverrides(&conf.Mail)
+	mergeAuditExportEnvOverrides(&conf.AuditExport)
+	mergeSecurityEventsEnvOverrides(&conf.SecurityEvents)
 }
 
 // mergeAppEnvOverrides applies PUBLIC_BASE_URL over app.publicBaseUrl. An

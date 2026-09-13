@@ -113,11 +113,19 @@ func TestLogin_MFARequired(t *testing.T) {
 // anyConsumeCall matches ConsumeLoginAttempt's five arguments, for AssertNotCalled.
 var anyConsumeCall = []any{mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything}
 
-// expectConsume sets up the attempt charge with the answer it should give.
+// expectConsume sets up the attempt charge with the answer it should give. The
+// charge reports two facts (see domain.UserRepository.ConsumeLoginAttempt):
+// whether THIS attempt was inside the budget, and whether it is the one that
+// armed the lock. Most tests care only about the first, so `engaged` is false
+// here and expectConsumeEngaging is the one that arms it.
 func expectConsume(users *domain.UserRepositoryMock, allowed bool, err error) {
+	expectConsumeEngaging(users, allowed, false, err)
+}
+
+func expectConsumeEngaging(users *domain.UserRepositoryMock, allowed, engaged bool, err error) {
 	users.On("ConsumeLoginAttempt", mock.Anything, "u1", maxFailedAttempts,
 		mock.AnythingOfType("time.Time"), mock.AnythingOfType("time.Time")).
-		Return(allowed, err).Once()
+		Return(allowed, engaged, err).Once()
 }
 
 // verifySpy records what the password-verification seam was asked to do.
@@ -168,7 +176,7 @@ func TestLogin_WrongPassword_ChargesTheAttemptWithTheLockPolicy(t *testing.T) {
 	// The repository is handed the whole policy: threshold, the clock that
 	// judges an expired lock, and the stamp a crossing attempt would write.
 	users.On("ConsumeLoginAttempt", mock.Anything, "u1", maxFailedAttempts, now, now.Add(lockoutDuration)).
-		Return(true, nil).Once()
+		Return(true, false, nil).Once()
 
 	_, err := uc.Login(ctx, domain.LoginInput{Email: "admin@acme.com", Password: "wrong"})
 	assert.IsType(t, &apperrors.UnauthorizedError{}, err)
@@ -201,7 +209,7 @@ func TestLogin_AttemptIsChargedBeforeThePasswordIsVerified(t *testing.T) {
 			chargeCtx, _ := a.Get(0).(context.Context)
 			assert.NoError(t, chargeCtx.Err())
 		}).
-		Return(true, nil).Once()
+		Return(true, false, nil).Once()
 	real := uc.verifyPassword
 	uc.verifyPassword = func(password, encoded string) (bool, error) {
 		order = append(order, "verify")
@@ -236,7 +244,7 @@ func TestLogin_ElapsedLock_AllowedByTheRepository_VerifiesTheStoredHash(t *testi
 	user.FailedLoginAttempts = maxFailedAttempts // saturated by the lockout that has now elapsed
 	users.On("GetByEmail", ctx, "admin@acme.com").Return(user, nil).Once()
 	users.On("ConsumeLoginAttempt", mock.Anything, "u1", maxFailedAttempts, now, now.Add(lockoutDuration)).
-		Return(true, nil).Once()
+		Return(true, false, nil).Once()
 
 	_, err := uc.Login(ctx, domain.LoginInput{Email: "admin@acme.com", Password: "wrong"})
 	require.IsType(t, &apperrors.UnauthorizedError{}, err)
@@ -283,7 +291,7 @@ func TestLogin_CancelledRequest_CannotBuyAnUnchargedVerification(t *testing.T) {
 	users.On("GetByEmail", ctx, "admin@acme.com").Return(user, nil).Once()
 	users.On("ConsumeLoginAttempt", mock.Anything, "u1", maxFailedAttempts,
 		mock.AnythingOfType("time.Time"), mock.AnythingOfType("time.Time")).
-		Return(false, context.Canceled).Once()
+		Return(false, false, context.Canceled).Once()
 
 	cancel() // the caller has already gone away
 	_, err := uc.Login(ctx, domain.LoginInput{Email: "admin@acme.com", Password: "correct"})

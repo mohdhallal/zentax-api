@@ -21,6 +21,14 @@ import (
 // Either way the tenant comes from the authenticated credential, and the Tx
 // seam binds it (with app.user_id) for RLS + attribution, unchanged.
 //
+// The CREDENTIAL itself is bound too — the session id, or the API-token id —
+// because it is the join between the two ADR-0008 streams: the security stream
+// knows a session began and from where, the audit trail knows what changed, and
+// without the credential on both sides an investigator holding a suspicious
+// session cannot ask what that session did. Both forms are named the same way
+// here as in security_events.session_id ("the credential this is about"), with
+// audit_log.credential_kind saying which store the id belongs to.
+//
 // CSRF is NOT decided here: the origin check is CrossOriginGuard, wired by the
 // route builder around every external route — including the public /auth
 // mutations, which never reach this middleware because they declare no tenant.
@@ -35,6 +43,7 @@ func RequireAuth(auth identity.RequestAuthenticator, cookieName string) types.Mi
 				}
 				ctx := app.WithRequester(r.Context(), &app.Requester{
 					Kind: app.RequesterUser, ID: user.ID, ServiceAccount: true,
+					CredentialID: token.ID, CredentialKind: app.CredentialAPIToken,
 				})
 				ctx = app.WithTenantID(ctx, token.TenantID)
 				next.ServeHTTP(w, r.WithContext(ctx))
@@ -51,7 +60,10 @@ func RequireAuth(auth identity.RequestAuthenticator, cookieName string) types.Mi
 				return
 			}
 
-			ctx := app.WithRequester(r.Context(), &app.Requester{Kind: app.RequesterUser, ID: user.ID})
+			ctx := app.WithRequester(r.Context(), &app.Requester{
+				Kind: app.RequesterUser, ID: user.ID,
+				CredentialID: session.ID, CredentialKind: app.CredentialSession,
+			})
 			ctx = app.WithTenantID(ctx, session.TenantID)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})

@@ -43,6 +43,7 @@ describe.each(ENVS)('ZenTax-%s-Cluster', (env) => {
       expect.arrayContaining([
         'APP_ENV', 'DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER', 'DB_SSLMODE', 'LOG_FORMAT',
         'CORS_ALLOWED_ORIGINS', 'STORAGE_DRIVER', 'STORAGE_S3_BUCKET', 'STORAGE_S3_REGION',
+        'AUDIT_EXPORT_ENABLED', 'AUDIT_EXPORT_STORAGE_DRIVER', 'AUDIT_EXPORT_STORAGE_S3_BUCKET', 'AUDIT_EXPORT_STORAGE_S3_REGION',
       ]),
     );
     const byName = Object.fromEntries(seed.Environment.map((e: any) => [e.Name, e.Value]));
@@ -87,6 +88,29 @@ describe.each(ENVS)('ZenTax-%s-Cluster', (env) => {
     expect(JSON.stringify(cluster.toJSON())).not.toContain('ses:');
     for (const [, td] of resourcesOfType(cluster, 'AWS::ECS::TaskDefinition')) {
       expect(JSON.stringify(td.Properties.ContainerDefinitions[0].Secrets ?? [])).not.toContain('MAIL_');
+    }
+  });
+
+  /**
+   * ADR-0008, and the same shape as the mail block above: the seed CLI shares
+   * the config loader, whose `s3` audit-export driver refuses to boot without a
+   * bucket and a region, so the block travels with it. It exports nothing —
+   * seed-admin runs no scheduler, and no task role in this stack can write to
+   * that bucket (only the api's, in the Api stack).
+   */
+  test('the seed task carries the audit-export config so the loader is satisfied, and no job in this stack can write to the WORM bucket', () => {
+    const seed = taskDefinition(cluster, '-seed').Properties.ContainerDefinitions[0];
+    const byName = Object.fromEntries(seed.Environment.map((e: any) => [e.Name, e.Value]));
+    expect(byName.AUDIT_EXPORT_ENABLED).toBe('true');
+    // Not the document store: the Go default for an unset driver is that
+    // deletable bucket, which would make the "write-once" export deletable too.
+    expect(byName.AUDIT_EXPORT_STORAGE_DRIVER).toBe('s3');
+    expect(byName.AUDIT_EXPORT_STORAGE_S3_REGION).toBe('eu-central-1');
+    expect(JSON.stringify(byName.AUDIT_EXPORT_STORAGE_S3_BUCKET)).toContain('AuditExportBucket');
+    expect(byName.AUDIT_EXPORT_STORAGE_S3_BUCKET).not.toEqual(byName.STORAGE_S3_BUCKET);
+    // Configuration is not authorization: no S3 verb at all on the job roles.
+    for (const [, policy] of resourcesOfType(cluster, 'AWS::IAM::Policy')) {
+      expect(JSON.stringify(policy.Properties.PolicyDocument)).not.toContain('s3:');
     }
   });
 

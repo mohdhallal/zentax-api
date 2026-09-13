@@ -31,7 +31,7 @@ export function addEnvironment(app: cdk.App, name: EnvName): EnvironmentStacks {
     env,
     cfg,
     tags,
-    description: `ZenTax ${cfg.name}: KMS, RDS Postgres 16, secrets, documents bucket, api/migrate ECR, log groups, alarm topic`,
+    description: `ZenTax ${cfg.name}: KMS, RDS Postgres 16, secrets, documents bucket, WORM audit-export bucket, api/migrate ECR, log groups, alarm topic`,
     vpc: network.vpc,
     dbSecurityGroup: network.dbSecurityGroup,
   });
@@ -47,6 +47,7 @@ export function addEnvironment(app: cdk.App, name: EnvName): EnvironmentStacks {
     authEncryptionKeySecret: data.authEncryptionKeySecret,
     seedAdminSecret: data.seedAdminSecret,
     documentsBucket: data.documentsBucket,
+    auditExportBucket: data.auditExportBucket,
     repositories: data.repositories,
     logGroups: data.logGroups,
   });
@@ -64,6 +65,7 @@ export function addEnvironment(app: cdk.App, name: EnvName): EnvironmentStacks {
     appDbSecret: data.appDbSecret,
     authEncryptionKeySecret: data.authEncryptionKeySecret,
     documentsBucket: data.documentsBucket,
+    auditExportBucket: data.auditExportBucket,
     repositories: data.repositories,
     logGroups: data.logGroups,
     alarmTopic: data.alarmTopic,

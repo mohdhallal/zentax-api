@@ -8,6 +8,7 @@ import (
 	"github.com/mohamadhallal/zentax-api/platform/audit"
 	"github.com/mohamadhallal/zentax-api/platform/crypto"
 	"github.com/mohamadhallal/zentax-api/platform/database"
+	"github.com/mohamadhallal/zentax-api/platform/securityevent"
 )
 
 // Settings holds the auth config the use cases need (derived from config.AuthConfig).
@@ -50,6 +51,12 @@ type UseCases struct {
 	tx      database.ExecerPgTx // the public /auth routes open their own transactions
 	audit   *audit.Recorder     // nil = no-op
 	mail    domain.InviteMailer // nil = the invite link is not delivered
+	// secevents is ADR-0008 stream 2. It is a SEPARATE recorder from `audit`
+	// and not a second action on it, because the trail it writes to cannot hold
+	// these events at all: audit_log's RLS append policy needs a tenant and its
+	// actor_id is NOT NULL, and the row this stream exists for — a failed login
+	// for an address that resolves to no account — has neither.
+	secevents *securityevent.Recorder // nil = no-op
 }
 
 // WithMembers injects the member-administration repositories.
@@ -79,10 +86,28 @@ func (uc *UseCases) withinTx(ctx context.Context, fn func(ctx context.Context) e
 	return uc.tx.WithinTransaction(ctx, fn)
 }
 
-// WithAudit injects the audit recorder (ADR-0008). Nil-safe.
+// WithAudit injects the audit recorder (ADR-0008, stream 1). Nil-safe.
 func (uc *UseCases) WithAudit(r *audit.Recorder) *UseCases {
 	uc.audit = r
 	return uc
+}
+
+// WithSecurityEvents injects the authentication event stream (ADR-0008, stream
+// 2). Nil-safe: the unit tests construct without one, the composition root
+// always injects it.
+func (uc *UseCases) WithSecurityEvents(r *securityevent.Recorder) *UseCases {
+	uc.secevents = r
+	return uc
+}
+
+// note records one authentication event without letting it fail the caller.
+//
+// Every call site in this package uses it except one — the successful login,
+// which records on the transaction that mints the session so that a session
+// cannot exist without the record that it was minted. The reasoning for the
+// asymmetry is on securityevent.Note.
+func (uc *UseCases) note(ctx context.Context, e securityevent.Event) {
+	uc.secevents.Note(ctx, e)
 }
 
 // WithInviteMail injects the invite-delivery seam (domain.InviteMailer), which

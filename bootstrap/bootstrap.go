@@ -10,6 +10,7 @@ import (
 	"github.com/jmoiron/sqlx"
 
 	"github.com/mohamadhallal/zentax-api/config"
+	"github.com/mohamadhallal/zentax-api/delivery/httpkit/clientaddr"
 	"github.com/mohamadhallal/zentax-api/delivery/httpkit/httperr"
 	"github.com/mohamadhallal/zentax-api/delivery/httpkit/metric"
 	"github.com/mohamadhallal/zentax-api/delivery/httpkit/middlewares"
@@ -49,6 +50,8 @@ import (
 	metricsprom "github.com/mohamadhallal/zentax-api/platform/metrics/prometheus"
 	"github.com/mohamadhallal/zentax-api/platform/outbox"
 	"github.com/mohamadhallal/zentax-api/platform/scheduler"
+	"github.com/mohamadhallal/zentax-api/platform/securityevent"
+	"github.com/mohamadhallal/zentax-api/platform/storage"
 )
 
 type App struct {
@@ -126,6 +129,15 @@ func New(cfg *config.Config, mode types.ServerMode) (*App, error) {
 		WithMembers(identitypg.NewMemberRepo(db), identitypg.NewInviteRepo(db)).
 		WithTx(db). // accept-invite opens its own tenant-bound tx (public route)
 		WithAudit(audit.NewRecorder(db)).
+		// The authentication event stream (ADR-0008 stream 2). A SECOND
+		// recorder rather than more actions on the one above, because the events
+		// it carries have neither a tenant nor an actor — a failed login for an
+		// address nobody recognises is exactly the row audit_log cannot hold,
+		// and it is the row a breach investigation starts from. The subject
+		// digest is keyed from the same at-rest key everything else uses, under
+		// its own label: it is what lets an investigator count attempts against
+		// one address without the store ever holding one.
+		WithSecurityEvents(securityevent.NewRecorder(db).WithDigest(securityevent.DigestFromKey(encKey))).
 		// Invite delivery: the activation link is QUEUED on the invite's own
 		// transaction, so the token and the message that carries it commit
 		// together; the scheduled runner sends it. Until this was wired an
@@ -153,7 +165,29 @@ func New(cfg *config.Config, mode types.ServerMode) (*App, error) {
 	// here is a package-level variable; when the limiter is absent (rate
 	// limiting off, or a router a unit test built directly) every one of those
 	// middlewares is a pass-through.
-	limiter, err := newRateLimiter(cfg.RateLimit)
+	// "Who is this request from?" — ONE answer, built here and shared, because
+	// two subsystems need it and neither may have its own. The rate limiter keys
+	// its anonymous budget on it; the authentication event stream records it as
+	// the "from where" a breach investigation opens with, and sessions.ip is
+	// written from it too. It is built INDEPENDENTLY of the limiter on purpose:
+	// newRateLimiter returns nil when rate limiting is switched off, and the
+	// security stream must still know who its callers are.
+	//
+	// The trust list lives under rateLimit.trustedProxies and is not duplicated:
+	// "which hops in front of us may be believed" is one deployment fact, and a
+	// second knob for it is a second way to get it wrong. rateLimit.
+	// edgeViewerHeader is the third half of that same fact — what a
+	// content-delivery distribution in front of the whole deployment calls the
+	// viewer it saw, which behind a CDN is the only statement about the caller
+	// that is neither our own hop nor something the caller wrote.
+	addresses, err := clientaddr.NewResolver(
+		cfg.RateLimit.TrustedProxies, cfg.RateLimit.ForwardedHeader, cfg.RateLimit.EdgeViewerHeader)
+	if err != nil {
+		_ = dbConn.Close()
+		return nil, err
+	}
+
+	limiter, err := newRateLimiter(cfg.RateLimit, addresses)
 	if err != nil {
 		_ = dbConn.Close()
 		return nil, err
@@ -161,7 +195,7 @@ func New(cfg *config.Config, mode types.ServerMode) (*App, error) {
 
 	// Recurring work runs inside this process, with one task elected runner
 	// through a Postgres advisory lock. Built here, started by cmd/server.
-	sched, err := newScheduler(cfg, dbConn, db, metricsRecorder)
+	sched, err := newScheduler(cfg, dbConn, db, metricsRecorder, store)
 	if err != nil {
 		_ = dbConn.Close()
 		return nil, err
@@ -171,6 +205,11 @@ func New(cfg *config.Config, mode types.ServerMode) (*App, error) {
 
 	chiRouter.Use(middlewares.CORSMiddleware(cfg.CORS))
 	chiRouter.Use(middlewares.RequestIdMiddleware)
+	// Next to the request id, and for the same reason: both are ambient facts
+	// about the REQUEST that something far below will have to record, and both
+	// must be bound where every route passes rather than by the handlers that
+	// remember to. Before Recovery, so a panic is still attributable.
+	chiRouter.Use(middlewares.ClientAddressMiddleware(addresses))
 	chiRouter.Use(middlewares.RecoveryMiddleware)
 	chiRouter.Use(middlewares.MetricsMiddleware(metricsRecorder.HTTP()))
 	chiRouter.Use(middlewares.RequestLoggerMiddleware)
@@ -242,10 +281,18 @@ const schedulerLease = "zentax:scheduler"
 // costs one indexed query per active tenant per hour and is idempotent by
 // construction — a person is owed one digest per local day, and the outbox's
 // dedupe key, not the cadence, is what enforces that.
+//
+// Security-event partition maintenance is rare for a different reason: its work
+// changes state once a MONTH — the drop set only moves on the first — so most
+// runs are a single catalogue query and log nothing at all. Six hours is not
+// impatience, it is recovery time: a task that has just won the lease on the
+// first of the month does that month's work within hours rather than within a
+// day.
 const (
-	outboxDeliveryInterval = 15 * time.Second
-	outboxPruneInterval    = 6 * time.Hour
-	reminderScanInterval   = time.Hour
+	outboxDeliveryInterval           = 15 * time.Second
+	outboxPruneInterval              = 6 * time.Hour
+	reminderScanInterval             = time.Hour
+	securityEventMaintenanceInterval = 6 * time.Hour
 )
 
 // newScheduler assembles the in-process scheduled work.
@@ -258,7 +305,7 @@ const (
 //
 // The scheduler is BUILT here and started by cmd/server; nothing it registers
 // runs, and no leadership is contended for, until Run is called.
-func newScheduler(cfg *config.Config, conn *sqlx.DB, db *database.Exec, recorder metrics.Recorder) (*scheduler.Scheduler, error) {
+func newScheduler(cfg *config.Config, conn *sqlx.DB, db *database.Exec, recorder metrics.Recorder, docStore storage.Storage) (*scheduler.Scheduler, error) {
 	// The deadline reminder: one digest per person per tenant-local day,
 	// written to the outbox. See modules/notifications.
 	// One repository, two ports: the tenant enumeration is control-plane (the
@@ -302,6 +349,26 @@ func newScheduler(cfg *config.Config, conn *sqlx.DB, db *database.Exec, recorder
 		scheduler.Job{Name: "outbox.delivery", Interval: outboxDeliveryInterval, Run: dispatcher.DeliverDue},
 		scheduler.Job{Name: "outbox.prune", Interval: outboxPruneInterval, Timeout: time.Minute, Run: dispatcher.PruneSettled},
 	)
+
+	// The WORM export of the audit trail (ADR-0008 integrity triad #3): each
+	// tenant's hash chain written out to object storage as independently
+	// verifiable segments, and VERIFIED on the way out — the scheduled run of
+	// the verifier that until now existed only in tests.
+	exportJob, err := newAuditExportJob(cfg, db, docStore)
+	if err != nil {
+		return nil, err
+	}
+	if exportJob != nil {
+		jobs = append(jobs, *exportJob)
+	}
+
+	// Retention of the authentication stream (ADR-0007's thirteen months): the
+	// partition maintenance that is the only mechanism by which client_ip ever
+	// stops existing. Until this was registered the window was a claim three
+	// records made and nothing kept.
+	if retentionJob := newSecurityEventRetentionJob(cfg, db); retentionJob != nil {
+		jobs = append(jobs, *retentionJob)
+	}
 
 	sched := scheduler.New(scheduler.NewAdvisoryLease(conn, schedulerLease), recorder.Client(), scheduler.Settings{})
 	for _, job := range jobs {
@@ -436,14 +503,14 @@ func (m outboxMailer) Send(ctx context.Context, msg outbox.Message) error {
 // interface precisely so a shared (Redis) implementation can replace it when a
 // cell runs several API tasks — see the MemoryStore doc comment for what that
 // implementation owes.
-func newRateLimiter(cfg config.RateLimitConfig) (*ratelimit.Limiter, error) {
+//
+// The address resolver is passed IN rather than built here: the security event
+// stream needs the same answer, and a resolver that only existed when rate
+// limiting happened to be on would leave the stream attributing events to the
+// load balancer in every deployment that switched the limiter off.
+func newRateLimiter(cfg config.RateLimitConfig, resolver *clientaddr.Resolver) (*ratelimit.Limiter, error) {
 	if !cfg.Active() {
 		return nil, nil
-	}
-
-	resolver, err := ratelimit.NewAddressResolver(cfg.TrustedProxies, cfg.ForwardedHeader)
-	if err != nil {
-		return nil, err
 	}
 
 	return ratelimit.New(

@@ -58,30 +58,40 @@ func (s *stubExecer) Rebind(q string) string { return q }
 // order of Record's INSERT.
 func appendedEntry(t *testing.T, args []any) Entry {
 	t.Helper()
-	if len(args) != 13 {
-		t.Fatalf("INSERT carries %d parameters, want 13 — the column list changed", len(args))
+	if len(args) != 15 {
+		t.Fatalf("INSERT carries %d parameters, want 15 — the column list changed", len(args))
 	}
 	return Entry{
-		EventID:      args[0].(string),
-		TenantID:     args[1].(string),
-		Seq:          args[2].(int64),
-		ActorID:      args[3].(string),
-		Action:       args[4].(string),
-		ResourceType: args[5].(string),
-		ResourceID:   args[6].(string),
-		OccurredAt:   args[7].(time.Time),
-		RequestID:    args[8].(string),
-		Details:      json.RawMessage(args[9].(string)),
-		PrevHash:     args[10].(string),
-		Hash:         args[11].(string),
-		HashVersion:  args[12].(int16),
+		EventID:        args[0].(string),
+		TenantID:       args[1].(string),
+		Seq:            args[2].(int64),
+		ActorID:        args[3].(string),
+		Action:         args[4].(string),
+		ResourceType:   args[5].(string),
+		ResourceID:     args[6].(string),
+		OccurredAt:     args[7].(time.Time),
+		RequestID:      args[8].(string),
+		CredentialID:   args[9].(string),
+		CredentialKind: args[10].(string),
+		Details:        json.RawMessage(args[11].(string)),
+		PrevHash:       args[12].(string),
+		Hash:           args[13].(string),
+		HashVersion:    args[14].(int16),
 	}
 }
 
+const (
+	testSessionID = "44444444-4444-4444-4444-444444444444"
+	testRequestID = "55555555-5555-5555-5555-555555555555"
+)
+
 func recordingContext() context.Context {
 	ctx := app.WithTenantID(context.Background(), "11111111-1111-1111-1111-111111111111")
-	ctx = app.WithRequester(ctx, &app.Requester{Kind: app.RequesterUser, ID: "22222222-2222-2222-2222-222222222222"})
-	return app.WithRequestId(ctx, "req-chain")
+	ctx = app.WithRequester(ctx, &app.Requester{
+		Kind: app.RequesterUser, ID: "22222222-2222-2222-2222-222222222222",
+		CredentialID: testSessionID, CredentialKind: app.CredentialSession,
+	})
+	return app.WithRequestId(ctx, testRequestID)
 }
 
 // nanoClock returns a clock whose instants carry nanoseconds the column cannot
@@ -183,7 +193,7 @@ func chainFromSeq(startSeq int64, prev string, versions ...int16) []Entry {
 			PrevHash:     prev,
 			HashVersion:  version,
 		}
-		if version > 0 && version < CurrentHashVersion {
+		if IsPreCutover(version) {
 			nano := e
 			nano.OccurredAt = e.OccurredAt.Add(217 * time.Nanosecond)
 			e.Hash = legacyHash(&nano)
@@ -266,6 +276,121 @@ func TestVerifyRefusesAHashFormatItCannotCheck(t *testing.T) {
 	_, err := Verify(chain)
 	if err == nil || !strings.Contains(err.Error(), "newer than this verifier") {
 		t.Fatalf("a newer hash format must be reported as unverifiable, not verified, got: %v", err)
+	}
+}
+
+// THE CUT-OVER RULE THAT MATTERS, and the one a version bump gets wrong: a new
+// hashing contract must not turn the rows written under the last one into
+// "link-checked only". Version 2 entries are recomputed — under the version 2
+// envelope — inside a chain whose newer entries are version 3.
+func TestAVersionBumpDoesNotStripOlderEntriesOfTheirVerifiability(t *testing.T) {
+	chain := chainFromSeq(1, GenesisHash,
+		HashVersionMicrosecond, HashVersionMicrosecond, HashVersionCredential)
+	chain[2].CredentialID = testSessionID
+	chain[2].CredentialKind = app.CredentialSession
+	chain[2].Hash = ComputeHash(&chain[2])
+
+	rep, err := Verify(chain)
+	if err != nil {
+		t.Fatalf("a chain spanning the credential cut-over must verify on both sides: %v", err)
+	}
+	if rep.PreCutoverEntries != 0 || rep.FirstVerifiableSeq != 1 || rep.LastVerifiedSeq != 3 {
+		t.Fatalf("every entry must be recomputed: entries=%d preCutover=%d first=%d last=%d",
+			rep.Entries, rep.PreCutoverEntries, rep.FirstVerifiableSeq, rep.LastVerifiedSeq)
+	}
+	if err := VerifyChain(chain); err != nil {
+		t.Fatalf("the strict form must accept a chain in which every entry recomputes: %v", err)
+	}
+
+	// And tampering with a v2 entry is still caught: it is recomputed, not
+	// excused for being old.
+	chain[1].Action = "entity.deleted"
+	if _, err := Verify(chain); err == nil || !strings.Contains(err.Error(), "seq 2") {
+		t.Fatalf("a modified version-2 entry must still read as tampering, got: %v", err)
+	}
+}
+
+// The credential is INSIDE the hash, which is the whole point of putting it on
+// the envelope rather than beside it: an operator who rewrites which session
+// made a change breaks the chain from that entry onward.
+func TestTheCredentialIsCoveredByTheHash(t *testing.T) {
+	entry := chainFromSeq(1, GenesisHash, HashVersionCredential)[0]
+	entry.CredentialID = testSessionID
+	entry.CredentialKind = app.CredentialSession
+	entry.Hash = ComputeHash(&entry)
+
+	reattributed := entry
+	reattributed.CredentialID = "66666666-6666-6666-6666-666666666666"
+	if ComputeHash(&reattributed) == entry.Hash {
+		t.Fatal("moving an entry to another session must break its hash")
+	}
+
+	rekinded := entry
+	rekinded.CredentialKind = app.CredentialAPIToken
+	if ComputeHash(&rekinded) == entry.Hash {
+		t.Fatal("changing which store the credential belongs to must break its hash")
+	}
+
+	// Versions EXTEND: the same entry hashed under version 2 is the version 2
+	// canonical form, credential and all left out of it.
+	asV2 := entry
+	asV2.HashVersion = HashVersionMicrosecond
+	bare := asV2
+	bare.CredentialID, bare.CredentialKind = "", ""
+	if ComputeHash(&asV2) != ComputeHash(&bare) {
+		t.Fatal("version 2 must hash exactly what it hashed before the credential existed")
+	}
+}
+
+// The writer's two gates, asserted on the INSERT parameters rather than on the
+// in-memory entry: a request id that is not canonical is not stored (it would
+// be caller text inside an append-only, hash-covered, WORM-exported store), and
+// half a credential is no credential (a join key pointing at no table).
+func TestRecordRefusesCallerTextAndHalfCredentials(t *testing.T) {
+	cases := []struct {
+		name             string
+		requestID        string
+		credID, credKind string
+		wantRequestID    string
+		wantCredID       string
+		wantCredKind     string
+	}{
+		{"canonical", testRequestID, testSessionID, app.CredentialSession, testRequestID, testSessionID, app.CredentialSession},
+		{"uppercase request id is canonicalized", strings.ToUpper(testRequestID), "", "", testRequestID, "", ""},
+		{"caller text", "'; DROP TABLE audit_log; --", "", "", "", "", ""},
+		{"overlong", strings.Repeat("a", 4096), "", "", "", "", ""},
+		{"id without kind", testRequestID, testSessionID, "", testRequestID, "", ""},
+		{"kind without id", testRequestID, "", app.CredentialSession, testRequestID, "", ""},
+		{"unknown kind", testRequestID, testSessionID, "cookie", testRequestID, "", ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := &stubExecer{}
+			rec := NewRecorderWithClock(db, nanoClock(time.Date(2026, 9, 13, 10, 0, 0, 0, time.UTC)))
+			ctx := app.WithTenantID(context.Background(), "11111111-1111-1111-1111-111111111111")
+			ctx = app.WithRequester(ctx, &app.Requester{
+				Kind: app.RequesterUser, ID: "22222222-2222-2222-2222-222222222222",
+				CredentialID: tc.credID, CredentialKind: tc.credKind,
+			})
+			ctx = app.WithRequestId(ctx, tc.requestID)
+
+			if err := rec.Record(ctx, "entity.updated", "entity",
+				"33333333-3333-3333-3333-333333333333", nil); err != nil {
+				t.Fatalf("record: %v", err)
+			}
+			e := appendedEntry(t, db.appended[0])
+			if e.RequestID != tc.wantRequestID {
+				t.Fatalf("stored request id %q, want %q", e.RequestID, tc.wantRequestID)
+			}
+			if e.CredentialID != tc.wantCredID || e.CredentialKind != tc.wantCredKind {
+				t.Fatalf("stored credential %q/%q, want %q/%q",
+					e.CredentialKind, e.CredentialID, tc.wantCredKind, tc.wantCredID)
+			}
+			if got := ComputeHash(&e); got != e.Hash {
+				t.Fatal("the stored row must hash to the stored hash")
+			}
+		})
 	}
 }
 

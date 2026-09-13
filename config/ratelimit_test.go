@@ -251,3 +251,79 @@ func TestRateLimit_DisabledSkipsValidation(t *testing.T) {
 	cfg := RateLimitConfig{TrustedProxies: []string{"nonsense"}}
 	assert.NoError(t, cfg.validate())
 }
+
+// ---- rateLimit.edgeViewerHeader: the distribution in front of everything ----
+
+// Nothing in front is the default, and it has to be: the self-host stack has no
+// distribution, and a value invented here would make every one of its rows say
+// "we do not know who this was".
+func TestRateLimit_EdgeViewerHeaderDefaultsToNoDistribution(t *testing.T) {
+	c := rateLimitBase()
+	require.NoError(t, c.validate())
+
+	assert.Equal(t, "", c.RateLimit.EdgeViewerHeader)
+}
+
+func TestRateLimit_EdgeViewerHeaderFromEnv(t *testing.T) {
+	t.Setenv(EnvRateLimitEdgeViewerHeader, "  CloudFront-Viewer-Address  ")
+
+	c := rateLimitBase()
+	mergeRateLimitEnvOverrides(&c.RateLimit)
+	require.NoError(t, c.validate())
+
+	assert.Equal(t, "CloudFront-Viewer-Address", c.RateLimit.EdgeViewerHeader,
+		"a deployment manifest's padding is not a different header")
+}
+
+// "none" is how a manifest says "there is nothing in front of me", where an
+// empty value means "not set" and would leave a file-configured header standing.
+func TestRateLimit_EdgeViewerHeaderEnvNoneClearsIt(t *testing.T) {
+	t.Setenv(EnvRateLimitEdgeViewerHeader, "none")
+
+	cfg := RateLimitConfig{EdgeViewerHeader: "CloudFront-Viewer-Address"}
+	mergeRateLimitEnvOverrides(&cfg)
+
+	assert.Equal(t, "", cfg.EdgeViewerHeader)
+}
+
+// The check runs even with the limiter OFF, because it configures attribution
+// and attribution is not the limiter's: the resolver is built either way.
+func TestRateLimit_EdgeViewerHeaderIsValidatedEvenWhenTheLimiterIsOff(t *testing.T) {
+	t.Parallel()
+
+	cfg := RateLimitConfig{EdgeViewerHeader: "Not: A Header"}
+	require.False(t, cfg.Active())
+
+	err := cfg.validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), EnvRateLimitEdgeViewerHeader)
+}
+
+// The one confusion that would otherwise be silent. The chain is walked from
+// the RIGHT and a viewer header is taken WHOLE, so naming X-Forwarded-For as
+// both would take the chain's leftmost entry — exactly the value a caller
+// writes for itself.
+func TestRateLimit_EdgeViewerHeaderMustNotBeTheForwardedHeader(t *testing.T) {
+	t.Parallel()
+
+	cfg := RateLimitConfig{ForwardedHeader: "X-Forwarded-For", EdgeViewerHeader: "x-forwarded-for"}
+
+	err := cfg.validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "walked from the right")
+}
+
+func TestRateLimit_EdgeViewerHeaderAcceptsAHeaderNameAndNothingElse(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{"CloudFront-Viewer-Address", "CF-Connecting-IP", "True-Client-IP", "X_Viewer"} {
+		cfg := RateLimitConfig{ForwardedHeader: "X-Forwarded-For", EdgeViewerHeader: name}
+		assert.NoError(t, cfg.validate(), name)
+	}
+	// A header VALUE pasted in, two names in one string, a list: all mis-sets
+	// whose symptom would otherwise be "every row says proxy".
+	for _, nonsense := range []string{"CloudFront-Viewer-Address: 1.2.3.4", "two headers", "CF-Connecting-IP,X-Real-IP"} {
+		cfg := RateLimitConfig{ForwardedHeader: "X-Forwarded-For", EdgeViewerHeader: nonsense}
+		assert.Error(t, cfg.validate(), nonsense)
+	}
+}

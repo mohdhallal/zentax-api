@@ -8,6 +8,7 @@ import (
 	apperrors "github.com/mohamadhallal/zentax-api/errors"
 	"github.com/mohamadhallal/zentax-api/logger"
 	"github.com/mohamadhallal/zentax-api/modules/identity/domain"
+	"github.com/mohamadhallal/zentax-api/platform/securityevent"
 )
 
 // THE FAILED-LOGIN LOCKOUT POLICY. This is the one place it is stated; STATUS.md
@@ -129,9 +130,9 @@ func (uc *UseCases) Login(ctx context.Context, input domain.LoginInput) (*domain
 	// threads. Reproduced deliberately and measured against the real router:
 	// correct guesses released into a burst of forty wrong ones were logged
 	// straight in (figures in STATUS.md); after this change, none are.
-	allowed := false
+	charge := attemptCharge{}
 	if loginCapable {
-		allowed = uc.consumeAttempt(ctx, user.ID, now)
+		charge = uc.consumeAttempt(ctx, user.ID, now)
 	}
 
 	// WHICH hash is verified is the whole security decision here, and there are
@@ -155,7 +156,7 @@ func (uc *UseCases) Login(ctx context.Context, input domain.LoginInput) (*domain
 	// the budget. The verification then decides nothing that the answer can
 	// reveal except on the one path that succeeds.
 	hash := dummyHash
-	if loginCapable && allowed {
+	if loginCapable && charge.allowed {
 		hash = *user.PasswordHash
 	}
 	ok := uc.verifyOnce(ctx, input.Password, hash, user)
@@ -171,7 +172,13 @@ func (uc *UseCases) Login(ctx context.Context, input domain.LoginInput) (*domain
 	// charge, which refuses rather than admits (consumeAttempt fails closed).
 	// The price is real and deliberate: a locked-out owner is told only "invalid
 	// email or password" and has to wait out the window (see the policy above).
-	if !loginCapable || !allowed || !ok {
+	if !loginCapable || !charge.allowed || !ok {
+		// The one place the refusal is written down. The ANSWER is byte-identical
+		// for every shape above — that is the enumeration defence — so the
+		// distinction the caller is denied has to exist somewhere, and this is
+		// where: ADR-0008's stream 2, keyed by account when the address resolved
+		// to one and by a keyed digest of the address when it did not.
+		uc.noteLoginRefusal(ctx, email, user, loginCapable, charge)
 		return nil, apperrors.NewUnauthorized(domain.MsgInvalidCredentials)
 	}
 
@@ -196,12 +203,26 @@ func (uc *UseCases) Login(ctx context.Context, input domain.LoginInput) (*domain
 		if err := uc.users.ResetFailedLogin(txCtx, user.ID); err != nil {
 			return err
 		}
-		t, _, err := uc.createSession(txCtx, user, user.TOTPEnabled, input.IP, input.UserAgent)
+		t, session, err := uc.createSession(txCtx, user, user.TOTPEnabled, input.IP, input.UserAgent)
 		if err != nil {
 			return err
 		}
 		token = t
-		return nil
+		// THE ONE SECURITY EVENT THAT RIDES A TRANSACTION. Everywhere else in
+		// this package a failure to record is logged and the answer stands (see
+		// securityevent.Note); here the record shares the transaction that mints
+		// the session, so a session cannot exist without the evidence that it
+		// was minted. That is the property a breach investigation rests on: the
+		// list of sessions and the list of successful authentications must not
+		// be able to disagree.
+		return uc.secevents.Record(txCtx, securityevent.Event{
+			Event:       securityevent.EventLoginSucceeded,
+			Outcome:     securityevent.OutcomeSuccess,
+			Method:      securityevent.MethodPassword,
+			TenantID:    user.TenantID,
+			PrincipalID: user.ID,
+			SessionID:   session.ID,
+		})
 	}); err != nil {
 		return nil, err
 	}
@@ -211,6 +232,29 @@ func (uc *UseCases) Login(ctx context.Context, input domain.LoginInput) (*domain
 		MFARequired:  user.TOTPEnabled,
 		User:         user,
 	}, nil
+}
+
+// attemptCharge is what one trip to the budget yields.
+//
+// The three facts are separate because they answer different questions and are
+// answered by different things. `allowed` and `engaged` come from the repository
+// statement (see domain.UserRepository.ConsumeLoginAttempt); `failed` is this
+// layer's, and is what "fail closed" looks like from the caller's side: an
+// attempt that could not be charged is refused, and is refused for a DIFFERENT
+// reason than a spent budget — which matters to nobody in the response (the
+// answer is identical) and matters a great deal to whoever reads the security
+// stream, because one is an attack and the other is a broken database.
+type attemptCharge struct {
+	// allowed: this attempt was inside the budget.
+	allowed bool
+	// engaged: this attempt is the one that stamped locked_until. Note it can
+	// be true on a SUCCESSFUL login — the threshold-th attempt is still
+	// verified, and a correct password then clears the stamp it just wrote — so
+	// only the refusal path may read it as "a lockout happened".
+	engaged bool
+	// failed: the charge itself errored, so the attempt was refused rather than
+	// admitted uncharged.
+	failed bool
 }
 
 // consumeAttempt spends one attempt from the account's budget and reports
@@ -228,25 +272,99 @@ func (uc *UseCases) Login(ctx context.Context, input domain.LoginInput) (*domain
 // address, so a 500 here — while an unknown address kept answering 401 — would
 // identify the address, and would hand an attacker a way to turn a rejected
 // password into a server error.
-func (uc *UseCases) consumeAttempt(ctx context.Context, userID string, now time.Time) bool {
-	allowed, err := uc.users.ConsumeLoginAttempt(ctx, userID, maxFailedAttempts, now, now.Add(lockoutDuration))
+func (uc *UseCases) consumeAttempt(ctx context.Context, userID string, now time.Time) attemptCharge {
+	allowed, engaged, err := uc.users.ConsumeLoginAttempt(ctx, userID, maxFailedAttempts, now, now.Add(lockoutDuration))
 	if err != nil {
 		logger.Log.WithContext(ctx).Error(
 			"identity: login attempt could not be charged — refusing it rather than admitting it uncharged",
 			logger.String("userId", userID), logger.Error(err))
-		return false
+		return attemptCharge{failed: true}
 	}
 	if !allowed {
-		// The only server-side trace that a lockout is in force. The response is
+		// A server-side trace that a lockout is in force. The response is
 		// deliberately indistinguishable from every other refusal, so without
 		// this line an operator investigating "I cannot sign in" — or an auditor
 		// asking whether the control ever fires — has nothing to look at. It
-		// leaks nothing: it is written to the log, never to the caller.
+		// leaks nothing: it is written to the log, never to the caller. The
+		// DURABLE record is the security event the refusal path writes; this
+		// line is the operational one, and logs are not evidence.
 		logger.Log.WithContext(ctx).Warn(
 			"identity: login refused — the account's attempt budget is spent and the lockout window is running",
 			logger.String("userId", userID))
 	}
-	return allowed
+	return attemptCharge{allowed: allowed, engaged: engaged}
+}
+
+// noteLoginRefusal writes what the 401 refuses to say (ADR-0008 stream 2).
+//
+// WHO IT NAMES. If the address resolved to an account, the account is the
+// correlator and the submitted address is not recorded at all. If it did not,
+// the address belongs to somebody who is not a customer and this ledger is
+// append-only — so it is correlated by a KEYED digest instead, which counts
+// attempts per address without the store ever holding one.
+//
+// THE LOCKOUT IS A SEPARATE EVENT, and it is the case that is easy to get wrong
+// twice over. It is recorded from `engaged`, which is true for the attempt that
+// ARMED the lock — not from `!allowed`, which is only ever true from the NEXT
+// request onwards, so a lockout that nobody probes again would leave no trace
+// at all. And it is recorded only HERE, on the refusal path: the threshold-th
+// attempt is still verified, so a correct password on it arms the lock, logs in,
+// and immediately clears the stamp — an "account locked out" event for a login
+// that succeeded would be a false alarm on the one signal an operator is meant
+// to page on.
+//
+// It records nothing about the password itself, and the reason is a class, so
+// the row cannot become a place where a mistyped password (frequently another
+// account's real one) is written down.
+func (uc *UseCases) noteLoginRefusal(
+	ctx context.Context, email string, user *domain.User, loginCapable bool, charge attemptCharge,
+) {
+	var tenantID, principalID string
+	if user != nil {
+		tenantID, principalID = user.TenantID, user.ID
+	}
+
+	if charge.engaged {
+		uc.note(ctx, securityevent.Event{
+			Event:       securityevent.EventLockoutEngaged,
+			Outcome:     securityevent.OutcomeFailure,
+			Method:      securityevent.MethodPassword,
+			Reason:      securityevent.ReasonBadCredential,
+			TenantID:    tenantID,
+			PrincipalID: principalID,
+		})
+	}
+
+	uc.note(ctx, securityevent.Event{
+		Event:       securityevent.EventLoginFailed,
+		Outcome:     securityevent.OutcomeFailure,
+		Method:      securityevent.MethodPassword,
+		Reason:      loginRefusalReason(user, loginCapable, charge),
+		TenantID:    tenantID,
+		PrincipalID: principalID,
+		// Ignored by the recorder whenever PrincipalID is set: an account named
+		// by id needs no second pseudonym for the same person.
+		Subject: email,
+	})
+}
+
+// loginRefusalReason classifies the refusal, in the same order the login path
+// decides it.
+func loginRefusalReason(user *domain.User, loginCapable bool, charge attemptCharge) string {
+	switch {
+	case user == nil:
+		return securityevent.ReasonNoSuchPrincipal
+	case !loginCapable:
+		// Disabled, invited without a password yet, or a service account. The
+		// account exists; nothing about it could have authenticated today.
+		return securityevent.ReasonNotLoginCapable
+	case charge.failed:
+		return securityevent.ReasonChargeFailed
+	case !charge.allowed:
+		return securityevent.ReasonLockedOut
+	default:
+		return securityevent.ReasonBadCredential
+	}
 }
 
 // verifyOnce performs the single argon2 verification every login path owes, and

@@ -24,6 +24,14 @@ const (
 	EnvRateLimitTrustedProxies  = "RATE_LIMIT_TRUSTED_PROXIES"
 	EnvRateLimitForwardedHeader = "RATE_LIMIT_FORWARDED_HEADER"
 
+	// EnvRateLimitEdgeViewerHeader names the header a content-delivery
+	// distribution in front of the WHOLE deployment writes the viewer's address
+	// into. It lives in this section because it configures the one address
+	// resolver both the limiter and the security stream share — "who is this
+	// request from" is one deployment fact and must not have two answers. See
+	// RateLimitConfig.EdgeViewerHeader.
+	EnvRateLimitEdgeViewerHeader = "RATE_LIMIT_EDGE_VIEWER_HEADER"
+
 	EnvRateLimitAnonymousRequests      = "RATE_LIMIT_ANONYMOUS_REQUESTS"
 	EnvRateLimitAnonymousBurst         = "RATE_LIMIT_ANONYMOUS_BURST"
 	EnvRateLimitAnonymousWindowSeconds = "RATE_LIMIT_ANONYMOUS_WINDOW_SECONDS"
@@ -138,6 +146,34 @@ type RateLimitConfig struct {
 	// X-Forwarded-For).
 	ForwardedHeader string `json:"forwardedHeader"`
 
+	// EdgeViewerHeader is the header a CONTENT-DELIVERY DISTRIBUTION in front
+	// of the whole deployment writes the viewer's address into
+	// ("CloudFront-Viewer-Address" in a cell; Cloudflare and Fastly have their
+	// own). Default EMPTY, which means "nothing of the sort is in front of us"
+	// and is correct for the self-host stack, a bare load balancer and every
+	// test.
+	//
+	// Why it is not just another forwarded header. Behind a CDN the forwarded
+	// chain reaching the origin ends "…, viewer, cdnEdge, loadBalancer": the
+	// right-to-left walk skips our load balancer and stops at the CDN EDGE,
+	// which is a public address, is not the caller, and changes between two
+	// requests of one session — so every security event in the cell would name
+	// an edge server while claiming to name a caller. The CDN's own header is
+	// the one thing in the request a viewer cannot forge (CloudFront strips
+	// client-supplied CloudFront-* headers and writes its own), and it needs no
+	// standing copy of the CDN's ~100 published ranges, which change without
+	// us.
+	//
+	// SETTING IT IS A DECLARATION, and it is enforced as one: a request that
+	// arrives without the header did not come through the distribution, so the
+	// chain is NOT used as a substitute and the request resolves to the socket
+	// peer marked as our own hop (clientaddr.FromProxy → client_ip_source
+	// 'proxy'), with one warning to the log. Better a row that says "we do not
+	// know who this was" than a plausible edge address nobody can tell from a
+	// caller. Set it only where a distribution really is in front — the cell's
+	// CDK does (infra/lib/api-stack.ts), the compose edition does not.
+	EdgeViewerHeader string `json:"edgeViewerHeader"`
+
 	// Anonymous is charged per client address on routes with no authenticated
 	// principal; Authenticated is charged per principal on tenant routes.
 	Anonymous     RateLimitRuleConfig `json:"anonymous"`
@@ -249,6 +285,15 @@ func (r *RateLimitRuleConfig) applyDefaults(requests, burst, windowSeconds int) 
 // refuses a trusted-proxy entry that is not an address or a CIDR — the value
 // whose typo would otherwise be discovered as "the limiter never fires".
 func (r RateLimitConfig) validate() error {
+	// The edge-viewer header is checked BEFORE the "is the limiter on" gate,
+	// because it configures attribution and attribution runs whether or not the
+	// limiter does — the resolver is built unconditionally (bootstrap). A typo
+	// here is not a slower limiter, it is a cell where every security event
+	// says "proxy" and names our own web tier.
+	if err := validateEdgeViewerHeader(r.EdgeViewerHeader, r.ForwardedHeader); err != nil {
+		return err
+	}
+
 	if !r.Active() {
 		return nil
 	}
@@ -317,6 +362,16 @@ func mergeRateLimitEnvOverrides(r *RateLimitConfig) {
 	if val := os.Getenv(EnvRateLimitForwardedHeader); val != "" {
 		r.ForwardedHeader = val
 	}
+	if val := os.Getenv(EnvRateLimitEdgeViewerHeader); val != "" {
+		// "none" is how a deployment says "there is no distribution in front of
+		// me" through an environment variable, where an empty value means "not
+		// set" and would leave a file-configured header standing.
+		if val == "none" {
+			r.EdgeViewerHeader = ""
+		} else {
+			r.EdgeViewerHeader = strings.TrimSpace(val)
+		}
+	}
 
 	setPositiveInt(EnvRateLimitAnonymousRequests, &r.Anonymous.Requests)
 	setPositiveInt(EnvRateLimitAnonymousBurst, &r.Anonymous.Burst)
@@ -329,6 +384,35 @@ func mergeRateLimitEnvOverrides(r *RateLimitConfig) {
 	setPositiveInt(EnvRateLimitVerifyMaxConcurrent, &r.Verification.MaxConcurrent)
 	setPositiveInt(EnvRateLimitVerifyMaxQueued, &r.Verification.MaxQueued)
 	setPositiveInt(EnvRateLimitVerifyMaxWaitMs, &r.Verification.MaxWaitMs)
+}
+
+// validateEdgeViewerHeader refuses a header name that is not one, and refuses
+// the one confusion that would be silent: naming the SAME header as the
+// forwarded chain. The two are read differently on purpose — the chain is
+// walked from the right, the viewer header is taken whole — so pointing both at
+// X-Forwarded-For would take the chain's leftmost entry, which is precisely the
+// value a client writes for itself.
+func validateEdgeViewerHeader(edge, forwarded string) error {
+	edge = strings.TrimSpace(edge)
+	if edge == "" {
+		return nil
+	}
+	if strings.EqualFold(edge, strings.TrimSpace(forwarded)) {
+		return fmt.Errorf(
+			"rateLimit.edgeViewerHeader (%s) must not be the same header as rateLimit.forwardedHeader (%q): the chain is walked from the right and a viewer header is taken whole, so pointing both at it would believe whatever the caller wrote",
+			EnvRateLimitEdgeViewerHeader, edge)
+	}
+	for _, c := range edge {
+		// RFC 9110 field-name is a token; this is the cheap version of it —
+		// anything with a space, a colon or a control character is a mis-set
+		// value (a header VALUE pasted in, or two names in one string).
+		if c <= ' ' || c >= 0x7f || strings.ContainsRune(":,;\"'()<>@\\/[]?={}", c) {
+			return fmt.Errorf(
+				"rateLimit.edgeViewerHeader %q is not a header name (set %s to one header name, e.g. CloudFront-Viewer-Address, or to \"none\")",
+				edge, EnvRateLimitEdgeViewerHeader)
+		}
+	}
+	return nil
 }
 
 // validateCIDROrAddr mirrors the parsing the ratelimit package does, so a typo

@@ -41,7 +41,7 @@ const maxUserAgentRunes = 200
 //     when the API is reached directly, and told the operator nothing when it
 //     is not. Where a client address genuinely IS the signal — brute force and
 //     credential stuffing on the unauthenticated routes — it is resolved
-//     spoof-resistantly by ratelimit.AddressResolver, and the ALB access log
+//     spoof-resistantly by clientaddr.Resolver, and the ALB access log
 //     (S3, its own lifecycle) is the artefact for network-level forensics.
 func RequestLoggerMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -89,8 +89,9 @@ func (s *AuditSuite) TestTrailChainAttributionAndAppendOnly() {
 		AssertStatus(s.T(), http.StatusOK)
 
 	// ---- Verify the trail. ----
-	const cols = `event_id, tenant_id, seq, actor_id, action, resource_type, resource_id,
-	              occurred_at, request_id, details, prev_hash, hash`
+	// audit.ChainColumns, not a copy of it: a verifier that reads a column list
+	// of its own drifts behind the envelope and reports sound rows as tampering.
+	const cols = audit.ChainColumns
 	var entries []audit.Entry
 	s.inTenant(tenant, func(tx *sqlx.Tx) {
 		s.Require().NoError(tx.Select(&entries,

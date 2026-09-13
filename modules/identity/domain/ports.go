@@ -29,6 +29,20 @@ type UserRepository interface {
 	//     and the attempt is allowed. The threshold-th attempt is the one that
 	//     arms the lock, not the first one refused by it.
 	//
+	// It reports TWO facts, because they are different ones. `allowed` is about
+	// THIS attempt (was it inside the budget). `engaged` is about the ACCOUNT:
+	// this attempt is the one that stamped locked_until, i.e. the lock came into
+	// being now. Only the statement that writes the stamp can know that, which
+	// is why it is returned rather than inferred: a caller watching only
+	// `allowed` sees a lockout no earlier than the FIRST REQUEST AFTER it, so a
+	// lockout nobody probes again is one nothing ever records (ADR-0008 stream
+	// 2 — the security stream reports `engaged`).
+	//
+	// `engaged` is not by itself "the account is locked out": the threshold-th
+	// attempt is still verified, and if the password is right the login succeeds
+	// and clears the stamp it just wrote. Only a caller that then REFUSES has
+	// witnessed a lockout.
+	//
 	// "now" is the caller's clock — the one that also produced lockUntil — so
 	// expiry is judged against the clock that wrote the stamp.
 	//
@@ -39,7 +53,7 @@ type UserRepository interface {
 	// other's hashing — and so that no answer can outrun the attempt it spent.
 	ConsumeLoginAttempt(
 		ctx context.Context, id string, lockThreshold int, now, lockUntil time.Time,
-	) (allowed bool, err error)
+	) (allowed, engaged bool, err error)
 	// ResetFailedLogin clears the counter AND any lock (including one whose
 	// window has already elapsed): a successful login leaves no residue.
 	ResetFailedLogin(ctx context.Context, id string) error

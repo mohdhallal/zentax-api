@@ -13,6 +13,7 @@ import (
 	"github.com/mohamadhallal/zentax-api/platform/authz"
 	"github.com/mohamadhallal/zentax-api/platform/crypto"
 	"github.com/mohamadhallal/zentax-api/platform/database"
+	"github.com/mohamadhallal/zentax-api/platform/securityevent"
 )
 
 // Member administration (ADR-0011/0012). Every method here runs on a tenant
@@ -362,7 +363,7 @@ func (uc *UseCases) recordCredentialRevocation(ctx context.Context, member *doma
 	if revoked == nil {
 		return nil
 	}
-	return uc.audit.Record(ctx, "member.credentials_revoked", "user", member.ID, map[string]any{
+	if err := uc.audit.Record(ctx, "member.credentials_revoked", "user", member.ID, map[string]any{
 		"credentialsRevoked": map[string]any{
 			"sessions":  revoked.Sessions,
 			"apiTokens": revoked.APITokens,
@@ -370,7 +371,36 @@ func (uc *UseCases) recordCredentialRevocation(ctx context.Context, member *doma
 		},
 		"principalKind": member.Kind,
 		"trigger":       domain.RevocationTriggerDisabled,
+	}); err != nil {
+		return err
+	}
+
+	// The same act, in the other stream (ADR-0008 stream 2), and not a
+	// duplicate: the trail entry above is the ACCESS REVIEW record — an
+	// administrator ended these credentials, and here are the counts by kind —
+	// while this one is the INCIDENT TIMELINE record: every live session of this
+	// principal stopped working at this instant. The two streams are read by
+	// different people asking different questions, and a breach timeline that
+	// had to be reconstructed by joining a tenant's business trail would be
+	// missing exactly the tenant-less rows that stream is for.
+	//
+	// ActorID is the administrator, PrincipalID the member whose access ended:
+	// the one event in the stream where they are different people, which is why
+	// the table carries both.
+	var actorID string
+	if req := app.GetRequester(ctx); req != nil && req.IsUser() {
+		actorID = req.ID
+	}
+	uc.note(ctx, securityevent.Event{
+		Event:       securityevent.EventSessionsRevoked,
+		Outcome:     securityevent.OutcomeSuccess,
+		Method:      securityevent.MethodSession,
+		Reason:      securityevent.ReasonMemberDisabled,
+		TenantID:    member.TenantID,
+		PrincipalID: member.ID,
+		ActorID:     actorID,
 	})
+	return nil
 }
 
 // SetRole REPLACES every grant of the member with the given one.
@@ -615,10 +645,36 @@ func (uc *UseCases) ensureTenantAdminRemains(ctx context.Context, tenantID strin
 // route uses, so RLS-scoped writes (audit_log) land in the right tenant chain.
 // Every failure is the same generic 400: the response never reveals whether a
 // token or email exists, nor why it was refused.
+//
+// IT IS THE ONE PUBLIC ROUTE THAT ESTABLISHES A CREDENTIAL, which is why every
+// outcome reaches the security stream (ADR-0008 stream 2). A redemption is the
+// birth certificate of a human principal — the moment an account that could not
+// sign in can — and the refusals are the only trace somebody working through
+// invite tokens leaves anywhere: they are answered with one uninformative 400,
+// they mint no session, and they write no audit entry, so without these events
+// the whole surface is invisible in both stores. The reason class is what the
+// response withholds and the operator is owed: unknown_credential is somebody
+// guessing, credential_expired is a real invitation that ran out its clock or
+// was spent, principal_not_usable is a token presented for an account that can
+// no longer redeem it.
+//
+// WHAT IS NOT RECORDED: anything derived from the token. Not the value, not its
+// hash, not a keyed digest of it — this ledger is append-only and cannot
+// unpublish a verifier for a live credential later, which is the same rule
+// AuthenticateToken follows. An unidentified refusal therefore correlates by
+// address alone, and that is exactly why the address has to be the caller's
+// rather than the load balancer's.
 func (uc *UseCases) AcceptInvite(ctx context.Context, input domain.AcceptInviteInput) (*domain.AcceptInviteResult, error) {
 	invalid := apperrors.NewValidation(domain.MsgInviteInvalid)
 	raw := strings.TrimSpace(input.Token)
 	if !strings.HasPrefix(raw, domain.InviteTokenPrefix) {
+		// Recorded, unlike the malformed Authorization header AuthenticateToken
+		// ignores: that arrives on every route from every client that guessed the
+		// scheme wrong, while a POST to /auth/accept-invite is an attempt at this
+		// specific credential door and nothing else. The volume is bounded by the
+		// anonymous budget and the verification gate the route already sits
+		// behind.
+		uc.noteInviteRejected(ctx, securityevent.ReasonUnknownCredential, "", "")
 		return nil, invalid
 	}
 	now := uc.now()
@@ -627,7 +683,17 @@ func (uc *UseCases) AcceptInvite(ctx context.Context, input domain.AcceptInviteI
 	if err != nil {
 		return nil, err
 	}
-	if token == nil || !token.IsUsable(now) {
+	if token == nil {
+		// Well-formed and matches no row: probing, or a link from another
+		// deployment. Nothing is known about who this is.
+		uc.noteInviteRejected(ctx, securityevent.ReasonUnknownCredential, "", "")
+		return nil, invalid
+	}
+	if !token.IsUsable(now) {
+		// A real invitation, past its life or already spent. Told apart from the
+		// unknown case on purpose: one is a person who needs a new invitation,
+		// the other is somebody guessing.
+		uc.noteInviteRejected(ctx, securityevent.ReasonCredentialExpired, token.TenantID, token.UserID)
 		return nil, invalid
 	}
 	user, err := uc.users.GetByID(ctx, token.UserID)
@@ -635,6 +701,10 @@ func (uc *UseCases) AcceptInvite(ctx context.Context, input domain.AcceptInviteI
 		return nil, err
 	}
 	if user == nil || user.TenantID != token.TenantID || user.IsService() || user.Status != domain.StatusInvited {
+		// The credential resolved; the account behind it cannot redeem it —
+		// already active, disabled, gone, or a machine principal. This is the row
+		// that says a revoked person's invitation link is still being clicked.
+		uc.noteInviteRejected(ctx, securityevent.ReasonPrincipalNotUsable, token.TenantID, token.UserID)
 		return nil, invalid
 	}
 
@@ -648,19 +718,31 @@ func (uc *UseCases) AcceptInvite(ctx context.Context, input domain.AcceptInviteI
 	txCtx := app.WithTenantID(ctx, token.TenantID)
 	txCtx = app.WithRequester(txCtx, &app.Requester{Kind: app.RequesterUser, ID: user.ID})
 
+	// A refusal decided INSIDE the transaction is classified here and recorded
+	// after it returns, never within it: the refusal rolls the transaction back,
+	// and an event written on it would roll back with it — the same reason the
+	// public /auth routes declare no transaction at all (securityevent.Record).
+	// Only the two lost-race branches set this; a repository error is a failure,
+	// not a refusal, and must not be filed as one.
+	refused := ""
 	err = uc.withinTx(txCtx, func(ctx context.Context) error {
 		ok, err := uc.invites.MarkAccepted(ctx, token.ID, now)
 		if err != nil {
 			return err
 		}
 		if !ok {
-			return invalid // lost a race with a concurrent accept / revoke
+			// Lost a race with a concurrent accept or a revocation: the token was
+			// live when it was read and is spent now.
+			refused = securityevent.ReasonCredentialExpired
+			return invalid
 		}
 		ok, err = uc.members.Activate(ctx, user.ID, hash, input.Name)
 		if err != nil {
 			return err
 		}
 		if !ok {
+			// The account stopped being invited between the read and the update.
+			refused = securityevent.ReasonPrincipalNotUsable
 			return invalid
 		}
 		// Any sibling tokens are spent too — one invite activates at most once.
@@ -686,7 +768,40 @@ func (uc *UseCases) AcceptInvite(ctx context.Context, input domain.AcceptInviteI
 			))
 	})
 	if err != nil {
+		if refused != "" {
+			uc.noteInviteRejected(ctx, refused, token.TenantID, user.ID)
+		}
 		return nil, err
 	}
+
+	// The redemption happened: recorded after the commit, on the caller's
+	// context rather than the transaction's, so a hiccup in the stream can
+	// neither undo an activation that has already succeeded nor abort the
+	// transaction that performed it. The hole that leaves — committed, then the
+	// process dies before the event lands — is logged loudly by Note, and is the
+	// trade every refusal on this stream already makes.
+	uc.note(ctx, securityevent.Event{
+		Event:       securityevent.EventInviteAccepted,
+		Outcome:     securityevent.OutcomeSuccess,
+		Method:      securityevent.MethodInviteToken,
+		TenantID:    token.TenantID,
+		PrincipalID: user.ID,
+	})
 	return &domain.AcceptInviteResult{Email: user.Email}, nil
+}
+
+// noteInviteRejected records a refused redemption of an invitation.
+//
+// Neither id is required: the token that matched nothing names no tenant and no
+// principal, which is the same shape as a failed login for an address nobody
+// recognises — and the reason audit_log could never hold these rows.
+func (uc *UseCases) noteInviteRejected(ctx context.Context, reason, tenantID, principalID string) {
+	uc.note(ctx, securityevent.Event{
+		Event:       securityevent.EventInviteRejected,
+		Outcome:     securityevent.OutcomeFailure,
+		Method:      securityevent.MethodInviteToken,
+		Reason:      reason,
+		TenantID:    tenantID,
+		PrincipalID: principalID,
+	})
 }

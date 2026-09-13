@@ -33,8 +33,9 @@ func TestAuditDetailsSuite(t *testing.T) {
 
 // ---- reading the trail ----
 
-const trailColumns = `event_id, tenant_id, seq, actor_id, action, resource_type, resource_id,
-                      occurred_at, request_id, details, prev_hash, hash`
+// audit.ChainColumns, not a copy of it: a verifier that reads a column list of
+// its own drifts behind the envelope and reports sound rows as tampering.
+const trailColumns = audit.ChainColumns
 
 // trail reads one tenant's whole chain, oldest first. audit_log is RLS'd, so
 // the read needs the tenant GUC bound on its own transaction.

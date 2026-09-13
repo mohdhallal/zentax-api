@@ -70,19 +70,19 @@ func ByAddress(path string) types.Middleware {
 				next.ServeHTTP(w, r)
 				return
 			}
-			addr, identified := l.resolver.ResolveClient(r)
-			if !identified {
+			client := l.resolver.Resolve(r)
+			if !client.Identifies() {
 				// The key would be shared by everyone behind an unappending
 				// proxy, so charging it would let one caller's burst refuse
 				// login for the whole installation. Skip this budget, say so
 				// once, and leave the per-account attempt budget and the
 				// verification bound — which do not depend on the address — to
 				// carry the route.
-				l.warnSharedAddress(r, addr)
+				l.warnSharedAddress(r, client.Addr)
 				next.ServeHTTP(w, r)
 				return
 			}
-			l.charge(w, r, next, keyAddress+addr, l.settings.Anonymous)
+			l.charge(w, r, next, keyAddress+client.Addr, l.settings.Anonymous)
 		})
 	}
 }

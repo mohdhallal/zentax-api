@@ -15,7 +15,7 @@ import { wireAlarm } from './alarms';
 import { EnvConfig, mailConfigurationSetName } from './config';
 import { LogGroups, Repositories } from './data-stack';
 import { makeExecutionRole, makeTaskRole } from './ecs-roles';
-import { apiDbEnvironment, apiDbSecrets, apiMailEnvironment, apiStorageEnvironment, runtimePlatformFor } from './cluster-stack';
+import { apiAuditExportEnvironment, apiDbEnvironment, apiDbSecrets, apiMailEnvironment, apiStorageEnvironment, runtimePlatformFor } from './cluster-stack';
 import { exportName } from './exports';
 import { API_PORT } from './network-stack';
 
@@ -32,6 +32,8 @@ export interface ApiStackProps extends cdk.StackProps {
   readonly appDbSecret: secretsmanager.ISecret;
   readonly authEncryptionKeySecret: secretsmanager.ISecret;
   readonly documentsBucket: s3.IBucket;
+  /** WORM audit archive (ADR-0008): Object Lock, COMPLIANCE mode (Data stack). */
+  readonly auditExportBucket: s3.IBucket;
   readonly repositories: Repositories;
   readonly logGroups: LogGroups;
   /** The environment's alarm topic (Data stack). */
@@ -59,20 +61,73 @@ export function apiPublicEnvironment(cfg: EnvConfig): Record<string, string> {
 }
 
 /**
- * Whose `X-Forwarded-For` the api believes — `RATE_LIMIT_TRUSTED_PROXIES`, the
- * Go config's `rateLimit.trustedProxies`.
+ * The header CloudFront writes the viewer's address and source port into
+ * ("198.51.100.9:53100"). Sent to the origin only when the distribution's
+ * origin-request policy forwards CloudFront's OWN headers — see
+ * apiTrustedProxyEnvironment.
+ */
+export const CLOUDFRONT_VIEWER_ADDRESS_HEADER = 'CloudFront-Viewer-Address';
+
+/**
+ * WHO THE API BELIEVES A REQUEST IS FROM — `RATE_LIMIT_TRUSTED_PROXIES` and
+ * `RATE_LIMIT_EDGE_VIEWER_HEADER`, the Go config's `rateLimit.trustedProxies`
+ * and `rateLimit.edgeViewerHeader`. One answer, used twice: it keys the rate
+ * limiter's per-client budget, and it is the "from where" on every row of the
+ * security-event stream (ADR-0008 stream 2). That second use is why this is
+ * worth the comment.
  *
  * The api's default is to trust nothing and charge every request to its socket
  * peer, because a broad private-range default turned out to be a bypass: any
  * caller that could reach the port was inside the trusted range and had its own
- * forged header believed. Here the cell names its own VPC, which is exactly the
- * set of hops in front of the api: the ALB, which APPENDS the real client
- * address on the right of anything the caller wrote, and the web tasks. So a
- * per-browser budget keys per browser, and a header forged from the internet is
- * ignored because its packets arrive from outside this range.
+ * forged header believed.
+ *
+ * 1. THE TRUSTED SET IS THE TIER IN FRONT, NOT THE WHOLE CELL. It used to be
+ *    `cfg.cidr`, which is not "the hops in front of the api" — it is everything
+ *    in the cell: every task, every sidecar, every one-off job. Trust is by
+ *    network range and nothing else, so anything inside the range can write any
+ *    client address into a header, have it believed, and have it written into
+ *    an append-only evidence store. It is now the PRIVATE subnets, where the
+ *    web tasks run — the api's only permitted socket peers (Network stack).
+ *    The public subnets, which hold the internet-facing ALB and the NAT
+ *    gateways, are out of it. What keeps the boundary honest is the security
+ *    group rather than this list: only the web tier's group may reach
+ *    API_PORT, so a forger has to already be running as the tier that is
+ *    legitimately in front.
+ *
+ * 2. THE DISTRIBUTION IS A HOP THE CHAIN WALK CANNOT SEE PAST. A cell is
+ *    reached CloudFront -> ALB -> web -> api, so the forwarded chain arriving
+ *    at the api ends "…, viewer, cloudFrontEdge, alb". Walked from the right it
+ *    skips our own ALB and stops at a CLOUDFRONT EDGE SERVER: a public address
+ *    that is not the caller and is not even stable across one session. Every
+ *    sign-in in a cell would name a POP, tagged as a believed client address.
+ *    Trusting CloudFront's published ranges instead would also work, but it
+ *    means carrying a copy of an AWS-managed prefix list of ~100 entries that
+ *    changes without us, and a stale copy silently reintroduces the bug. So the
+ *    api is told the header CloudFront writes the VIEWER into — the one part of
+ *    the request the viewer cannot forge, because CloudFront strips
+ *    client-supplied `CloudFront-*` headers and writes its own — and prefers it
+ *    over the chain.
+ *
+ *    THE HEADER HAS TO SURVIVE TWO HOPS THIS REPOSITORY DOES NOT OWN, and today
+ *    it survives neither. In the UI app's Edge stack the behaviour's
+ *    `originRequestPolicy` must be ALL_VIEWER_AND_CLOUDFRONT_2022 (it is plain
+ *    ALL_VIEWER, which forwards viewer headers but none of CloudFront's own);
+ *    and the UI app's api adapter forwards a fixed ALLOWLIST of headers, which
+ *    this one is not on. Until both land, a cell records
+ *    `client_ip_source = 'proxy'` — our own web tier, marked as NOT the caller —
+ *    with one warning per task in the log. That is deliberate: the api does not
+ *    paper over the absence with the chain, because the chain's answer in this
+ *    topology is an edge server, and a wrong address that reads as a caller is
+ *    worse in an append-only evidence store than an honest "we could not tell".
  */
-export function apiTrustedProxyEnvironment(cfg: EnvConfig): Record<string, string> {
-  return { RATE_LIMIT_TRUSTED_PROXIES: cfg.cidr };
+export function apiTrustedProxyEnvironment(cfg: EnvConfig, vpc: ec2.IVpc): Record<string, string> {
+  const inFrontOfTheApi = vpc
+    .selectSubnets({ subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS })
+    .subnets.map((subnet) => subnet.ipv4CidrBlock);
+  return {
+    RATE_LIMIT_TRUSTED_PROXIES: inFrontOfTheApi.join(','),
+    RATE_LIMIT_EDGE_VIEWER_HEADER: CLOUDFRONT_VIEWER_ADDRESS_HEADER,
+  };
 }
 
 /**
@@ -130,6 +185,27 @@ export class ApiStack extends cdk.Stack {
       actions: ['s3:ListBucket'],
       resources: [props.documentsBucket.bucketArn],
     }));
+    // The WORM audit archive (ADR-0008): ONE verb. The api may add an object
+    // and do nothing else to this bucket — no delete, no version verb, no
+    // `s3:PutObjectRetention` or `s3:PutObjectLegalHold` (the bucket's default
+    // retention applies itself at write time, so the writer never has to name
+    // it), no `s3:AbortMultipartUpload` (a failed upload is swept by the
+    // bucket's lifecycle rule instead, which is the same cleanup without a verb
+    // that ends in "Abort"), and no read: the exporter resumes from the sequence
+    // number in its own database, not from the archive. One verb is genuinely
+    // enough — the S3 adapter issues a single `PutObject` per segment
+    // (platform/storage/s3), and `s3:PutObject` would still cover the whole
+    // multipart path (create, upload part, complete) if a segment ever grew past
+    // the point where the SDK switches.
+    //
+    // The narrowness is belt to Object Lock's braces: COMPLIANCE mode would
+    // refuse a delete even if this statement carried one. Two independent
+    // mechanisms, so a change to either alone cannot make the archive mutable.
+    apiTaskRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'AuditExportPut',
+      actions: ['s3:PutObject'],
+      resources: [props.auditExportBucket.arnForObjects('*')],
+    }));
     props.dataKey.grantEncryptDecrypt(apiTaskRole);
     // Mail: the task role IS the SES credential, so this statement is the whole
     // of what the api may send — and it is narrow in three directions at once.
@@ -172,9 +248,10 @@ export class ApiStack extends cdk.Stack {
         // The public origin (CloudFront / custom domain) is the UI app's; it is
         // configured, not referenced — see EnvConfig.corsAllowedOrigins.
         ...apiStorageEnvironment(cfg, props.documentsBucket, cfg.corsAllowedOrigins),
+        ...apiAuditExportEnvironment(cfg, props.auditExportBucket),
         ...apiMailEnvironment(cfg),
         ...apiPublicEnvironment(cfg),
-        ...apiTrustedProxyEnvironment(cfg),
+        ...apiTrustedProxyEnvironment(cfg, props.vpc),
       },
       secrets: apiDbSecrets(props.appDbSecret, props.authEncryptionKeySecret),
       logging: ecs.LogDrivers.awsLogs({ logGroup: props.logGroups.api, streamPrefix: 'api' }),

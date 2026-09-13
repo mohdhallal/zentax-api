@@ -1,4 +1,5 @@
 import { Match } from 'aws-cdk-lib/assertions';
+import { CLOUDFRONT_VIEWER_ADDRESS_HEADER } from '../lib/api-stack';
 import { API_EXPORTS, exportName } from '../lib/exports';
 import { ENVS, exportNamesOf, PUBLIC_HOSTNAME_OF, resourcesOfType, synthEnv, synthEnvWith, taskDefinition, TIER_OF } from './helpers';
 
@@ -33,6 +34,7 @@ describe.each(ENVS)('ZenTax-%s-Api', (env) => {
       expect.arrayContaining([
         'APP_ENV', 'DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER', 'DB_SSLMODE',
         'CORS_ALLOWED_ORIGINS', 'STORAGE_DRIVER', 'STORAGE_S3_BUCKET', 'STORAGE_S3_REGION', 'LOG_FORMAT',
+        'AUDIT_EXPORT_ENABLED', 'AUDIT_EXPORT_STORAGE_DRIVER', 'AUDIT_EXPORT_STORAGE_S3_BUCKET', 'AUDIT_EXPORT_STORAGE_S3_REGION',
         'MAIL_DRIVER', 'MAIL_FROM_ADDRESS', 'MAIL_FROM_NAME', 'MAIL_SES_REGION', 'MAIL_SES_CONFIGURATION_SET',
       ]),
     );
@@ -53,6 +55,16 @@ describe.each(ENVS)('ZenTax-%s-Api', (env) => {
     expect(byName.LOG_FORMAT).toBe('json');
     expect(JSON.stringify(byName.STORAGE_S3_BUCKET)).toContain('DocumentsBucket');
     expect(JSON.stringify(byName.CORS_ALLOWED_ORIGINS)).toContain('https://');
+    // The WORM archive (ADR-0008). The driver is the load-bearing value: the Go
+    // default for an unset AUDIT_EXPORT_STORAGE_DRIVER is the *document* store,
+    // which is deletable — a cell that forgot this line would run an export
+    // that looks healthy and is worth nothing as evidence.
+    expect(byName.AUDIT_EXPORT_ENABLED).toBe('true');
+    expect(byName.AUDIT_EXPORT_STORAGE_DRIVER).toBe('s3');
+    expect(byName.AUDIT_EXPORT_STORAGE_S3_BUCKET).not.toEqual(byName.STORAGE_S3_BUCKET);
+    expect(JSON.stringify(byName.AUDIT_EXPORT_STORAGE_S3_BUCKET)).toContain('AuditExportBucket');
+    expect(JSON.stringify(byName.AUDIT_EXPORT_STORAGE_S3_BUCKET)).not.toContain('DocumentsBucket');
+    expect(byName.AUDIT_EXPORT_STORAGE_S3_REGION).toBe('eu-central-1');
 
     const secretNames = container.Secrets.map((s: any) => s.Name);
     expect(secretNames.sort()).toEqual(['AUTH_ENCRYPTION_KEY', 'DB_PASSWORD']);
@@ -77,17 +89,55 @@ describe.each(ENVS)('ZenTax-%s-Api', (env) => {
     expect(() => synthEnvWith(env, { envOverrides: { corsAllowedOrigins: 'https://a.example/path' } })).toThrow(/corsAllowedOrigins/);
   });
 
-  test('RATE_LIMIT_TRUSTED_PROXIES is the cell\'s own VPC range, so a header forged from outside it is ignored', () => {
+  test('RATE_LIMIT_TRUSTED_PROXIES is the tier in front of the api — the private subnets — and NOT the whole cell', () => {
     const byName = (t: import('aws-cdk-lib/assertions').Template) =>
       Object.fromEntries(taskDefinition(t, '-api').Properties.ContainerDefinitions[0].Environment.map((e: any) => [e.Name, e.Value]));
-    // The api trusts nothing by default (a broad private-range default was a
-    // bypass: any caller reaching the port had its own forged header believed).
-    // In a cell the hops in front of it are the ALB, which appends the real
-    // client address, and the web tasks — exactly this range.
-    const cidr = byName(api).RATE_LIMIT_TRUSTED_PROXIES;
-    expect(cidr).toMatch(/^10\.\d+\.0\.0\/16$/);
+
+    // Trust here is by network range and nothing else: whatever is inside it can
+    // write any client address into a header and have it believed, keyed on and
+    // WRITTEN INTO THE SECURITY-EVENT STREAM. So the set has to be the tier that
+    // actually sits in front of the api (the web tasks, in the private subnets)
+    // rather than every task, sidecar and one-off job in the cell.
+    const trusted: string[] = byName(api).RATE_LIMIT_TRUSTED_PROXIES.split(',');
+    expect(trusted.length).toBeGreaterThan(0);
+    for (const entry of trusted) {
+      // A /22 per AZ, from the Network stack's subnet configuration.
+      expect(entry).toMatch(/^10\.\d+\.\d+\.0\/22$/);
+    }
+    expect(trusted).not.toContain(`10.${trusted[0].split('.')[1]}.0.0/16`);
+
+    const vpcCidr = new RegExp(`^10\\.${trusted[0].split('.')[1]}\\.0\\.0/16$`);
+    expect(byName(api).RATE_LIMIT_TRUSTED_PROXIES).not.toMatch(vpcCidr);
+
+    // It moves with the cell's address space.
     const moved = synthEnvWith(env, { envOverrides: { cidr: '10.99.0.0/16' } });
-    expect(byName(moved.api).RATE_LIMIT_TRUSTED_PROXIES).toBe('10.99.0.0/16');
+    const movedTrusted: string[] = byName(moved.api).RATE_LIMIT_TRUSTED_PROXIES.split(',');
+    expect(movedTrusted.length).toBe(trusted.length);
+    for (const entry of movedTrusted) {
+      expect(entry).toMatch(/^10\.99\.\d+\.0\/22$/);
+    }
+    expect(movedTrusted).not.toContain('10.99.0.0/16');
+  });
+
+  // The blocker this pair exists for: behind CloudFront the forwarded chain's
+  // first untrusted entry from the right is a CloudFront EDGE SERVER, not the
+  // person — so without this header every security event in the cell would name
+  // a POP and call it a caller. The header is the one thing in the request the
+  // viewer cannot forge (CloudFront strips client-supplied CloudFront-* headers
+  // and writes its own).
+  test('RATE_LIMIT_EDGE_VIEWER_HEADER names the header the distribution states the viewer in', () => {
+    const byName = (t: import('aws-cdk-lib/assertions').Template) =>
+      Object.fromEntries(taskDefinition(t, '-api').Properties.ContainerDefinitions[0].Environment.map((e: any) => [e.Name, e.Value]));
+
+    expect(byName(api).RATE_LIMIT_EDGE_VIEWER_HEADER).toBe(CLOUDFRONT_VIEWER_ADDRESS_HEADER);
+    expect(CLOUDFRONT_VIEWER_ADDRESS_HEADER).toBe('CloudFront-Viewer-Address');
+
+    // DEPLOYMENT COUPLING, asserted here because nothing else in this repository
+    // can: the UI app's Edge stack must forward CloudFront's OWN headers
+    // (origin-request policy AllViewerAndCloudFrontHeaders-2022). Under plain
+    // AllViewer the header never reaches the origin, and the api then records
+    // `client_ip_source = 'proxy'` — our own web tier, marked as not the caller —
+    // plus a warning per process, rather than inventing an address.
   });
 
   // ---- ADR-0027: the api can send, as exactly one address ------------------
@@ -233,14 +283,22 @@ describe.each(ENVS)('ZenTax-%s-Api', (env) => {
     expect(logging.Options['awslogs-stream-prefix']).toBe('api');
   });
 
-  test('api task role: explicit object verbs + ListBucket on the documents bucket, KMS on the data key, no *Version and no wildcards', () => {
+  const apiTaskStatements = () => {
     const policies = resourcesOfType(api, 'AWS::IAM::Policy');
     const apiTaskPolicy = policies.find(([id]) => id.startsWith('apiTaskRole'));
     expect(apiTaskPolicy).toBeDefined();
-    const statements = apiTaskPolicy![1].Properties.PolicyDocument.Statement as any[];
+    return apiTaskPolicy![1].Properties.PolicyDocument.Statement as any[];
+  };
+  const actionsOf = (statement: any): string[] => (Array.isArray(statement.Action) ? statement.Action : [statement.Action]);
+
+  test('api task role: explicit object verbs + ListBucket on the documents bucket, KMS on the data key, no *Version and no wildcards', () => {
+    const statements = apiTaskStatements();
     const text = JSON.stringify(statements);
-    const actions = statements.flatMap((s) => (Array.isArray(s.Action) ? s.Action : [s.Action])) as string[];
-    const s3Actions = actions.filter((a) => a.startsWith('s3:')).sort();
+    const actions = statements.flatMap(actionsOf);
+    const s3Actions = [...new Set(actions.filter((a) => a.startsWith('s3:')))].sort();
+    // The whole S3 surface of the api, across both buckets. `s3:PutObject` is
+    // shared (documents and the audit export); every other verb below belongs to
+    // the documents bucket alone — see the audit-export test for that split.
     expect(s3Actions).toEqual(['s3:AbortMultipartUpload', 's3:DeleteObject', 's3:GetObject', 's3:ListBucket', 's3:PutObject']);
     expect(text).not.toContain('s3:DeleteObjectVersion');
     expect(text).not.toContain('s3:*');
@@ -259,6 +317,42 @@ describe.each(ENVS)('ZenTax-%s-Api', (env) => {
     }
     api.hasResourceProperties('AWS::IAM::Role', { RoleName: `zentax-${env}-api-task` });
     api.hasResourceProperties('AWS::IAM::Role', { RoleName: `zentax-${env}-api-exec` });
+  });
+
+  // ---- ADR-0008: the api may add to the WORM archive and nothing else -------
+
+  test('api task role can PUT to the audit-export bucket — one verb, on that bucket\'s objects only', () => {
+    const statements = apiTaskStatements();
+    const put = statements.find((s) => s.Sid === 'AuditExportPut');
+    expect(put).toBeDefined();
+    expect(put.Effect).toBe('Allow');
+    expect(actionsOf(put)).toEqual(['s3:PutObject']);
+    // `s3:PutObject` covers the whole multipart write path (create / upload part
+    // / complete), so even a large chain segment needs nothing more.
+    const resource = JSON.stringify(put.Resource);
+    expect(resource).toContain('AuditExportBucket');
+    expect(resource).toContain('/*');
+    expect(resource).not.toContain('DocumentsBucket');
+    expect(put.Condition).toBeUndefined();
+  });
+
+  test('api task role has NO way to remove, shorten or read back anything in the audit-export bucket', () => {
+    const statements = apiTaskStatements();
+    // Every statement that names the audit bucket, whatever its Sid.
+    const auditStatements = statements.filter((s) => JSON.stringify(s.Resource ?? '').includes('AuditExportBucket'));
+    expect(auditStatements).toHaveLength(1);
+    const granted = auditStatements.flatMap(actionsOf);
+    expect(granted).toEqual(['s3:PutObject']);
+    for (const forbidden of [
+      's3:DeleteObject', 's3:DeleteObjectVersion', 's3:BypassGovernanceRetention',
+      's3:PutObjectRetention', 's3:PutObjectLegalHold', 's3:PutBucketObjectLockConfiguration',
+      's3:AbortMultipartUpload', 's3:GetObject', 's3:ListBucket', 's3:DeleteBucket', 's3:PutBucketPolicy',
+    ]) {
+      expect(granted).not.toContain(forbidden);
+    }
+    // Nothing else in the whole api stack touches that bucket either.
+    const [, td] = resourcesOfType(api, 'AWS::ECS::TaskDefinition')[0];
+    expect(JSON.stringify(td)).toContain('AuditExportBucket'); // ...except as configuration
   });
 
   test('exports the Api part of the contract: service name, internal URL for the web tier, pinned task-definition ARN', () => {

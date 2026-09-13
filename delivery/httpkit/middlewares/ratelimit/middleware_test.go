@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/mohamadhallal/zentax-api/app"
+	"github.com/mohamadhallal/zentax-api/delivery/httpkit/clientaddr"
 	"github.com/mohamadhallal/zentax-api/delivery/httpkit/types"
 )
 
@@ -44,14 +45,14 @@ func loginRequest(remoteAddr, forwarded string) *http.Request {
 	r := httptest.NewRequest(http.MethodPost, "/auth/login", http.NoBody)
 	r.RemoteAddr = remoteAddr
 	if forwarded != "" {
-		r.Header.Set(DefaultForwardedHeader, forwarded)
+		r.Header.Set(clientaddr.DefaultForwardedHeader, forwarded)
 	}
 	return r
 }
 
 func testLimiter(t *testing.T, settings Settings, opts ...MemoryOption) *Limiter {
 	t.Helper()
-	res, err := NewAddressResolver([]string{"127.0.0.0/8", "10.0.0.0/8"}, "")
+	res, err := clientaddr.NewResolver([]string{"127.0.0.0/8", "10.0.0.0/8"}, "", "")
 	require.NoError(t, err)
 	return New(NewMemoryStore(opts...), NewGate(1, 0, time.Millisecond), res, settings)
 }
@@ -172,7 +173,7 @@ func authedRequest(principal, remoteAddr, forwarded string) *http.Request {
 	r := httptest.NewRequest(http.MethodGet, "/entities", http.NoBody)
 	r.RemoteAddr = remoteAddr
 	if forwarded != "" {
-		r.Header.Set(DefaultForwardedHeader, forwarded)
+		r.Header.Set(clientaddr.DefaultForwardedHeader, forwarded)
 	}
 	if principal != "" {
 		ctx := app.WithRequester(r.Context(), &app.Requester{Kind: app.RequesterUser, ID: principal})
@@ -272,7 +273,7 @@ func TestVerification_HoldsAndReleasesASlot(t *testing.T) {
 func TestVerification_BoundHoldsAcrossDistinctAddresses(t *testing.T) {
 	t.Parallel()
 
-	res, err := NewAddressResolver([]string{"10.0.0.0/8"}, "")
+	res, err := clientaddr.NewResolver([]string{"10.0.0.0/8"}, "", "")
 	require.NoError(t, err)
 	limiter := New(
 		NewMemoryStore(), NewGate(2, 4, 20*time.Millisecond), res,
@@ -331,7 +332,7 @@ func (errStore) Take(context.Context, string, Rule) (Decision, error) {
 func TestCharge_StoreFailure_FailsOpen(t *testing.T) {
 	t.Parallel()
 
-	res, err := NewAddressResolver([]string{"10.0.0.0/8"}, "")
+	res, err := clientaddr.NewResolver([]string{"10.0.0.0/8"}, "", "")
 	require.NoError(t, err)
 	limiter := New(errStore{}, NewGate(1, 0, time.Millisecond), res,
 		Settings{Anonymous: Rule{Limit: 1, Burst: 1, Window: time.Minute}})

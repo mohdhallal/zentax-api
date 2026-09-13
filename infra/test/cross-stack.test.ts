@@ -31,12 +31,15 @@ describe.each(ENVS)('ZenTax-%s (all API-owned stacks)', (env) => {
     expect(all).toContain(`zentax/${env}/app-db`);
     expect(all).toContain(`alias/zentax/${env}/data`);
     expect(all).toContain(`zentax-${env}-documents-160117555326-eu-central-1`);
+    expect(all).toContain(`zentax-${env}-audit-export-160117555326-eu-central-1`);
     expect(all).toContain(`zentax-${env}-api-task`);
     expect(all).not.toContain(`zentax-${otherEnv(env)}`);
     // "zentax-staging" / "zentax/production" only ever appear followed by "-eu" (the region label).
     expect(all).not.toMatch(/zentax[-/](staging|production)(?!-[a-z]{2}[-/."])/);
     // S3 bucket names are capped at 63 characters.
-    expect(`zentax-${env}-documents-160117555326-eu-central-1`.length).toBeLessThanOrEqual(63);
+    for (const bucket of [`zentax-${env}-documents-…`, `zentax-${env}-audit-export-…`]) {
+      expect(bucket.replace('…', '160117555326-eu-central-1').length).toBeLessThanOrEqual(63);
+    }
   });
 
   test('no log group in any template lacks RetentionInDays', () => {

@@ -31,6 +31,8 @@ import (
 	"context"
 	"sync"
 	"time"
+
+	"github.com/mohamadhallal/zentax-api/delivery/httpkit/clientaddr"
 )
 
 // Rule is a token-bucket budget: Limit requests per Window, with Burst tokens
@@ -109,10 +111,16 @@ type Settings struct {
 // It is per-application state (the acceptance suite runs several apps in one
 // process), so it travels to the route middlewares through the request context
 // rather than through a package-level variable — see Provide.
+//
+// The resolver is SHARED with the authentication event stream rather than owned
+// here (delivery/httpkit/clientaddr): "who is this request from" has exactly one
+// right answer per deployment, and the composition root builds it once —
+// independently of this limiter, which does not exist at all when rate limiting
+// is switched off.
 type Limiter struct {
 	store    Store
 	gate     *Gate
-	resolver *AddressResolver
+	resolver *clientaddr.Resolver
 	settings Settings
 	verify   map[string]struct{}
 	exempt   map[string]struct{}
@@ -124,7 +132,7 @@ type Limiter struct {
 
 // New builds a Limiter. A nil store or resolver makes every rate budget a
 // pass-through; a nil gate makes the verification bound a pass-through.
-func New(store Store, gate *Gate, resolver *AddressResolver, settings Settings) *Limiter {
+func New(store Store, gate *Gate, resolver *clientaddr.Resolver, settings Settings) *Limiter {
 	return &Limiter{
 		store:    store,
 		gate:     gate,
