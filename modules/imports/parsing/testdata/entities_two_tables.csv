@@ -1,0 +1,7 @@
+Gesellschaften (alt);Land;Bemerkung
+Zentral Beteiligungs GmbH;Deutschland;stillgelegt
+Zentral Österreich GmbH;Österreich;
+
+Entity Name;Country of incorporation;Parent company
+Acme Holding AG;Switzerland;
+Acme Deutschland GmbH;Germany;Acme Holding AG

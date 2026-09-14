@@ -1,0 +1,13 @@
+﻿Group Entity Register
+Extracted 03/09/2026 14:22 from the group consolidation system
+
+Entity Name,Legal name,Country of incorporation,Parent company,Financial Year End (MM-DD),Fiscal calendar,Tax residency,Cost centre
+Acme Holding AG,Acme Holding Aktiengesellschaft,Switzerland,,12-31,standard,Switzerland,CC-100
+Acme Deutschland GmbH,"Acme Deutschland GmbH, Munich",Germany,Acme Holding AG,12-31,Standard,Germany,CC-210
+
+Acme France SAS,Acme France S.A.S.,France,Acme Holding AG,12-31,4-4-5,France,CC-220
+Acme UK Limited,,United Kingdom,Acme Holding AG,04-05,standard,United Kingdom,CC-230
+Acme Retail Nordics AB,Acme Retail Nordics AB,Sweden,Acme Holding AG,2026-12-31,4-5-4,Sweden,CC-240
+,,,,,,,Entities: 5
+
+

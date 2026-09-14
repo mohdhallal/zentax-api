@@ -19,6 +19,10 @@ import (
 	entityobligationspg "github.com/mohamadhallal/zentax-api/modules/entityobligations/repositories/pg"
 	entityobligationsusecases "github.com/mohamadhallal/zentax-api/modules/entityobligations/usecases"
 	identitypg "github.com/mohamadhallal/zentax-api/modules/identity/repositories/pg"
+	importsdomain "github.com/mohamadhallal/zentax-api/modules/imports/domain"
+	importsparsing "github.com/mohamadhallal/zentax-api/modules/imports/parsing"
+	importspg "github.com/mohamadhallal/zentax-api/modules/imports/repositories/pg"
+	importsusecases "github.com/mohamadhallal/zentax-api/modules/imports/usecases"
 	obligationtypesdomain "github.com/mohamadhallal/zentax-api/modules/obligationtypes/domain"
 	obligationtypespg "github.com/mohamadhallal/zentax-api/modules/obligationtypes/repositories/pg"
 	obligationtypesusecases "github.com/mohamadhallal/zentax-api/modules/obligationtypes/usecases"
@@ -70,6 +74,8 @@ type Container struct {
 	TaskInstanceUseCases       taskinstancesdomain.TaskInstanceUseCases
 	DataTemplateUseCases       datatemplatesdomain.DataTemplateUseCases
 	DocumentUseCases           documentsdomain.DocumentUseCases
+	// ImportUseCases is spreadsheet ingest (PB-C5): upload → dry run → commit.
+	ImportUseCases importsdomain.ImportUseCases
 	// WorkflowStarter generates task instances from a workflow's templates
 	// (POST /workflows/{id}/start). Implemented by the task-instances generator.
 	WorkflowStarter workflowsdomain.Starter
@@ -136,6 +142,15 @@ func NewContainer(db database.ExecerPg, opts ...ContainerOption) *Container {
 		// storage seam; writes scoped through the owning workflow's entity.
 		DocumentUseCases: documentsusecases.NewUseCases(documentspg.NewDocumentRepo(db), deps.store, deps.maxUploadBytes, authorizer).
 			WithAudit(auditRec),
+		// Spreadsheet ingest (PB-C5). It takes the SAME authorizer and the SAME
+		// audit recorder as the single-record use cases above, which is what
+		// makes an imported record indistinguishable from a typed one — both in
+		// what it is allowed to be and in what the trail says about it. The file
+		// reader is the format seam: swapping in one that reads workbooks
+		// changes nothing else.
+		ImportUseCases: importsusecases.NewUseCases(
+			importspg.NewImportRepo(db), importsparsing.New(), authorizer,
+		).WithAudit(auditRec),
 		WorkflowStarter: generator,
 		ReportsReader:   reportspg.NewReportsRepo(db),
 		AuditLogReader:  auditlogpg.NewAuditLogRepo(db),

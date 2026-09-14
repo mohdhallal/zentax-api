@@ -1,0 +1,6 @@
+Entity Name,Legal name,Country,Parent company,Financial Year End
+Acme Holding AG,Acme Holding Aktiengesellschaft,Switzerland,,12-31
+#N/A,Acme Deutschland GmbH,Germany,Acme Holding AG,12-31
+Acme France SAS,#REF!,France,Acme Holding AG,12-31
+Acme UK Limited,Acme UK Ltd,#VALUE!,Acme Holding AG,04-05
+Acme Retail Nordics AB,Acme Retail Nordics AB,Sweden,Acme Holding AG,#N/A

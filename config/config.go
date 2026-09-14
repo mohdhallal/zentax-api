@@ -219,6 +219,13 @@ func (c *Config) validate() error {
 	if err := c.SecurityEvents.validate(); err != nil {
 		return fmt.Errorf("invalid security events config: %w", err)
 	}
+	// The import bounds, by the same rule again: an unbounded import is a
+	// denial of service with a spreadsheet, so every environment gets the caps
+	// whether or not its config file mentions them.
+	c.Imports.ApplyDefaults()
+	if err := c.Imports.validate(); err != nil {
+		return fmt.Errorf("invalid imports config: %w", err)
+	}
 	return nil
 }
 
@@ -355,6 +362,7 @@ func mergeEnvOverrides(conf *Config) {
 	mergeMailEnvOverrides(&conf.Mail)
 	mergeAuditExportEnvOverrides(&conf.AuditExport)
 	mergeSecurityEventsEnvOverrides(&conf.SecurityEvents)
+	mergeImportEnvOverrides(&conf.Imports)
 }
 
 // mergeAppEnvOverrides applies PUBLIC_BASE_URL over app.publicBaseUrl. An

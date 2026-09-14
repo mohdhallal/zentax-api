@@ -21,6 +21,14 @@ func DefaultConfig() *config.Config {
 			MaxUploadBytes: 2 << 20, // 2 MiB keeps the oversize test cheap (prod default: 25 MiB)
 			FS:             config.StorageFSConfig{Root: root},
 		},
+		// Spreadsheet ingest (PB-C5), bounded small on purpose: the suite has to
+		// prove that an oversized file and an over-long one are refused, and at
+		// the shipped defaults (2 MiB / 1,000 rows) each of those tests would
+		// have to build a file large enough to be slow to build and slow to send.
+		Imports: config.ImportConfig{
+			MaxFileBytes: 256 * 1024,
+			MaxRows:      50,
+		},
 		EnvName: "test",
 		App: config.AppConfig{
 			Env:          "test",

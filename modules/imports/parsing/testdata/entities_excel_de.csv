@@ -1,0 +1,8 @@
+Konzern-Entitäten;;;;;;
+Stand 03.09.2026;;;;;;
+
+Entity;Legal name;Country;Parent entity;FY end;Week ends on;Year end rule
+Zentral Beteiligungs GmbH;Zentral Beteiligungs GmbH;Germany;;12-31;;
+Zentral Österreich GmbH;Zentral Österreich Gesellschaft m.b.H.;Austria;Zentral Beteiligungs GmbH;12-31;;
+Zentral Retail España SL;Zentral Retail España S.L.;Spain;Zentral Beteiligungs GmbH;31.12.;;
+Zentral Logistik AG;Zentral Logistik AG;Switzerland;Zentral Beteiligungs GmbH;12-31;Sunday;last

@@ -1,0 +1,10 @@
+<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel">
+<head><meta http-equiv="Content-Type" content="text/html; charset=utf-8"><title>Entity Register</title></head>
+<body>
+<table border="1" cellspacing="0">
+<tr><th>Entity Name</th><th>Country</th><th>Financial Year End</th></tr>
+<tr><td>Acme Holding AG</td><td>Switzerland</td><td>12-31</td></tr>
+<tr><td>Acme Deutschland GmbH</td><td>Germany</td><td>12-31</td></tr>
+</table>
+</body>
+</html>

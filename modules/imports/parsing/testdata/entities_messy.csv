@@ -1,0 +1,6 @@
+Entity Name,Country,Parent company,Financial Year End,Fiscal calendar,Legal name,Region
+Acme Holding AG,Switzerland,,12-31,standard,Acme Holding Aktiengesellschaft,EMEA
+Acme  holding AG,Switzerland,,12-31,standard,Acme Holding AG,EMEA
+Acme Deutschland GmbH,,Acme Holding AG,12-31,standard,,EMEA
+Acme France SAS,France,Acme France SAS,03/04,custom,,EMEA
+Acme UK Limited,United Kingdom,Acme Holding AG,04-05,fiscal,,EMEA

@@ -1,0 +1,11 @@
+Tax obligation register - DRAFT
+Prepared 03/09/2026
+
+Entity,Obligation,Tax reference,Jurisdiction,Currency,Frequency,Fixed dates,Filing offset months,Filing offset days,Payment dates,Weekend rule,Reviewer
+Acme Holding AG,CIT-ANN,CHE-123.456.789,Switzerland,Swiss Francs,annual,09-30,,,,next-business-day,A. Meier
+Acme Deutschland GmbH,VAT-RET,DE123456789,Germany,EUR,each month,,0,10,,next-business-day,K. Schmidt
+Acme Deutschland GmbH,VAT-RET,DE123456789,Germany,EUR,monthly,,0,10,,none,K. Schmidt
+Acme France SAS,VAT-RET,FR12345678901,France,EUR,quarterly,04-30;07-31,1,0,,next-business-day,L. Dubois
+Acme UK Limited,,GB123456789,United Kingdom,GBP,quarterly,,1,7,,none,J. Hart
+Acme Retail Nordics AB,VAT-RET,SE556677889901,Sweden,SEK,bi-annual,03/04;09/04,,,08-31,none,-
+,,,,,,,,,,,Total rows: 6

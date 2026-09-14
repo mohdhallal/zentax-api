@@ -5,7 +5,18 @@
 > repository, `github.com/mohdhallal/zentax-ui`, formerly `TaxFlowReports`);
 > architecture decisions in `../zentax-ui/docs/adr/` (ADRs 0001–0027).
 
-**Last updated:** 2026-09-13 (**fifth pass** of the day, after the attribution wave — the records half. The fourth-pass line below still stands for what it covered; this pass re-derived the *record* claims from the code and found five kinds of drift: a resource-type count the code had outgrown (twelve → thirteen), `client_ip_source` described in terms that are wrong for a cell, `-sealed` described as covering one unbound-header case when it covers two, the runbook's Logs Insights fields and queries naming keys the API does not emit, and `security_events`' append-only trigger recorded with the wrong SQLSTATE (`ZT031`, not `ZT030` — which is `audit_export_segments`' freeze). The retention job landed during this pass and item 9 was rewritten from the code rather than from the plan. The two **deployment** properties the resolver rests on — the origin refusing anything that did not come through the distribution, and the self-hosted stack trusting its whole container network — are now written down here and in `../zentax-ui/docs/ops/environments.md` §6.10 rather than living in Go comments. *Fourth pass, kept:* after the hardening wave that followed the ADR-0008 security-stream + WORM-export work; the third-pass line claimed every *What is left* entry had been re-derived from the code at the end of that work; it had not — the stream had thirteen events where this file said eleven, and three columns it named nowhere. What follows was checked against the code, and the two auditor-facing procedures against real output rather than by reading them) · **Toolchain:** Go 1.27 via gvm (`~/.gvm/gos/go1.27`;
+**Last updated:** 2026-09-13 (**sixth pass** — the spreadsheet-ingest wave, **PB-C5**. The product's purpose
+is replacing spreadsheets and until this wave there was no way to read one: no upload, no bulk create on any
+module, and `cmd/seed-demo` refusing any tenant that already exists. `modules/imports` is upload → dry run →
+commit, all-or-nothing enforced by the **schema** rather than only by the use case, repeatable by a natural
+key that belongs to the records rather than to the import, and governed by the same capabilities, the same
+per-entity authorization and the same audit actions as a hand-typed write. ~~It is **not reachable**:
+`imports.RegisterRoutes` exists and nothing calls it, so the module is dead code in the binary.~~
+**— corrected inside the wave: `bootstrap/container.go` builds the use cases and `bootstrap/bootstrap.go:241`
+mounts the routes, so the module is live rather than dead code.** The wave briefly turned `go test` **red** — the trail writes a
+fourteenth resource type, `import_batch`, and `modules/auditlog/dto.ResourceTypes` listed thirteen —
+which the **PB-D10 build gate caught by name**, the first regression it has had the chance to catch;
+fixed the same day, `modules/auditlog` green. **Two records were found contradicting the code, and both were fixed rather than restated:** the migration described an `import_keys` table and an `externalRef` column the design had already dropped (the key belongs to the *records* — a folded entity name, an (entity, obligation type) pair — which is exactly what lets a file update an entity created in the UI), and **one field of twenty-five did not bind as its own header**, which matters because the downloadable sheet writes `Field.Name`: the product's own template would have carried a column its own parser ignored, on the column holding statutory payment dates. Now pinned by `modules/imports/domain/template_binding_test.go`. **What this file does not claim:** item 13 lists what was still open when the records were reconciled against the code — by running it, not by reading the diff. *Fifth pass, kept:* after the attribution wave — the records half. The fourth-pass line below still stands for what it covered; this pass re-derived the *record* claims from the code and found five kinds of drift: a resource-type count the code had outgrown (twelve → thirteen), `client_ip_source` described in terms that are wrong for a cell, `-sealed` described as covering one unbound-header case when it covers two, the runbook's Logs Insights fields and queries naming keys the API does not emit, and `security_events`' append-only trigger recorded with the wrong SQLSTATE (`ZT031`, not `ZT030` — which is `audit_export_segments`' freeze). The retention job landed during this pass and item 9 was rewritten from the code rather than from the plan. The two **deployment** properties the resolver rests on — the origin refusing anything that did not come through the distribution, and the self-hosted stack trusting its whole container network — are now written down here and in `../zentax-ui/docs/ops/environments.md` §6.10 rather than living in Go comments. *Fourth pass, kept:* after the hardening wave that followed the ADR-0008 security-stream + WORM-export work; the third-pass line claimed every *What is left* entry had been re-derived from the code at the end of that work; it had not — the stream had thirteen events where this file said eleven, and three columns it named nowhere. What follows was checked against the code, and the two auditor-facing procedures against real output rather than by reading them) · **Toolchain:** Go 1.27 via gvm (`~/.gvm/gos/go1.27`;
 the system `/usr/local/go` is a stale 1.19).
 
 **Gate** — from the repository root, main module then `acceptance/`:
@@ -81,9 +92,16 @@ would hurt first:
    a row lives thirteen to fourteen months. `deployment/docker/migrate.sh` still tops up
    `audit_log`, `sessions`, `api_tokens` and `invite_tokens` and not `security_events`, which is now
    correct — the job's create half is the mechanism. **Still decisions with no mechanism:** the
-   ADR-0007 purge (soft-delete exists on `documents` alone), and `audit_log` / `sessions`, which are
-   created ahead at deploy time and never aged out at all. And none of it has run in a deployed
-   cell. → *🟡 Platform / infra*
+   ADR-0007 purge (soft-delete exists on `documents` alone); `audit_log` / `sessions`, which are
+   created ahead at deploy time and never aged out at all; and, new with this wave,
+   `import_batches` / `import_rows` — a batch is kept forever, and `import_rows.payload` is customer
+   data (entity names, tax reference numbers) held in Postgres a second time. A tenant delete
+   cascades them; nothing else does. **Two tables joined that list on
+   2026-09-13:** `import_batches` and `import_rows`. The uploaded bytes are never stored, which is the
+   expensive half avoided — but `import_rows.payload` is the resolved record, so entity names and tax
+   reference numbers sit in Postgres a second time, for every dry run whether or not it was ever
+   committed, and nothing ages a batch out. A tenant delete cascades them; nothing else does.
+   And none of it has run in a deployed cell. → *🟡 Platform / infra*
 10. **Nothing has ever run against AWS.** The Object-Lock audit bucket, the SES identity and the
    whole ADR-0027 mail path are CDK and code; no cell has been deployed. → *🟡 Platform / infra*
 11. **A deployed cell would attribute nothing, and that costs a rate-limit control as well as the
@@ -109,6 +127,41 @@ would hurt first:
    only while the appending hop lies **outside** the trust set. The cell half of this was narrowed
    (private subnets instead of `cfg.cidr`); the compose half was not. Remedy and reasoning:
    `../zentax-ui/docs/ops/environments.md` §6.10. → *🟡 Platform / infra*
+13. **Spreadsheet ingest is complete and reachable (closed 2026-09-14).** Every item below was open when this entry was first written and is now struck, each verified by running the stack through the proxy on a scratch tenant rather than by reading the diff: the routes are mounted and mapped by the web tier, the client calls the per-kind routes the router declares, the planner merges (a two-column sheet over a 4-4-5 entity reported *unchanged*; an empty present column proposed one change with its before value on the wire), the template route answers `text/csv` as an attachment with `Field.Name` as its header row, and the false weekly warning is deleted. Four hardening passes ran over the feature (blockers six, one, two, two — all closed). **Known work, recorded rather than waved through:** the commit confirmation summarises counts only and never says *N fields would be erased*; a hand-typed text marker on a leading-zero reference is left as written; a genuine Windows-1252 export is refused with a Save-As instruction rather than guessed; the customer guide says nothing yet about the marker round trip. The struck history follows.** Listed last by number and **first by
+   urgency**, because the wave that built it is the same wave this line was written in. Each item
+   below was re-checked by running the code at the end of that wave, not by reading its diff.
+   (a) ~~**No route answers.** `modules/imports/router.go` mounts the `/imports` group and nothing
+   calls `imports.RegisterRoutes`~~ — **closed within the wave**: `bootstrap/container.go` builds
+   `ImportUseCases` (repo + file reader + authorizer) and `bootstrap/bootstrap.go:241` calls
+   `imports.RegisterRoutes` with its `handlers.Bounds`, so the twelve routes — six per kind:
+   `POST /imports/{kind}`, `GET /imports/{kind}`, `GET /imports/{kind}/template`,
+   `GET /imports/{kind}/{id}`, `GET /imports/{kind}/{id}/rows`, `POST /imports/{kind}/{id}/commit`,
+   registered **per kind** so each declares its own capability — are mounted and answer. (b) ~~**`go test` is red**: `import_batch` is a fourteenth audit
+   resource type and `modules/auditlog/dto.ResourceTypes` lists thirteen, so
+   `TestEveryRecordedResourceTypeIsFilterable` fails by name~~ — **closed the same day**; the PB-D10
+   gate caught its first regression and `import_batch` is now in `dto.ResourceTypes` and in the
+   `oneof=` tag beside it, so an import batch is filterable from `GET /audit-log` like any other
+   resource. (c) ~~**The web tier cannot reach it either**~~ — **closed 2026-09-14**: `../zentax-ui/server/go-proxy.ts` has no
+   `/api/imports/*` entry, and that repo's adapter calls paths the router does not declare (it posts
+   to `/api/imports` with a `kind` field and reads `/api/imports/template?kind=`, against a router
+   registered per kind). (d) ~~**An update replaces where it must merge.**~~ — **closed 2026-09-14** `EntityDraft`/`ObligationDraft`
+   now carry `Spoke` — the set of fields the file actually had a column for — and `Said()` reads it,
+   but `usecases/plan.go` does not consult either: `entityChanges` compares every field
+   unconditionally, so a column a sheet does not have is read as an empty one and proposes clearing
+   the stored value. Both customer and operator documentation describe the merge, which makes this
+   the one open item where **the record is ahead of the code** on a behaviour that destroys data
+   rather than merely confusing. (e) ~~**`GET /imports/{kind}/template` returns the column set as
+   JSON**~~ — **closed 2026-09-14**, so nothing in the product hands out a blank sheet — while the client's
+   `downloadTemplate()` saves that JSON body to disk as `.csv`. The decision is that the sheet is
+   rendered server-side from `Fields()` with a CSV content type and an attachment disposition, the
+   JSON staying available for the column table the wizard renders: one source, two renderings.
+   (f) ~~**A false warning fires on every weekly obligation.** `ErrWeeklyNotSchedulable` tells the~~ — **closed 2026-09-14**
+   customer ZenTax "cannot yet generate periods for it: starting a workflow on this obligation will
+   be refused". `shared/deadline` generates weekly periods for `standard` (`deadline.go:257`) and for
+   every week-based pattern (`:345`), pinned by five assertions in `calendar_test.go`; only a
+   `custom` calendar refuses, and it refuses every periodicity, not weekly. Ruled: delete the message
+   and its call site (`obligation_row.go:93-95`) rather than narrow it.
+   → *🟠 Domain features still to build*
 
 ---
 
@@ -720,6 +773,114 @@ would hurt first:
    refuse new versions / metadata / deletion / new attachments (409 "…awaiting approval…") until the
    reviewer decides, mirroring the task-instance freeze (acceptance asserts submit → 409s → approve →
    409s). Presigned transfer stays the ADR-0022 escape hatch for very large files.
+11. **imports** (`modules/imports`, 2026-09-13, PB-C5) — spreadsheet ingest: the path by which a
+   customer's existing tax book enters the product, as **upload → dry run → commit**. Built in full
+   and **mounted** (`bootstrap/container.go` + `bootstrap/bootstrap.go:241`); three gaps remain —
+   see *What is left*, item 13, before quoting any of this as finished.
+   **Shape.** The upload *is* the dry run (one request, not two), so the file is parsed exactly once
+   and the stored plan cannot disagree with a second parse. Parsing and validation are server-side
+   (ADR-0001): a row is measured by the same bounds the single-record body carries and then run
+   through `entities/domain.ValidateFiscalConfig` — literally the function `entities/usecases.Create`
+   calls — so a row that imports cleanly could have been typed in by hand.
+   **Reading half** (`domain` + `parsing`, no database): `.csv` (comma / semicolon / tab / pipe, in
+   UTF-8, UTF-16 or Windows-1252) and `.xlsx` via `xuri/excelize` — **the bytes decide the format,
+   not the extension**; a legacy `.xls` and a password-protected workbook are refused by name. The
+   header row is *found*, not assumed (scored over the first `MaxHeaderScanRows` = 25 rows, so a
+   title block and a "generated on" stamp are normal); headers bind on an exact match of
+   `NormalizeHeader` against a per-field alias list — case, spacing, punctuation and a parenthesised
+   hint cost nothing, and **matching is never fuzzy**, because a column bound to the wrong field is
+   the one import mistake a customer cannot see in the data. An unknown column is reported as *not
+   imported*, never guessed at; a field claimed by two columns, or a missing KEY column (`name`;
+   `entity` + `obligationType`), is a file error. A required NON-key column (`country`,
+   `periodicity`) the file does not carry refuses only the rows that would **create** a record —
+   raised per row by the planner, the half that can see which those are — so a correction sheet
+   carrying the key and the one column being corrected is accepted, and the stored value answers
+   for everything the file does not mention. **Bounds** are the deployment's, not the reader's: `config/imports.go` defaults to
+   **2 MiB** and **1 000 data rows** (`IMPORT_MAX_FILE_BYTES` / `IMPORT_MAX_ROWS`; ceilings 64 MiB and
+   100 000, above which the boot is *refused*), both defaulted in code so a config file that says
+   nothing still boots bounded, and both enforced **before** the file is parsed — a longer file is
+   refused, never truncated. `domain.MaxRows` = 10 000 is only the fallback for an upload that names
+   no cap. Neither number is arbitrary: the whole file is held in memory while it is parsed (a
+   spreadsheet cannot be validated as a stream — the header may be on row twelve and a duplicate key
+   on row nine hundred), and the row cap is bounded by `server.writeTimeoutMs` (30 s) at a measured
+   ~2 ms per write-plus-chained-audit-entry, so **raising `maxRows` means raising the write timeout
+   with it**. Beneath those, the reader's own defences are 256 columns, 32 sheets and 128 MiB
+   unzipped. A date cell arrives as a
+   date rather than a serial number, and `ParseMonthDay` accepts `12-31`, `12/31`, `2026-12-31`,
+   `31 Dec`, `December 31` — and **refuses an ambiguous slash pair** (`05/04`) naming both readings,
+   because a financial year end eleven months out is the one mistake an import must not make.
+   **Severity is the contract**: an *error* is a value the single-record route would reject, or a
+   file that cannot be read without guessing; everything else is a *warning* and never blocks.
+   `ParseResult.Committable` is the all-or-nothing rule and the only question the commit asks.
+   **Committing half** (`usecases`): natural keys are facts about the records, not private to the
+   importer — an entity is its **folded name** (`NormalizeKey`: outer space gone, inner runs
+   collapsed, case folded, **and Unicode folded to NFC** so the precomposed `ü` Windows writes and
+   the `u` + combining diaeresis macOS leaves are one key rather than two entities nothing on the
+   page can tell apart), an obligation the **(entity, obligation type)** pair — so an import
+   updates a record someone created in the UI. A folded name
+   matching two entities comes back `Ambiguous` and those rows are refused rather than guessed
+   (`entities` has never carried uniqueness on `name`) — which now includes a tenant that already
+   holds two such twins: the refusal names the problem instead of attaching the row to whichever
+   byte sequence the file happened to match. Parents resolve against this file *and* the
+   tenant, with a topological sort and a cycle check. Every write goes through the **same
+   `Authorizer` call against the same capability** as the equivalent single-record use case —
+   `entity:write`, `entity_obligation:write` — and a re-parent authorizes the **destination** as well
+   as the record, which the single-record route does not yet do. Lookups are deliberately *not*
+   narrowed by read scope: resolving blind and letting the authorizer refuse is the only ordering in
+   which a scoped user is told "you may not write this" instead of the false "this does not exist".
+   The dry run stores the resolved record **and the version it was computed from**; the commit
+   re-resolves everything inside its own transaction and refuses the whole batch if any row now
+   resolves differently.
+   **Model** (migration `20260913000036_imports`, HASH(tenant_id) × 16, composite PKs/FKs, RLS
+   forced): `import_batches` (file name, byte size, **sha256** — the uploaded **bytes are never
+   stored**, so ingest adds no blob to encrypt, back up or erase — the plan's counts, `status`
+   validated|rejected|committed, and who committed it when) + `import_rows` (the frozen plan: row
+   number, action create|update|unchanged|invalid, `natural_key`, `target_id` +
+   `target_updated_at`, the resolved `payload`, `changed_fields`, `issues`). The honesty properties
+   are **schema-enforced, not remembered**: a `CHECK` ties `status` to `invalid_count`, and two
+   `BEFORE UPDATE` triggers (**SQLSTATE `ZT036`**, `SECURITY INVOKER`, so a superuser is bound too)
+   make an `import_rows` row unupdatable and allow a batch only `validated → committed`. `rejected`
+   is terminal.
+   **Audit** — `entity.created` / `entity.updated` / `entity_obligation.created` /
+   `entity_obligation.updated` with a **deliberate copy** of the two modules' own ADR-0008
+   whitelists, field for field and redaction for redaction, so the trail cannot tell whether a change
+   arrived by file or by hand; plus `import.validated` and `import.committed` on the new resource type
+   **`import_batch`**, which `modules/auditlog/dto.ResourceTypes` and its `oneof=` tag now carry, so a
+   batch is filterable from `GET /audit-log` (it was not, for a few minutes — item 13b).
+   An `unchanged` row writes nothing and records nothing, which is what makes a repeated import
+   provably a no-op.
+   **Routes** (`/imports`, registered once per kind so each declares its own capability):
+   `POST /imports/{entities|entity-obligations}` (multipart, upload = dry run),
+   `GET /imports/{kind}`, `GET /imports/{kind}/template`, `GET /imports/{kind}/{id}`,
+   `GET /imports/{kind}/{id}/rows`, `POST /imports/{kind}/{id}/commit`. Upload and commit take the
+   kind's **write** capability, the four reads its **read** capability. Mounted and answering; the web
+   tier in front of them is not wired — item 13c.
+   **What it does NOT import, by decision:** workflows and task instances (generated work, not
+   recorded facts — a customer's workflow columns are reported as not imported rather than dropped),
+   obligation types (an unknown code is a row error; creating one would be a third resource under a
+   capability the caller was never checked for), status, `customPeriods`, and `additionalDeadlines`.
+   **Three gaps, all open at the time of writing — and (iii) is a false statement to a customer.**
+   (i) An update **replaces** the whole
+   record: `usecases/plan.go` compares every field and `repositories/pg/sql.go` `SET`s all nine
+   entity columns, while the row reader returns nil for *absent column* and *blank cell* alike — so a
+   two-column `name, country` top-up proposes clearing every legal name and tax residency, and
+   resets a 4-4-5 calendar to `standard`. The ruling is **merge**: an absent column is not touched, a
+   present-but-empty cell clears a nullable field, and a blank on a non-nullable field is a no-op on
+   update. That needs a tri-state in the reader, a narrowed comparison, and a partial `UPDATE`.
+   (ii) `GET /imports/{kind}/template` returns `TemplateJSON` — the field set with aliases and help —
+   so **nothing in the product hands out a blank sheet**; `../zentax-ui/client/src/api/imports.ts`
+   saves that JSON body to disk as `…-template.csv`. Worked examples live meanwhile at
+   `../zentax-ui/client/public/import-templates/`, and the customer guide is
+   `../zentax-ui/docs/import/entities-and-obligations.md`.
+   `domain/template_binding_test.go` pins the invariant that makes a generated sheet safe: every
+   field's own name must bind back to that field, for every field of every target. It was written
+   because the invariant had already been broken once — `paymentFixedDates` did not bind as its own
+   header, so the generated sheet would have carried a column its own parser ignored.
+   (iii) `ErrWeeklyNotSchedulable` warns on **every** weekly obligation row that periods cannot be
+   generated and a workflow start will be refused. The engine's own tests say otherwise — weekly
+   periods are produced for `standard` and every week-based pattern — so this is a false claim shown
+   to a customer; ruled for deletion rather than narrowing, and the documentation was written to the
+   engine's behaviour instead.
 
 Migrations (sqitch): `tenants`, `entities`, `obligation_types`, `entity_obligations`,
 `workflows`, `workflow_tasks`, `task_instances`, `task_instance_approvals`, `actor_columns`,
@@ -727,8 +888,12 @@ Migrations (sqitch): `tenants`, `entities`, `obligation_types`, `entity_obligati
 `documents`, `data_templates`, `fiscal_calendar`, `tenant_timezone`, `canonical_tax_keys`,
 `pagination_indexes`, `attested_delete_guard`, `storage_reclaim`, `session_mfa_attempts`,
 `audit_chain_version`, `outbox_messages`, `outbox_payload_at_rest`, `outbox_dead_releases_dedupe`,
-`audit_export_segments`, `security_events`
-(+ boilerplate `appschema`, `internal_api_keys`, `nexus_accounts_api_keys`).
+`audit_export_segments`, `security_events`, `security_event_attribution`, `audit_credential`,
+`audit_request_id_shape`, `security_event_retention`, `imports`
+(+ boilerplate `appschema`, `internal_api_keys`, `nexus_accounts_api_keys`) — **37 named + 3
+boilerplate = 40** scripts in `migrations/deploy/`, re-counted on 2026-09-13. The four
+`security_event_attribution` / `audit_credential` / `audit_request_id_shape` /
+`security_event_retention` scripts of the attribution wave had never been added to this list.
 
 **Auth / identity (Increments A + B):** first-party email/password + server-side sessions + TOTP MFA
 (`modules/identity`, `platform/crypto`); `RequireSession` supplies the tenant from the session (the
@@ -1589,6 +1754,29 @@ measured figures say so.
   oversight: an assignee picker needs the names.
 
 ### 🟠 Domain features still to build
+- **Spreadsheet ingest (PB-C5) — BUILT and MOUNTED 2026-09-13; three gaps, one of them a false
+  statement to a customer.** `modules/imports` is complete and live (see *Domain modules #11*): the
+  reading half, the committing half, the schema, the audit envelopes, the routes, and — closed inside
+  the wave — the wiring that mounts them (`bootstrap/container.go`, `bootstrap/bootstrap.go:241`).
+  What is left, each re-checked by running the code rather than reading its diff:
+  **(a) the web tier cannot reach it** — `../zentax-ui/server/go-proxy.ts` has no `/api/imports/*`
+  entry, and that repo's adapter calls a shape the router does not declare (it posts to
+  `/api/imports` with a `kind` field and reads `/api/imports/template?kind=`, against routes
+  registered per kind), so the wizard is wired to nothing;
+  **(b) an update replaces where the ruling is merge** — the drafts now carry `Spoke` (the fields the
+  file actually had a column for) and `Said()` reads it, but `usecases/plan.go` consults neither, so
+  an absent column is read as an empty one and proposes clearing the stored value. **Both the customer
+  guide and the operator runbook describe the merge**, which makes this the one place where the
+  records are ahead of the code on a behaviour that loses data rather than merely confusing;
+  **(c) `GET /imports/{kind}/template` returns JSON**, so the product hands out no blank sheet, while
+  the client saves that JSON body to disk as `.csv` — the decision is a server-rendered CSV with an
+  attachment disposition, the JSON staying for the wizard's column table.
+  Separately and worth its own line: **`ErrWeeklyNotSchedulable` fires on every weekly obligation and
+  its claim is false** — `shared/deadline` generates weekly periods for `standard` and every
+  week-based pattern, and only a `custom` calendar refuses (and refuses every periodicity, not
+  weekly). Ruled for deletion. Until (a)–(c) are closed the feature is reachable but not usable from
+  the product, and **nothing downstream — least of all "live pilots on real data" — may be gated on it
+  yet**. → item 13 above.
 - ~~**Notifications / e-mail / digests — nothing exists.**~~ — **BUILT 2026-09-13 (ADR-0027,
   `5da2cdf`), and this file never said so.** `platform/mail` is the provider seam with three adapters
   (`log`, `smtp`, `ses`), `platform/outbox` is the transactional queue a mutation writes on its own

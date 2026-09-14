@@ -1,0 +1,6 @@
+Entity,Obligation type,Tax reference number,Jurisdiction,Currency,Filing frequency,Deadline type,Filing offset months,Filing offset days,Payment offset months,Payment offset days,Fixed dates,Weekend adjustment,Owner
+Acme Holding AG,CIT-ANN,CHE-123.456.789,Switzerland,CHF,annual,fixed,,,,,09-30,next-business-day,A. Meier
+Acme Deutschland GmbH,VAT-RET,DE123456789,Germany,EUR,monthly,,0,10,0,10,,next-business-day,K. Schmidt
+Acme Deutschland GmbH,CIT-ANN,DE123456789,Germany,eur,annual,,,,,,07-31,none,K. Schmidt
+Acme France SAS,VAT-RET,FR12345678901,France,EUR,quarterly,period_offset,1,0,,,,next-business-day,L. Dubois
+Acme UK Limited,VAT-RET,GB123456789,United Kingdom,GBP,quarterly,,1,7,1,7,,none,J. Hart

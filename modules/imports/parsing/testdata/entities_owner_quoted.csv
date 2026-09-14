@@ -1,0 +1,8 @@
+﻿Group Entity Register — Germany
+Extracted 03/09/2026 09:14 from the group consolidation system
+
+Entity Name,Legal name,Country of incorporation,Parent company,Financial Year End (MM-DD),Owner
+Müller Holding GmbH,Müller Holding GmbH,Germany,,12-31,"A. Meier" (group tax)
+Müller Vertrieb GmbH,Müller Vertrieb GmbH,Germany,Müller Holding GmbH,12-31,K. Schmidt
+Müller Süd GmbH,Müller Süd GmbH,Germany,Müller Holding GmbH,12-31,L. Dubois
+Müller Ost GmbH,Müller Ost GmbH,Germany,Müller Holding GmbH,12-31,J. Hart

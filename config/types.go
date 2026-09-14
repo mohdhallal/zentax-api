@@ -24,6 +24,7 @@ type Config struct {
 	Mail             MailConfig             `json:"mail"`
 	AuditExport      AuditExportConfig      `json:"auditExport"`
 	SecurityEvents   SecurityEventsConfig   `json:"securityEvents"`
+	Imports          ImportConfig           `json:"imports"`
 }
 
 // Storage drivers (ADR-0022): the filesystem adapter (self-host default, tests)

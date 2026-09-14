@@ -31,6 +31,8 @@ import (
 	identityhandlers "github.com/mohamadhallal/zentax-api/modules/identity/handlers"
 	identitypg "github.com/mohamadhallal/zentax-api/modules/identity/repositories/pg"
 	identityusecases "github.com/mohamadhallal/zentax-api/modules/identity/usecases"
+	"github.com/mohamadhallal/zentax-api/modules/imports"
+	importshandlers "github.com/mohamadhallal/zentax-api/modules/imports/handlers"
 	notificationsdomain "github.com/mohamadhallal/zentax-api/modules/notifications/domain"
 	notificationspg "github.com/mohamadhallal/zentax-api/modules/notifications/repositories/pg"
 	notificationsusecases "github.com/mohamadhallal/zentax-api/modules/notifications/usecases"
@@ -232,6 +234,14 @@ func New(cfg *config.Config, mode types.ServerMode) (*App, error) {
 	taskinstances.RegisterRoutes(router, ctr.TaskInstanceUseCases)
 	datatemplates.RegisterRoutes(router, ctr.DataTemplateUseCases)
 	documents.RegisterRoutes(router, ctr.DocumentUseCases, cfg.Storage.MaxUploadBytes)
+	// The import bounds come from configuration through the accessors, which
+	// default: a Config assembled in code (the acceptance harness) never calls
+	// ApplyDefaults, and an unbounded import is a denial of service with a
+	// spreadsheet, so the bound may not depend on anyone remembering.
+	imports.RegisterRoutes(router, ctr.ImportUseCases, importshandlers.Bounds{
+		MaxFileBytes: cfg.Imports.FileBytes(),
+		MaxRows:      cfg.Imports.Rows(),
+	})
 	reports.RegisterRoutes(router, ctr.ReportsReader)
 	auditlog.RegisterRoutes(router, ctr.AuditLogReader)
 

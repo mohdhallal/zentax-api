@@ -1,0 +1,7 @@
+Steuerpflichten-Register;;;;;;;;
+Stand 03.09.2026;;;;;;;;
+
+Entity;Tax type;Tax reference;Jurisdiction;Currency;Filing frequency;Filing days after period end;Weekend rule;Fixed dates
+Müller Holding GmbH;CIT-ANN;DE811234567;Germany;EUR;annual;;next-business-day;07-31
+Müller Vertrieb GmbH;VAT-RET;DE811234568;Germany;EUR;bi-annual;;next-business-day;07-31;01-31
+Müller Süd GmbH;VAT-RET;DE811234569;Germany;EUR;monthly;10;next-business-day;
