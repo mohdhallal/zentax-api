@@ -42,8 +42,25 @@ checks out without `infra/node_modules`.)
 
 ## What is left — read this first
 
-Everything above *What is missing / remaining* is finished work. In rough order of what
-would hurt first:
+Everything above *What is missing / remaining* is finished work.
+
+**Status so far (2026-09-14).** The backend is feature-complete for a pilot and has never been
+deployed. Every item the 2026-09-12 pre-pilot audit raised is closed except the deploy: rate
+limiting, the second-factor budget and the delete guards (`419efe6`); log redaction, the
+before/after audit envelopes, read-side scope and the verifiable chain (`42ef6b7` and after);
+the mail seam, outbox and scheduler (ADR-0027); the security stream, its retention job and the
+write-once export; and the spreadsheet import, reachable end to end (`9cfead5`). 128 packages
+build, vet and test; the acceptance suite is green as the non-`BYPASSRLS` role; the migration
+ledger stands at 40; the demo oracle reports 0 differences over 403 checks and the scale oracle
+0 over 3,105, the latter re-run three times on 2026-09-14 including once across an API restart.
+**Ranked by what would hurt first today, the list below reads: 10 (nothing has run on AWS —
+the next box in the plan is the non-root identity, `PB-A3`), then 11 and 12 (attribution in a
+cell and in Compose), then 2 (the jobs nobody wrote: session reaping, the purge, partition
+top-up, import-batch ageing), then 8 (the security stream is unreadable through the product),
+9 (retention windows that are still decisions), 3 (recovery, brokered by WorkOS in Phase 2),
+and 4–7 (the amendment chain, holidays, the Phase 2 platform items, two legacy frontend
+surfaces).** Item 13 is closed and kept for its history. In the order the items were written,
+roughly what would hurt first when they were:
 
 1. **Holes in code that already shipped** — deleting a workflow or an entity cascades through
    approved records, and `entity_closure` is still unpopulated so read scope walks the parent chain
